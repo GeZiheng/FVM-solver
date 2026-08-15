@@ -23,20 +23,20 @@ void VtkWriter::write(const std::string& filename,
   Scalar originY = mesh.yMin();
 
   // VTK ImageData is node-based, so dimensions are (nx+1, ny+1, 1)
-  file << "<?xml version=\"1.0\"?\n";
-  file << "<VTKFile type=\"ImageData\" version=\"1.0\" byte_order=\"LittleEndian\"\n";
+  file << "<?xml version=\"1.0\"?>\n";
+  file << "<VTKFile type=\"ImageData\" version=\"1.0\" byte_order=\"LittleEndian\">\n";
   file << "<ImageData WholeExtent=\"0 " << nx << " 0 " << ny << " 0 0\"\n";
   file << "             Origin=\"" << originX << " " << originY << " 0.0\"\n";
-  file << "             Spacing=\"" << dx << " " << dy << " 1.0\"\n";
-  file << "<Piece Extent=\"0 " << nx << " 0 " << ny << " 0 0\"\n";
+  file << "             Spacing=\"" << dx << " " << dy << " 1.0\">\n";
+  file << "<Piece Extent=\"0 " << nx << " 0 " << ny << " 0 0\">\n";
 
   // Cell data
-  file << "<CellData\n";
+  file << "<CellData>\n";
 
   // Scalar fields
   for (const auto& [name, field] : scalarFields) {
     if (!field) continue;
-    file << "  <DataArray type=\"Float64\" Name=\"" << name << "\" format=\"ascii\"\n";
+    file << "  <DataArray type=\"Float64\" Name=\"" << name << "\" format=\"ascii\">\n";
     for (Index j = 0; j < ny; ++j) {
       for (Index i = 0; i < nx; ++i) {
         file << (*field)(i, j);
@@ -44,13 +44,13 @@ void VtkWriter::write(const std::string& filename,
       }
       file << "\n";
     }
-    file << "  </DataArray\n";
+    file << "  </DataArray>\n";
   }
 
   // Vector fields
   for (const auto& [name, field] : vectorFields) {
     if (!field) continue;
-    file << "  <DataArray type=\"Float64\" Name=\"" << name << "\" NumberOfComponents=\"3\" format=\"ascii\"\n";
+    file << "  <DataArray type=\"Float64\" Name=\"" << name << "\" NumberOfComponents=\"3\" format=\"ascii\">\n";
     for (Index j = 0; j < ny; ++j) {
       for (Index i = 0; i < nx; ++i) {
         auto [u, v] = (*field)(mesh.cellIndex(i, j));
@@ -59,13 +59,13 @@ void VtkWriter::write(const std::string& filename,
       }
       file << "\n";
     }
-    file << "  </DataArray\n";
+    file << "  </DataArray>\n";
   }
 
-  file << "</CellData\n";
-  file << "</Piece\n";
-  file << "</ImageData\n";
-  file << "</VTKFile\n";
+  file << "</CellData>\n";
+  file << "</Piece>\n";
+  file << "</ImageData>\n";
+  file << "</VTKFile>\n";
 
   file.close();
 }
