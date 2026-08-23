@@ -8,12 +8,14 @@
 using fvm::core::Scalar;
 using fvm::core::Vector;
 
-namespace fvm::math {
+namespace fvm::math
+{
 
-struct SolverConfig {
-  Scalar tolerance = 1e-6;
-  int maxIterations = 1000;
-  bool verbose = false;
+struct SolverConfig
+{
+    Scalar tolerance = 1e-6;
+    int maxIterations = 1000;
+    bool verbose = false;
 };
 
 /**
@@ -22,26 +24,39 @@ struct SolverConfig {
  * Implementations hide the backend library (Eigen, AMGCL, etc.).
  * Use factory functions to create concrete instances.
  */
-class LinearSolver {
+class LinearSolver
+{
 public:
-  virtual ~LinearSolver() = default;
+    virtual ~LinearSolver() = default;
 
-  /**
-   * @brief Solve A * x = b.
-   * @return Solution vector x.
-   */
-  virtual Vector solve(const SparseMatrix& A, const Vector& b) = 0;
+    /**
+     * @brief Solve A * x = b.
+     * @return Solution vector x.
+     */
+    virtual Vector solve(const SparseMatrix& A, const Vector& b) = 0;
 
-  void setConfig(const SolverConfig& cfg) { config_ = cfg; }
-  const SolverConfig& config() const { return config_; }
+    void setConfig(const SolverConfig& cfg)
+    {
+        config_ = cfg;
+    }
+    const SolverConfig& config() const
+    {
+        return config_;
+    }
 
-  int lastIterations() const { return lastIterations_; }
-  Scalar lastResidual() const { return lastResidual_; }
+    int lastIterations() const
+    {
+        return lastIterations_;
+    }
+    Scalar lastResidual() const
+    {
+        return lastResidual_;
+    }
 
 protected:
-  SolverConfig config_;
-  int lastIterations_ = -1;
-  Scalar lastResidual_ = -1.0;
+    SolverConfig config_;
+    int lastIterations_ = -1;
+    Scalar lastResidual_ = -1.0;
 };
 
 // Factory functions ---------------------------------------------------------

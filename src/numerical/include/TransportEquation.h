@@ -16,16 +16,23 @@ using fvm::core::Vector;
 using fvm::core::VectorField;
 using fvm::math::SparseMatrix;
 
-namespace fvm::numerical {
+namespace fvm::numerical
+{
 
 /**
  * @brief Assembled linear system A * phi = b (unfinalized matrix).
  */
-struct EquationSystem {
-  SparseMatrix A;
-  Vector b;
+struct EquationSystem
+{
+    SparseMatrix A;
+    Vector b;
 
-  explicit EquationSystem(Index n) : A(n, n), b(n) { b.setZero(); }
+    explicit EquationSystem(Index n)
+        : A(n, n)
+        , b(n)
+    {
+        b.setZero();
+    }
 };
 
 /**
@@ -50,12 +57,12 @@ struct EquationSystem {
  * @param Sp       Linear part of the volumetric source (optional, must be <= 0).
  */
 EquationSystem assembleTransport(const CartesianMesh& mesh,
-                                 const VectorField& velocity,
-                                 const ScalarField& gamma,
-                                 Scalar rho,
-                                 ConvectionScheme scheme,
-                                 const BoundaryField& bc,
-                                 const ScalarField* Sc = nullptr,
-                                 const ScalarField* Sp = nullptr);
+    const VectorField& velocity,
+    const ScalarField& gamma,
+    Scalar rho,
+    ConvectionScheme scheme,
+    const BoundaryField& bc,
+    const ScalarField* Sc = nullptr,
+    const ScalarField* Sp = nullptr);
 
 } // namespace fvm::numerical

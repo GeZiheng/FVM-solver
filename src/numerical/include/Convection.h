@@ -12,14 +12,16 @@ using fvm::core::Vector;
 using fvm::core::VectorField;
 using fvm::math::SparseMatrix;
 
-namespace fvm::numerical {
+namespace fvm::numerical
+{
 
 /**
  * @brief Convection interpolation scheme for face values.
  */
-enum class ConvectionScheme {
-  Upwind, ///< First-order upwind (bounded, diagonally dominant)
-  Central ///< Second-order central differencing (may be unbounded)
+enum class ConvectionScheme
+{
+    Upwind, ///< First-order upwind (bounded, diagonally dominant)
+    Central ///< Second-order central differencing (may be unbounded)
 };
 
 /**
@@ -39,11 +41,11 @@ enum class ConvectionScheme {
  * @note A and b are accumulated into (not reset); A must not be finalized.
  */
 void assembleConvection(const CartesianMesh& mesh,
-                        const VectorField& velocity,
-                        Scalar rho,
-                        ConvectionScheme scheme,
-                        const BoundaryField& bc,
-                        SparseMatrix& A,
-                        Vector& b);
+    const VectorField& velocity,
+    Scalar rho,
+    ConvectionScheme scheme,
+    const BoundaryField& bc,
+    SparseMatrix& A,
+    Vector& b);
 
 } // namespace fvm::numerical

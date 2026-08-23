@@ -3,7 +3,8 @@
 #include <Eigen/Core>
 #include <cstddef>
 
-namespace fvm::core {
+namespace fvm::core
+{
 
 using Scalar = double;
 using Index = std::size_t;

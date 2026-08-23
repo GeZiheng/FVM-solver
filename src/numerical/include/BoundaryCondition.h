@@ -7,7 +7,8 @@
 
 using fvm::core::Scalar;
 
-namespace fvm::numerical {
+namespace fvm::numerical
+{
 
 /**
  * @brief Boundary condition type.
@@ -15,12 +16,16 @@ namespace fvm::numerical {
  * - Dirichlet: fixed value phi_b at the boundary face.
  * - Neumann  : fixed outward-normal derivative d(phi)/dn at the boundary face.
  */
-enum class BCType { Dirichlet,
-                    Neumann };
+enum class BCType
+{
+    Dirichlet,
+    Neumann
+};
 
-struct BoundaryCondition {
-  BCType type = BCType::Neumann;
-  Scalar value = 0.0;
+struct BoundaryCondition
+{
+    BCType type = BCType::Neumann;
+    Scalar value = 0.0;
 };
 
 /**
@@ -31,37 +36,39 @@ struct BoundaryCondition {
  *
  * Default: zero-flux (Neumann, g = 0) on all sides.
  */
-class BoundaryField {
+class BoundaryField
+{
 public:
-  BoundaryField() = default;
+    BoundaryField() = default;
 
-  void set(int side, BCType type, Scalar value)
-  {
-    checkSide(side);
-    bcs_[static_cast<size_t>(side)] = BoundaryCondition{ type, value };
-  }
+    void set(int side, BCType type, Scalar value)
+    {
+        checkSide(side);
+        bcs_[static_cast<size_t>(side)] = BoundaryCondition{ type, value };
+    }
 
-  const BoundaryCondition& get(int side) const
-  {
-    checkSide(side);
-    return bcs_[static_cast<size_t>(side)];
-  }
+    const BoundaryCondition& get(int side) const
+    {
+        checkSide(side);
+        return bcs_[static_cast<size_t>(side)];
+    }
 
-  // Side index constants (match CartesianMesh face convention)
-  static constexpr int East = 0;
-  static constexpr int North = 1;
-  static constexpr int West = 2;
-  static constexpr int South = 3;
+    // Side index constants (match CartesianMesh face convention)
+    static constexpr int East = 0;
+    static constexpr int North = 1;
+    static constexpr int West = 2;
+    static constexpr int South = 3;
 
 private:
-  static void checkSide(int side)
-  {
-    if (side < 0 || side > 3) {
-      throw std::invalid_argument("Boundary side must be in [0, 3]");
+    static void checkSide(int side)
+    {
+        if (side < 0 || side > 3)
+        {
+            throw std::invalid_argument("Boundary side must be in [0, 3]");
+        }
     }
-  }
 
-  std::array<BoundaryCondition, 4> bcs_{};
+    std::array<BoundaryCondition, 4> bcs_{};
 };
 
 } // namespace fvm::numerical

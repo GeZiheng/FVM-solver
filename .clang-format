@@ -1,70 +1,117 @@
 ---
-AlignAfterOpenBracket: Align
-AlignConsecutiveAssignments: false
-AlignConsecutiveDeclarations: false
-AlignEscapedNewlinesLeft: false
-AlignOperands: true
-AlignTrailingComments: true
-AllowAllParametersOfDeclarationOnNextLine: true
-AllowShortBlocksOnASingleLine: true
-AllowShortCaseLabelsOnASingleLine: true
-AllowShortFunctionsOnASingleLine: All
-AllowShortIfStatementsOnASingleLine: true
-AllowShortLoopsOnASingleLine: true
-AlwaysBreakAfterReturnType: None
-AlwaysBreakBeforeMultilineStrings: true
-AlwaysBreakTemplateDeclarations: true
-BinPackArguments: true
-BinPackParameters: true
-BreakBeforeBinaryOperators: All
-BreakBeforeBraces: WebKit
-BreakBeforeTernaryOperators: false
-BreakConstructorInitializersBeforeComma: false
-BreakStringLiterals: true
-ConstructorInitializerAllOnOneLineOrOnePerLine: true
-Cpp11BracedListStyle: false
-DerivePointerAlignment: false
-IncludeCategories:
- - Regex:           '^("llvm|llvm-c|clang|clang-c)/'
-   Priority:        2
- - Regex:           '^(<|"(gtest|isl|json)/)'
-   Priority:        3
- - Regex:           '.*'
-   Priority:        1
-IndentCaseLabels: false
-IndentWrappedFunctionNames: true
-KeepEmptyLinesAtTheStartOfBlocks: true
-MaxEmptyLinesToKeep: 1
+Language: Cpp
+BasedOnStyle: LLVM
+
+# ---------------------------------------------------------------------------
+# OpenFOAM coding style
+# https://develop.openfoam.com/Development/openfoam/-/wikis/coding-style
+# ---------------------------------------------------------------------------
+
+# 4-space indentation, no tabs
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+ConstructorInitializerIndentWidth: 4
+AccessModifierOffset: -4
+IndentCaseLabels: true
+IndentWrappedFunctionNames: false
 NamespaceIndentation: None
-ObjCSpaceAfterProperty: false
-ObjCSpaceBeforeProtocolList: false
-PenaltyBreakBeforeFirstCallParameter: 150
-PenaltyBreakComment: 100
-PenaltyBreakFirstLessLess: 0
-PenaltyBreakString: 100
-PenaltyExcessCharacter: 1000000
-PenaltyReturnTypeOnItsOwnLine: 200
+CompactNamespaces: false
+
+# Line length: 80 columns
+ColumnLimit: 80
+PenaltyExcessCharacter: 100
+PenaltyReturnTypeOnItsOwnLine: 10000
+PenaltyBreakBeforeFirstCallParameter: 1000
+PenaltyBreakOpenParenthesis: 500
+
+# Allman braces: opening brace on its own line
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: true
+  AfterControlStatement: Always
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterStruct: true
+  AfterUnion: true
+  AfterExternBlock: true
+  BeforeCatch: true
+  BeforeElse: true
+  BeforeLambdaBody: true
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+
+# No single-line shortcuts
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: None
+
+# Function declarations/definitions
+AlwaysBreakAfterReturnType: None
+AlwaysBreakTemplateDeclarations: Yes
+BinPackArguments: false
+BinPackParameters: false
+AlignAfterOpenBracket: DontAlign
+AllowAllParametersOfDeclarationOnNextLine: false
+
+# Constructor initializers:
+#   className::className(...)
+#   :
+#       base(...),
+#       member_(...)
+#   {}
+BreakConstructorInitializers: BeforeComma
+ConstructorInitializerAllOnOneLineOrOnePerLine: false
+PackConstructorInitializers: Never
+
+# Line breaking
+BreakBeforeBinaryOperators: All
+BreakBeforeTernaryOperators: true
+BreakStringLiterals: true
+AlwaysBreakBeforeMultilineStrings: true
+
+# Spacing
 PointerAlignment: Left
-ReflowComments: true
-SortIncludes: true
+DerivePointerAlignment: false
+ReferenceAlignment: Left
+SpaceBeforeParens: ControlStatements
+SpaceAfterTemplateKeyword: false
 SpaceAfterCStyleCast: false
 SpaceBeforeAssignmentOperators: true
-SpaceBeforeParens: ControlStatements
-SpaceInEmptyParentheses: false
-SpacesBeforeTrailingComments: 1
-SpacesInAngles: false
-SpacesInCStyleCastParentheses: false
+SpaceBeforeCpp11BracedList: false
+SpacesInParens: Never
+SpacesInAngles: Never
 SpacesInContainerLiterals: false
-SpacesInParentheses: false
-SpacesInSquareBrackets: false
-Standard: Cpp11
-AccessModifierOffset: -2
-JavaScriptQuotes: Single
-JavaScriptWrapImports: false
-UseTab: Never
-TabWidth: 2
-ConstructorInitializerIndentWidth: 2
-ContinuationIndentWidth: 2
-IndentWidth: 2
-ColumnLimit: 0
+Cpp11BracedListStyle: false
+
+# Alignment
+AlignOperands: Align
+AlignTrailingComments: true
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+SpacesBeforeTrailingComments: 1
+
+# Comments
+ReflowComments: true
+FixNamespaceComments: false
+
+# Includes: OpenFOAM manages include order manually
+SortIncludes: Never
+SortUsingDeclarations: false
+
+# Empty lines
+KeepEmptyLinesAtTheStartOfBlocks: true
+MaxEmptyLinesToKeep: 1
+SeparateDefinitionBlocks: Leave
+
+Standard: c++17
 ...

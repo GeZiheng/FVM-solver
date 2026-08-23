@@ -7,7 +7,8 @@
 using fvm::core::Index;
 using fvm::core::Scalar;
 
-namespace fvm::math {
+namespace fvm::math
+{
 
 /*
  * @brief Lightweight wrapper around Eigen sparse matrix.
@@ -16,27 +17,28 @@ namespace fvm::math {
  * LinearSolver implementations access the native Eigen matrix via
  * a dedicated accessor.
  */
-class SparseMatrix {
+class SparseMatrix
+{
 public:
-  SparseMatrix(Index rows, Index cols);
+    SparseMatrix(Index rows, Index cols);
 
-  void insert(Index row, Index col, Scalar value);
-  void finalize();
-  void setZero();
+    void insert(Index row, Index col, Scalar value);
+    void finalize();
+    void setZero();
 
-  Index rows() const;
-  Index cols() const;
-  Index nnz() const;
+    Index rows() const;
+    Index cols() const;
+    Index nnz() const;
 
-  /**
-   * @brief Access underlying Eigen matrix (for solver implementations).
-   */
-  const Eigen::SparseMatrix<Scalar>& native() const;
+    /**
+     * @brief Access underlying Eigen matrix (for solver implementations).
+     */
+    const Eigen::SparseMatrix<Scalar>& native() const;
 
 private:
-  Eigen::SparseMatrix<Scalar> mat_;
-  std::vector<Eigen::Triplet<Scalar>> triplets_;
-  bool finalized_ = false;
+    Eigen::SparseMatrix<Scalar> mat_;
+    std::vector<Eigen::Triplet<Scalar>> triplets_;
+    bool finalized_ = false;
 };
 
 } // namespace fvm::math

@@ -11,10 +11,12 @@ using fvm::core::ScalarField;
 using fvm::core::Vector;
 using fvm::math::SparseMatrix;
 
-namespace fvm::numerical {
+namespace fvm::numerical
+{
 
 /**
- * @brief Assemble the diffusion operator -div(gamma * grad(phi)) into A * phi = b.
+ * @brief Assemble the diffusion operator -div(gamma * grad(phi)) into A * phi =
+ * b.
  *
  * Interior faces use central differencing:
  *   D_f = gamma_f * S_f / d_PN   (gamma_f: arithmetic mean of cell values)
@@ -32,9 +34,9 @@ namespace fvm::numerical {
  *       beforehand if assembling a fresh system. A must not be finalized.
  */
 void assembleDiffusion(const CartesianMesh& mesh,
-                       const ScalarField& gamma,
-                       const BoundaryField& bc,
-                       SparseMatrix& A,
-                       Vector& b);
+    const ScalarField& gamma,
+    const BoundaryField& bc,
+    SparseMatrix& A,
+    Vector& b);
 
 } // namespace fvm::numerical
