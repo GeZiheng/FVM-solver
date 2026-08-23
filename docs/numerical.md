@@ -1,6 +1,6 @@
 # numerical 模块说明
 
-`fvm::numerical` 命名空间，实现稳态标量输运方程的有限体积离散，将对流、扩散、源项和边界条件装配为线性系统 $A\phi = b$。这是求解器的数值核心。
+`fvm::numerical` 命名空间，实现稳态标量输运方程的有限体积离散，将对流、扩散、源项和边界条件装配为线性系统 $A\phi = b$；并在其之上实现稳态不可压缩 Navier-Stokes 方程的 SIMPLE 算法。这是求解器的数值核心。
 
 控制方程：
 
@@ -18,6 +18,7 @@ $$\underbrace{\sum_f F_f\, \phi_f}_{\text{对流通量}} = \underbrace{\sum_f D_
 | `include/Diffusion.h` + `src/Diffusion.cpp` | `assembleDiffusion`：扩散项装配 |
 | `include/Convection.h` + `src/Convection.cpp` | `ConvectionScheme`、`assembleConvection`：对流项装配 |
 | `include/TransportEquation.h` + `src/TransportEquation.cpp` | `EquationSystem`、`assembleTransport`：完整方程装配 |
+| `include/Simple.h` + `src/Simple.cpp` | `SimpleConfig`、`assembleMomentum`、`solveSimple`：SIMPLE 算法 |
 
 ## BoundaryCondition：边界条件
 
@@ -146,11 +147,86 @@ for P in cells:
 
 该结构保证每个内部面恰好装配一次、每个边界面恰好装配一次，时间复杂度 $O(n_{\text{cells}})$。
 
+## Simple：稳态不可压缩 Navier-Stokes（SIMPLE 算法）
+
+控制方程（$\rho$、$\mu$ 为常数）：
+
+$$\nabla \cdot (\rho\, \mathbf{u}\, \mathbf{u}) = -\nabla p + \nabla \cdot (\mu \nabla \mathbf{u}), \qquad \nabla \cdot \mathbf{u} = 0$$
+
+采用**同位网格**（速度、压力均存单元中心）+ **Rhie-Chow 插值**抑制压力棋盘格振荡。`solveSimple` 为主入口，`velocity`/`pressure` 以 in-out 方式传入（初值 → 收敛解）。
+
+### 公开 API
+
+| 类型 | 说明 |
+|------|------|
+| `SimpleConfig` | `maxIterations`、`tolerance`（缩放连续性残差收敛判据）、`relaxationU`/`relaxationP`（动量/压力亚松弛因子）、`scheme`（对流格式）、`solverConfig`（内层线性求解器配置）、`verbose` |
+| `SimpleResiduals` | 每次迭代的残差快照：`continuity`（缩放质量不平衡）、`u`/`v`（速度最大相对修正量）、`pressure`（最大 $\lvert \alpha_p p' \rvert$） |
+| `SimpleResult` | `converged`、`iterations`、`history`（逐迭代残差） |
+| `MomentumAssembly` | 动量装配结果：`system`（含压力源与亚松弛）、`diag`（松弛后对角元 $a_P$）、`rhsNoPressure`（不含压力源的右端项，供 Rhie-Chow 使用） |
+
+### assembleMomentum：动量方程装配
+
+单个动量分量（`component` 0=u / 1=v）的方程复用 `assembleDiffusion`（$\gamma = \mu$）与 `assembleConvection`，再累加两项：
+
+**压力梯度源**——用 Gauss 定理形式（而非纯中心差分），使 Dirichlet 压力边界值参与梯度计算（压力驱动流的必要条件）：
+
+$$b_P \mathrel{-}= \sum_f p_f\, n_{f,d}\, S_f$$
+
+内部面 $p_f$ 取算术平均（退化为中心差分）；边界面 Dirichlet 取给定值、Neumann 取 $p_P$。
+
+**Patankar 亚松弛**（$\alpha$ = `relaxationU`）：
+
+```
+A(P,P) /= α
+b(P)   += (1-α)/α · a_P⁽⁰⁾ · φ_old(P)
+```
+
+其中 $a_P^{(0)}$ 为松弛前对角元。实现上通过"复制未冻结矩阵 → finalize 副本 → 从 `native()` 读对角"获得 $a_P^{(0)}$，再向原矩阵插入对角增量。注意 `velocity` 同时承担对流速度场与 $\phi_{old}$ 两个角色（SIMPLE 的标准用法）。
+
+### Rhie-Chow 面通量
+
+解出动量预测值 $\mathbf{u}^*$ 后，定义剔除压力贡献的速度（`computeUHat`，利用 `SparseMatrix::native()` 做 Eigen 稀疏运算）：
+
+$$\hat{u}_P = \frac{b^{np}_P - \sum_{N \ne P} A_{PN}\, u^*_N}{a_P}, \qquad d_P = \frac{V_P}{a_P}$$
+
+内部面质量通量（x 向面用 u 方程的 $a_P$，y 向面用 v 方程的）：
+
+$$F_f = \rho\, S_f \left[ \overline{\hat{u}}_f \cdot \mathbf{n} - \bar{d}_f\, \frac{p_N - p_P}{\delta_{PN}} \right]$$
+
+边界面通量 $F_b$ 直接由边界速度给出（Dirichlet 取给定值，Neumann 取 $u^*_P$），保证壁面无穿透。
+
+### 压力修正方程
+
+把通量修正 $F_f = F^*_f - C_f (p'_N - p'_P)$（$C_f = \rho \bar{d}_f S_f / \delta$）代入单元连续性 $\sum_f F_f = 0$，整理得
+
+$$A\, p' = -m, \qquad m_P = \sum_f F^*_f \ \text{（预测净流出量）}$$
+
+> **符号约定**：右端项是质量不平衡的**负值**。若误写为 $+m$，压力修正会形成正反馈，速度场迅速发散。
+
+装配规则：
+
+- 内部面：`A(P,P) += C_f, A(N,N) += C_f, A(P,N) -= C_f, A(N,P) -= C_f`（SPD Laplace 型）；
+- Dirichlet 压力边（$p'_b = 0$）：`A(P,P) += C_b`，$C_b = \rho\, d_P S_f / d_{Pb}$；
+- Neumann 压力边：无矩阵贡献（$F_b$ 仅进入 $m_P$）。
+
+**奇异性处理——参考单元消元**：四条边全为 Neumann 时系数矩阵奇异（零空间为常向量）。此时消去 0 号单元（$p'_0 = 0$，其连续性方程因 $\sum_P m_P = 0$ 而冗余），得到 $n-1$ 阶 SPD 系统；存在 Dirichlet 压力边时系统本已正定，保留全部单元。p' 方程用 CG 求解，动量方程用 BiCGSTAB（对流使矩阵非对称）。
+
+### 修正与收敛判据
+
+$$u_P \leftarrow u^*_P - d_P\, (\nabla p')_{P,x}, \qquad v_P \leftarrow v^*_P - d_P\, (\nabla p')_{P,y}, \qquad p \leftarrow p + \alpha_p\, p'$$
+
+$p'$ 的梯度同样用 Gauss 形式，但 Dirichlet 边界的 $p'_b$ 恒取 0（压力已被固定，修正为零）。
+
+收敛判据（三者同时小于 `SimpleConfig::tolerance`）：
+
+- 连续性：$\max_P |m_P| / F_{ref}$，$F_{ref} = \rho \cdot \max\lVert\mathbf{u}\rVert \cdot (dx+dy)/2$；
+- 速度：$\max_P |\Delta u| / \max\lVert\mathbf{u}\rVert$（$v$ 同理）。
+
 ## 依赖关系
 
 ```
 numerical → core（Mesh/Field/Types）
-          → math（SparseMatrix, Vector）
+          → math（SparseMatrix, Vector；solveSimple 另用 LinearSolver）
 ```
 
-numerical 不依赖线性求解器与 io——它只负责装配，求解与输出由 app 层组织。
+transport 部分不依赖线性求解器与 io——它只负责装配，求解与输出由 app 层组织；`solveSimple` 是例外，它内部持有 BiCGSTAB（动量）与 CG（压力修正）求解器以驱动整个迭代循环。

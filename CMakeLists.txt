@@ -22,6 +22,7 @@ target_sources(fvm_core
         src/numerical/src/Diffusion.cpp
         src/numerical/src/Convection.cpp
         src/numerical/src/TransportEquation.cpp
+        src/numerical/src/Simple.cpp
 )
 
 target_include_directories(fvm_core
@@ -53,6 +54,7 @@ target_sources(fvm_tests
         tests/test_diffusion.cpp
         tests/test_convection.cpp
         tests/test_transport.cpp
+        tests/test_simple.cpp
         tests/main.cpp
 )
 

@@ -6,6 +6,7 @@
 #include "Field.h"
 #include "LinearSolver.h"
 #include "Mesh.h"
+#include "Simple.h"
 #include "TransportEquation.h"
 #include "VtkWriter.h"
 
@@ -69,6 +70,60 @@ int main()
 
     std::cout << "Wrote " << filename << "\n";
     std::cout << "Open with ParaView to visualize.\n";
+
+    // ------------------------------------------------------------------
+    // SIMPLE demo: lid-driven cavity at Re = 100.
+    // ------------------------------------------------------------------
+    std::cout << "\nLid-driven cavity (Re = 100) via SIMPLE:\n";
+    const Index nc = 64;
+    CartesianMesh cavityMesh(nc, nc, 0.0, 0.0, 1.0, 1.0);
+
+    VectorField cavityVelocity(cavityMesh, "velocity");
+    ScalarField cavityPressure(cavityMesh, "pressure");
+
+    BoundaryField bcU; // lid moves with U = 1, other walls no-slip
+    bcU.set(BoundaryField::North, BCType::Dirichlet, 1.0);
+    bcU.set(BoundaryField::East, BCType::Dirichlet, 0.0);
+    bcU.set(BoundaryField::West, BCType::Dirichlet, 0.0);
+    bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
+
+    BoundaryField bcV; // no penetration on all walls
+    bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
+    bcV.set(BoundaryField::East, BCType::Dirichlet, 0.0);
+    bcV.set(BoundaryField::West, BCType::Dirichlet, 0.0);
+    bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
+
+    BoundaryField bcP; // zero-gradient pressure on all walls (default)
+
+    SimpleConfig simpleCfg;
+    simpleCfg.tolerance = 1e-6;
+    simpleCfg.maxIterations = 3000;
+    simpleCfg.relaxationU = 0.7;
+    simpleCfg.relaxationP = 0.3;
+    simpleCfg.solverConfig.tolerance = 1e-9;
+    simpleCfg.solverConfig.maxIterations = 2000;
+
+    const SimpleResult simpleResult = solveSimple(cavityMesh,
+        1.0,
+        0.01, // Re = rho U L / mu = 100
+        bcU,
+        bcV,
+        bcP,
+        simpleCfg,
+        cavityVelocity,
+        cavityPressure);
+
+    std::cout << "SIMPLE: " << (simpleResult.converged ? "converged" : "NOT converged")
+              << " in " << simpleResult.iterations << " iterations, "
+              << "continuity residual "
+              << simpleResult.history.back().continuity << "\n";
+
+    const std::string cavityFile = "cavity.vti";
+    VtkWriter::write(cavityFile,
+        cavityMesh,
+        { { "pressure", &cavityPressure } },
+        { { "velocity", &cavityVelocity } });
+    std::cout << "Wrote " << cavityFile << "\n";
 
     return 0;
 }
