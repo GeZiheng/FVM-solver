@@ -61,9 +61,18 @@ tests/
 
 **Prerequisites:** CMake >= 3.20, vcpkg (with `VCPKG_ROOT` environment variable set).
 
+**IMPORTANT for agents: ALWAYS use the `build-and-test` custom tool to configure, build, and test this project. Do NOT run `cmake --build`, `cmake -S/-B`, `ctest`, or `ninja` via the bash tool — those commands are denied by permission rules.**
+- Default invocation (no args): Release mode, builds `fvm_solver` + `fvm_tests`, runs ctest.
+- `config`: `"Debug"` | `"Release"` (default `"Release"`).
+- `target`: `"all"` | `"fvm_solver"` | `"fvm_tests"` (default `"all"`).
+- `run`: `"none"` | `"tests"` | `"solver"` | `"both"` (default `"tests"`) — what to run after a successful build.
+- When the user directly requests a build/test, confirm the options with the user via the `question` tool first (unless the user already stated them explicitly). When building as part of a code modification workflow, proceed directly with the defaults without asking.
+
+Manual commands (for humans, outside opencode):
+
 ```bash
 # Configure (vcpkg installs eigen3, doctest automatically)
-cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+cmake -B build -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
 
 # Build
 cmake --build build --config Release
@@ -77,7 +86,7 @@ ctest --test-dir build --output-on-failure
 
 **Windows (PowerShell):**
 ```powershell
-cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
+cmake -B build -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
 cmake --build build --config Release
 ctest --test-dir build --output-on-failure
 .\build\Release\fvm_solver.exe

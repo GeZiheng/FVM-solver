@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "bash": {
+      "*": "allow",
+      "cmake --build *": "deny",
+      "cmake -B *": "deny",
+      "cmake -S *": "deny",
+      "ctest *": "deny",
+      "ninja *": "deny",
+      "*fvm_tests*": "deny"
+    }
+  }
+}
