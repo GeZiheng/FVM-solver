@@ -4,23 +4,18 @@
 
 ## 算例设置
 
-**物理问题**：单位正方形 `[0,1]×[0,1]` 内的稳态温度输运——
+**物理问题**：单位正方形 $[0,1] \times [0,1]$ 内的稳态温度输运——
 
-```
-div(ρ u T) = div(γ ∇T)
-```
+$$\nabla \cdot (\rho\, \mathbf{u}\, T) = \nabla \cdot (\gamma \nabla T)$$
 
-- **网格**：`64 × 64` 均匀笛卡尔网格。
-- **速度场**：由流函数 `ψ = sin(πx)·sin(πy)` 派生的无散度回流场
+- **网格**：$64 \times 64$ 均匀笛卡尔网格。
+- **速度场**：由流函数 $\psi = \sin(\pi x)\, \sin(\pi y)$ 派生的无散度回流场
 
-  ```
-  u =  ∂ψ/∂y =  π·sin(πx)·cos(πy)
-  v = −∂ψ/∂x = −π·cos(πx)·sin(πy)
-  ```
+  $$u = \frac{\partial \psi}{\partial y} = \pi \sin(\pi x) \cos(\pi y), \qquad v = -\frac{\partial \psi}{\partial x} = -\pi \cos(\pi x) \sin(\pi y)$$
 
-  无散度（`∂u/∂x + ∂v/∂y = 0`）保证对流算子装配的守恒性测试意义；流线为域内闭合回卷，热量主要靠对流在环内搬运。
-- **参数**：`ρ = 1`，`γ = 0.01`，特征 Peclet 数 `Pe ~ ρ·|u|·L/γ ~ 100`（对流占优）。
-- **边界条件**：西墙 Dirichlet `T = 1`（热壁），东墙 Dirichlet `T = 0`（冷壁），北/南墙取 `BoundaryField` 默认的零通量 Neumann（绝热）。
+  无散度（$\partial u / \partial x + \partial v / \partial y = 0$）保证对流算子装配的守恒性测试意义；流线为域内闭合回卷，热量主要靠对流在环内搬运。
+- **参数**：$\rho = 1$，$\gamma = 0.01$，特征 Peclet 数 $\mathrm{Pe} \sim \rho\, \lVert \mathbf{u} \rVert L / \gamma \sim 100$（对流占优）。
+- **边界条件**：西墙 Dirichlet $T = 1$（热壁），东墙 Dirichlet $T = 0$（冷壁），北/南墙取 `BoundaryField` 默认的零通量 Neumann（绝热）。
 
 ## 求解流程
 

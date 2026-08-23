@@ -34,7 +34,7 @@
 
   新增后端时只需添加新的子类 + 工厂函数，不触动任何调用点。
 
-- **统一配置**：`SolverConfig { tolerance, maxIterations, verbose }`，语义为**相对残差**判据 `|Ax−b|/|b| ≤ tolerance`。求解后可通过 `lastIterations()` / `lastResidual()` 查询实际迭代数与残差。
+- **统一配置**：`SolverConfig { tolerance, maxIterations, verbose }`，语义为**相对残差**判据 $\lVert Ax-b \rVert / \lVert b \rVert \le \text{tolerance}$。求解后可通过 `lastIterations()` / `lastResidual()` 查询实际迭代数与残差。
 - **失败即异常**：所有实现在不收敛或分解失败时抛 `std::runtime_error`，调用方无需检查错误码。
 
 ### 三个实现
@@ -43,19 +43,17 @@
 |------|------|---------|------|
 | `createEigenBiCGSTAB` | 双共轭梯度稳定法 + 对角（Jacobi）预条件 | 非对称系统（含对流的输运方程） | 见下方容差换算说明 |
 | `createEigenCG` | 共轭梯度法 + 对角预条件 | 对称正定系统（纯扩散） | 非对称矩阵上行为未定义 |
-| `createEigenSparseLU` | 稀疏 LU 直接分解 | 小问题、验证用、病态系统 | `lastIterations`=1，残差为显式计算的 `‖Ax−b‖/‖b‖` |
+| `createEigenSparseLU` | 稀疏 LU 直接分解 | 小问题、验证用、病态系统 | `lastIterations`=1，残差为显式计算的 $\lVert Ax-b \rVert / \lVert b \rVert$ |
 
 ### 关键实现细节：BiCGSTAB 的容差换算
 
 Eigen 5.x 的 `BiCGSTAB` 内部以**绝对残差**作为停机判据，且其收敛标志存在绝对/相对量纲不一致的问题。因此 `EigenBiCGSTABSolver::solve` 中做了两步处理：
 
-1. **容差缩放**：设 `rhsNorm = ‖b‖`，传给 Eigen 的停机容差为
+1. **容差缩放**：设右端项范数为 $\lVert b \rVert$，传给 Eigen 的停机容差为
 
-   ```
-   tol_eigen = tolerance · ‖b‖    （‖b‖ > 0 时）
-   ```
+   $$\text{tol}_{\text{eigen}} = \text{tolerance} \cdot \lVert b \rVert \qquad (\lVert b \rVert > 0)$$
 
-   使 Eigen 的绝对判据等价于本项目约定的相对判据 `|Ax−b|/|b| ≤ tolerance`。
+   使 Eigen 的绝对判据等价于本项目约定的相对判据 $\lVert Ax-b \rVert / \lVert b \rVert \le \text{tolerance}$。
 
 2. **自行检查收敛**：求解后取 `solver.error()`（相对残差估计）存入 `lastResidual_`，若超过 `config_.tolerance` 则抛出"did not converge"异常——**不依赖 `solver.info()` 判断 BiCGSTAB 是否收敛**（`info()` 仅用于检查分解失败与数值崩溃）。
 

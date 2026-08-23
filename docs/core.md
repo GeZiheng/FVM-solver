@@ -24,9 +24,9 @@ using Vector = Eigen::VectorXd;
 
 ### 设计思路
 
-- **均匀网格**：`dx = (xMax-xMin)/nx`，`dy = (yMax-yMin)/ny` 全局恒定，因此单元体积、面面积、中心距等几何量无需逐单元存储，全部由 `dx_`、`dy_` 即时计算，内存开销为 O(1)。
+- **均匀网格**：$\Delta x = (x_{max}-x_{min})/n_x$，$\Delta y = (y_{max}-y_{min})/n_y$ 全局恒定，因此单元体积、面面积、中心距等几何量无需逐单元存储，全部由 `dx_`、`dy_` 即时计算，内存开销为 O(1)。
 - **单元中心（cell-centered）**：未知量存储在单元中心，边界面上无网格点。这是有限体积法的标准布局，天然保证守恒性。
-- **行优先线性索引**：`cellIndex = j * nx + i`（i 沿 x 方向，j 沿 y 方向）。线性索引是场数据存储和稀疏矩阵行号的基础。
+- **行优先线性索引**：$\text{cell} = j \cdot n_x + i$（$i$ 沿 $x$ 方向，$j$ 沿 $y$ 方向）。线性索引是场数据存储和稀疏矩阵行号的基础。
 - **面索引约定**（全项目统一，边界条件、通量装配均依赖此约定）：
 
   | face | 方向 | 外法向 |
@@ -42,13 +42,13 @@ using Vector = Eigen::VectorXd;
 
 | 函数 | 说明 / 公式 |
 |------|------------|
-| `cellCenter(i, j)` | 单元中心坐标：`x = xMin + (i + 0.5)·dx`，`y = yMin + (j + 0.5)·dy` |
-| `cellIndex(i, j)` / `cellIJ(cell)` | 线性索引与 (i, j) 互转：`cell = j·nx + i`；`i = cell % nx`，`j = cell / nx` |
+| `cellCenter(i, j)` | 单元中心坐标：$x = x_{min} + (i + \tfrac{1}{2})\,\Delta x$，$y = y_{min} + (j + \tfrac{1}{2})\,\Delta y$ |
+| `cellIndex(i, j)` / `cellIJ(cell)` | 线性索引与 $(i, j)$ 互转：$\text{cell} = j\,n_x + i$；$i = \text{cell} \bmod n_x$，$j = \lfloor \text{cell} / n_x \rfloor$ |
 | `neighbor(cell, face)` | 越过指定面的邻居单元索引；边界面返回 `cellCount()`；非法 face 抛 `std::invalid_argument` |
 | `faceArea(face)` | 2D 中面面积即边长：东/西面为 `dy`，北/南面为 `dx` |
 | `cellToCellDistance(cell, face)` | 相邻单元中心距：东西向 `dx`，南北向 `dy` |
 | `cellToFaceDistance(face)` | 单元中心到面中心距离：`dx/2` 或 `dy/2` |
-| `cellVolume(cell)` | 单元体积：`dx·dy`（构造时预计算为 `volume_`） |
+| `cellVolume(cell)` | 单元体积：$\Delta x\, \Delta y$（构造时预计算为 `volume_`） |
 
 构造函数会校验 `nx`、`ny` 非零，否则抛 `std::invalid_argument`。
 

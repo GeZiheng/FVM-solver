@@ -14,7 +14,7 @@
 
 - **选择 ImageData 的原因**：`.vti`（vtkImageData）描述"原点 + 间距 + 维度"的规则网格，与 `CartesianMesh` 的均匀笛卡尔结构一一对应——不需要输出任何点坐标或单元连接表，文件头三行即完整描述几何。文件可直接用 ParaView 打开。
 - **无状态静态接口**：`VtkWriter::write` 是纯静态方法，一次调用完成开文件、写 XML、关文件。场以 `(名称, 指针)` 对的列表传入，一次调用可写任意多个标量场和向量场；空指针被跳过。
-- **CellData 而非 PointData**：场存储在单元中心，因此写入 `<CellData>` 段。VTK ImageData 的拓扑描述是基于节点的，`WholeExtent` 写为 `0 nx 0 ny 0 0`（即节点数为 `(nx+1)×(ny+1)`，z 方向退化为 1 层），单元数恰为 `nx×ny`，与场数据长度一致。
+- **CellData 而非 PointData**：场存储在单元中心，因此写入 `<CellData>` 段。VTK ImageData 的拓扑描述是基于节点的，`WholeExtent` 写为 `0 nx 0 ny 0 0`（即节点数为 $(n_x+1) \times (n_y+1)$，z 方向退化为 1 层），单元数恰为 $n_x \times n_y$，与场数据长度一致。
 - **ASCII 格式**：`format="ascii"`，牺牲文件体积换取可读性与调试便利（可直接文本查看数值）。数据按 j 行 i 列的顺序写出，与网格的行优先线性索引一致。
 
 ### 输出文件结构

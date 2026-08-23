@@ -59,7 +59,7 @@ docs/                 — per-module code documentation (Chinese)
   app.md             — fvm_solver demo walkthrough
 ```
 
-When changing a module's classes/design/key algorithms, update the corresponding docs/*.md file.
+When changing a module's classes/design/key algorithms, update the corresponding docs/*.md file. Math formulas in docs are written in LaTeX (`$...$` inline, `$$...$$` display); matrix-assembly statements that mirror code (e.g., `A(P,P) += D_f`) stay in code blocks.
 
 ## Naming Conventions
 - **Strict sub-namespaces**: `fvm::core`, `fvm::math`, `fvm::io`, `fvm::numerical`
