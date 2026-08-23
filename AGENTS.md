@@ -50,7 +50,16 @@ tests/
   test_diffusion.cpp — diffusion operator: exact solutions, SPD, BC handling, O(h^2)
   test_convection.cpp— convection operator: UD O(h) / CD O(h^2), boundedness, conservation
   test_transport.cpp — combined assembly, source terms (Sc + Sp*phi), conservation
+
+docs/                 — per-module code documentation (Chinese)
+  core.md            — Types, CartesianMesh, ScalarField/VectorField
+  math.md            — SparseMatrix (triplet assembly), LinearSolver backends
+  io.md              — VtkWriter (.vti output)
+  numerical.md       — BCs, diffusion/convection assembly, transport equation
+  app.md             — fvm_solver demo walkthrough
 ```
+
+When changing a module's classes/design/key algorithms, update the corresponding docs/*.md file.
 
 ## Naming Conventions
 - **Strict sub-namespaces**: `fvm::core`, `fvm::math`, `fvm::io`, `fvm::numerical`
