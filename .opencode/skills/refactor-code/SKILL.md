@@ -1,6 +1,6 @@
 ---
 name: refactor-code
-description: 代码重构/修改的四阶段工作流（制定方案 → 修改代码 → 代码审查 → 更新文档）。Use when 用户要求重构、refactor、修改代码、modify code、改进现有代码结构，或任何需要对已有代码做有计划改动的任务。Do NOT use for 从零编写新功能、纯问答、或单行级别的微小修复。
+description: 代码重构/修改的四阶段工作流（制定方案 → 修改代码 → 代码审查 → 更新文档）。Use when 用户要求重构、修改代码、实现新功能、改进现有代码结构，或任何需要对已有代码做有计划改动的任务。Do NOT use for 纯问答或单行级别的微小修复。
 ---
 
 # Refactor-Code 工作流
