@@ -23,7 +23,12 @@ public:
 
     Eigen::BiCGSTAB<Eigen::SparseMatrix<Scalar>, Eigen::DiagonalPreconditioner<Scalar>> solver;
     solver.setMaxIterations(config_.maxIterations);
-    solver.setTolerance(config_.tolerance);
+    // Eigen 5.x BiCGSTAB stops on the ABSOLUTE residual norm and its
+    // convergence flag compares mismatched quantities. Scale the tolerance
+    // by |b| so that SolverConfig::tolerance keeps its documented meaning
+    // (relative residual |Ax-b|/|b|), and check convergence ourselves below.
+    const Scalar rhsNorm = b.stableNorm();
+    solver.setTolerance(rhsNorm > 0.0 ? config_.tolerance * rhsNorm : config_.tolerance);
     solver.compute(native);
 
     if (solver.info() != Eigen::Success) {
@@ -32,14 +37,17 @@ public:
 
     Vector x = solver.solve(b);
     lastIterations_ = static_cast<int>(solver.iterations());
-    lastResidual_ = solver.error();
+    lastResidual_ = solver.error(); // relative residual estimate |Ax-b|/|b|
 
     if (config_.verbose) {
       std::cout << "BiCGSTAB: iterations=" << lastIterations_
                 << ", residual=" << lastResidual_ << std::endl;
     }
 
-    if (solver.info() != Eigen::Success) {
+    if (solver.info() == Eigen::NumericalIssue) {
+      throw std::runtime_error("Eigen BiCGSTAB: numerical breakdown");
+    }
+    if (lastResidual_ > config_.tolerance) {
       throw std::runtime_error("Eigen BiCGSTAB: solve did not converge");
     }
 

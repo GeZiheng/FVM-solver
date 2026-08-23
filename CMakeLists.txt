@@ -19,6 +19,9 @@ target_sources(fvm_core
         src/math/src/SparseMatrix.cpp
         src/math/src/LinearSolver.cpp
         src/io/src/VtkWriter.cpp
+        src/numerical/src/Diffusion.cpp
+        src/numerical/src/Convection.cpp
+        src/numerical/src/TransportEquation.cpp
 )
 
 target_include_directories(fvm_core
@@ -26,6 +29,7 @@ target_include_directories(fvm_core
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src/math/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src/io/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/numerical/include
 )
 
 target_link_libraries(fvm_core
@@ -46,6 +50,9 @@ target_sources(fvm_tests
         tests/test_mesh.cpp
         tests/test_linalg.cpp
         tests/test_field.cpp
+        tests/test_diffusion.cpp
+        tests/test_convection.cpp
+        tests/test_transport.cpp
         tests/main.cpp
 )
 
