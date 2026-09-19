@@ -24,9 +24,8 @@ TEST_CASE("Transport: zero velocity reduces to pure diffusion")
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
     auto sys = assembleTransport(mesh,
-        velocity,
+        interpolateCellVelocityFlux(mesh, velocity, 1.0),
         gamma,
-        1.0,
         ConvectionScheme::Upwind,
         bc);
     sys.A.finalize();
@@ -59,9 +58,8 @@ TEST_CASE(
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
     auto sys = assembleTransport(mesh,
-        velocity,
+        interpolateCellVelocityFlux(mesh, velocity, 1.0),
         gamma,
-        1.0,
         ConvectionScheme::Upwind,
         bc,
         &Sc);
@@ -100,9 +98,8 @@ TEST_CASE("Transport: linear source term treated implicitly (Helmholtz)")
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
     auto sys = assembleTransport(mesh,
-        velocity,
+        interpolateCellVelocityFlux(mesh, velocity, 1.0),
         gamma,
-        1.0,
         ConvectionScheme::Upwind,
         bc,
         &Sc,
@@ -131,9 +128,8 @@ TEST_CASE("Transport: positive Sp is rejected")
 
     BoundaryField bc;
     CHECK_THROWS_AS(assembleTransport(mesh,
-                        velocity,
+                        interpolateCellVelocityFlux(mesh, velocity, 1.0),
                         gamma,
-                        1.0,
                         ConvectionScheme::Upwind,
                         bc,
                         nullptr,
@@ -156,7 +152,11 @@ TEST_CASE("Transport: closed domain with uniform flow annihilates constants")
 
     for (auto scheme : { ConvectionScheme::Upwind, ConvectionScheme::Central })
     {
-        auto sys = assembleTransport(mesh, velocity, gamma, 1.0, scheme, bc);
+        auto sys = assembleTransport(mesh,
+            interpolateCellVelocityFlux(mesh, velocity, 1.0),
+            gamma,
+            scheme,
+            bc);
         sys.A.finalize();
 
         Vector ones = Vector::Ones(mesh.cellCount());

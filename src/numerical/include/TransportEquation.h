@@ -38,8 +38,12 @@ struct EquationSystem
 /**
  * @brief Assemble the steady scalar transport equation
  *
- *   div(rho * u * phi) = div(gamma * grad(phi)) + S(phi),
+ *   div(F * phi) = div(gamma * grad(phi)) + S(phi),
  *   S(phi) = Sc + Sp * phi   (per unit volume),
+ *
+ * from a precomputed (typically conservative) face mass-flux field,
+ * e.g. the flux produced by solveSimple, or one built with
+ * interpolateCellVelocityFlux for a given velocity field.
  *
  * into an unfinalized EquationSystem (call system.A.finalize() before solving).
  *
@@ -47,19 +51,17 @@ struct EquationSystem
  * and is treated implicitly (added to the diagonal). A positive Sp would
  * destroy diagonal dominance, so it is rejected with an exception.
  *
- * @param mesh     Computational mesh.
- * @param velocity Convecting velocity field (cell-centered).
- * @param gamma    Diffusion coefficient field.
- * @param rho      Density (constant).
- * @param scheme   Convection scheme (Upwind or Central).
- * @param bc       Boundary conditions on the four domain sides.
- * @param Sc       Constant part of the volumetric source (optional).
- * @param Sp       Linear part of the volumetric source (optional, must be <= 0).
+ * @param mesh   Computational mesh.
+ * @param flux   Face mass-flux field (see Convection.h).
+ * @param gamma  Diffusion coefficient field.
+ * @param scheme Convection scheme (Upwind or Central).
+ * @param bc     Boundary conditions on the four domain sides.
+ * @param Sc     Constant part of the volumetric source (optional).
+ * @param Sp     Linear part of the volumetric source (optional, must be <= 0).
  */
 EquationSystem assembleTransport(const CartesianMesh& mesh,
-    const VectorField& velocity,
+    const FaceFluxField& flux,
     const ScalarField& gamma,
-    Scalar rho,
     ConvectionScheme scheme,
     const BoundaryField& bc,
     const ScalarField* Sc = nullptr,

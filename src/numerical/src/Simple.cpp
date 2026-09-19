@@ -89,8 +89,8 @@ Scalar boundaryNormalVelocity(int face,
 } // namespace
 
 MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
+    const FaceFluxField& flux,
     const VectorField& velocity,
-    Scalar rho,
     Scalar mu,
     ConvectionScheme scheme,
     const BoundaryField& bc,
@@ -123,7 +123,7 @@ MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
     // Convection-diffusion part (no pressure source yet).
     assembleDiffusion(mesh, muField, bc, result.system.A,
         result.rhsNoPressure);
-    assembleConvection(mesh, velocity, rho, scheme, bc, result.system.A,
+    assembleConvection(mesh, flux, scheme, bc, result.system.A,
         result.rhsNoPressure);
 
     // Read the unrelaxed diagonal from a finalized copy.
@@ -165,7 +165,8 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
     const BoundaryField& bcP,
     const SimpleConfig& config,
     VectorField& velocity,
-    ScalarField& pressure)
+    ScalarField& pressure,
+    FaceFluxField& flux)
 {
     if (config.relaxationP <= 0.0 || config.relaxationP > 1.0)
     {
@@ -175,6 +176,10 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
 
     const Index nCells = mesh.cellCount();
     const Scalar vol = mesh.cellVolume(0);
+
+    // Initialize the persistent flux field from the velocity field and
+    // its BCs (OpenFOAM createPhi).
+    computeMassFlux(mesh, velocity, rho, bcU, bcV, flux);
 
     // With pure Neumann pressure BCs the correction equation is singular
     // (null space: constants). Eliminate the reference cell 0 (p'_0 = 0);
@@ -214,8 +219,8 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
     {
         // ---- 1. Momentum predictor ------------------------------------
         auto momU = assembleMomentum(mesh,
+            flux,
             velocity,
-            rho,
             mu,
             config.scheme,
             bcU,
@@ -227,8 +232,8 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
         const Vector uStar = momSolver->solve(momU.system.A, momU.system.b);
 
         auto momV = assembleMomentum(mesh,
+            flux,
             velocity,
-            rho,
             mu,
             config.scheme,
             bcV,
@@ -253,12 +258,16 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
         // Collecting the p' terms on the left gives the diffusion-like
         // system A p' = -massImbalance, where A has coefficient rho * d
         // and massImbalance(P) is the predicted net outflow of cell P.
+        // The predicted flux F* is written into the persistent flux
+        // field; step 4 applies the p' correction to it in place, which
+        // makes the stored flux conservative up to the solver accuracy.
         EquationSystem pSys(nP);
         Vector massImbalance(nCells);
         massImbalance.setZero();
 
         for (Index P = 0; P < nCells; ++P)
         {
+            const auto [iP, jP] = mesh.cellIJ(P);
             for (int face = 0; face < 4; ++face)
             {
                 const Index N = mesh.neighbor(P, face);
@@ -283,6 +292,13 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
                                               / delta);
                     const Scalar C = rho * dF * Sf / delta;
 
+                    // Store the predicted flux (positive P -> N, the
+                    // stored convention).
+                    if (face == BoundaryField::East)
+                        flux.x(iP + 1, jP) = F;
+                    else
+                        flux.y(iP, jP + 1) = F;
+
                     massImbalance(P) += F;
                     massImbalance(N) -= F;
 
@@ -306,7 +322,26 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
                         xFace ? bcU : bcV,
                         xFace ? uStar : vStar,
                         P);
-                    massImbalance(P) += rho * ub * Sf;
+                    const Scalar Fb = rho * ub * Sf;
+                    massImbalance(P) += Fb;
+
+                    // Store the outward flux (west/south faces are
+                    // stored positive along +x/+y, hence the sign).
+                    switch (face)
+                    {
+                    case BoundaryField::East:
+                        flux.x(iP + 1, jP) = Fb;
+                        break;
+                    case BoundaryField::West:
+                        flux.x(iP, jP) = -Fb;
+                        break;
+                    case BoundaryField::North:
+                        flux.y(iP, jP + 1) = Fb;
+                        break;
+                    default: // South
+                        flux.y(iP, jP) = -Fb;
+                        break;
+                    }
 
                     if (bcP.get(face).type == BCType::Dirichlet
                         && !isReference(P))
@@ -354,6 +389,80 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
         }
 
         // ---- 4. Corrections -------------------------------------------
+        // 4a. Conservative flux correction (OpenFOAM pEqn.flux):
+        //   interior faces:         F_f -= C (p'_N - p'_P),
+        //   Dirichlet-p boundaries: F_b += Cb p'_P (outward; west/south
+        //   are stored with a sign, so they subtract instead).
+        // After this pass each cell's net outflow equals the linear
+        // solver's residual: the stored flux is conservative up to the
+        // solver accuracy.
+        const Index nx = mesh.nx();
+        const Index ny = mesh.ny();
+        const Scalar Sx = mesh.faceArea(BoundaryField::East);
+        const Scalar Sy = mesh.faceArea(BoundaryField::North);
+        const Scalar hx = mesh.cellToFaceDistance(BoundaryField::East);
+        const Scalar hy = mesh.cellToFaceDistance(BoundaryField::North);
+
+        for (Index j = 0; j < ny; ++j)
+        {
+            for (Index i = 1; i < nx; ++i)
+            {
+                const Index P = mesh.cellIndex(i - 1, j);
+                const Index N = mesh.cellIndex(i, j);
+                const Scalar dF = 0.5 * (dU(P) + dU(N));
+                const Scalar C = rho * dF * Sx / mesh.dx();
+                flux.x(i, j) -= C * (pCorr(N) - pCorr(P));
+            }
+        }
+        for (Index j = 1; j < ny; ++j)
+        {
+            for (Index i = 0; i < nx; ++i)
+            {
+                const Index P = mesh.cellIndex(i, j - 1);
+                const Index N = mesh.cellIndex(i, j);
+                const Scalar dF = 0.5 * (dV(P) + dV(N));
+                const Scalar C = rho * dF * Sy / mesh.dy();
+                flux.y(i, j) -= C * (pCorr(N) - pCorr(P));
+            }
+        }
+        if (bcP.get(BoundaryField::West).type == BCType::Dirichlet)
+        {
+            for (Index j = 0; j < ny; ++j)
+            {
+                const Index P = mesh.cellIndex(0, j);
+                const Scalar Cb = rho * dU(P) * Sx / hx;
+                flux.x(0, j) -= Cb * pCorr(P); // outward = -x(0, j)
+            }
+        }
+        if (bcP.get(BoundaryField::East).type == BCType::Dirichlet)
+        {
+            for (Index j = 0; j < ny; ++j)
+            {
+                const Index P = mesh.cellIndex(nx - 1, j);
+                const Scalar Cb = rho * dU(P) * Sx / hx;
+                flux.x(nx, j) += Cb * pCorr(P); // outward = +x(nx, j)
+            }
+        }
+        if (bcP.get(BoundaryField::South).type == BCType::Dirichlet)
+        {
+            for (Index i = 0; i < nx; ++i)
+            {
+                const Index P = mesh.cellIndex(i, 0);
+                const Scalar Cb = rho * dV(P) * Sy / hy;
+                flux.y(i, 0) -= Cb * pCorr(P); // outward = -y(i, 0)
+            }
+        }
+        if (bcP.get(BoundaryField::North).type == BCType::Dirichlet)
+        {
+            for (Index i = 0; i < nx; ++i)
+            {
+                const Index P = mesh.cellIndex(i, ny - 1);
+                const Scalar Cb = rho * dV(P) * Sy / hy;
+                flux.y(i, ny) += Cb * pCorr(P); // outward = +y(i, ny)
+            }
+        }
+
+        // 4b. Cell-centered velocity and pressure corrections.
         Scalar duMax = 0.0, dvMax = 0.0, dpMax = 0.0;
         for (Index P = 0; P < nCells; ++P)
         {

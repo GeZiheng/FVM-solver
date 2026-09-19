@@ -4,6 +4,7 @@
 #include "Convection.h"
 #include "Diffusion.h"
 #include "Field.h"
+#include "FluxField.h"
 #include "LinearSolver.h"
 #include "Mesh.h"
 #include "Simple.h"
@@ -44,9 +45,8 @@ int main()
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
     auto sys = assembleTransport(mesh,
-        velocity,
+        interpolateCellVelocityFlux(mesh, velocity, rho),
         gamma,
-        rho,
         ConvectionScheme::Upwind,
         bc);
     sys.A.finalize();
@@ -80,6 +80,7 @@ int main()
 
     VectorField cavityVelocity(cavityMesh, "velocity");
     ScalarField cavityPressure(cavityMesh, "pressure");
+    FaceFluxField cavityFlux(cavityMesh, "phi");
 
     BoundaryField bcU; // lid moves with U = 1, other walls no-slip
     bcU.set(BoundaryField::North, BCType::Dirichlet, 1.0);
@@ -111,7 +112,8 @@ int main()
         bcP,
         simpleCfg,
         cavityVelocity,
-        cavityPressure);
+        cavityPressure,
+        cavityFlux);
 
     std::cout << "SIMPLE: " << (simpleResult.converged ? "converged" : "NOT converged")
               << " in " << simpleResult.iterations << " iterations, "

@@ -11,6 +11,7 @@
 #include <vector>
 
 using fvm::core::CartesianMesh;
+using fvm::core::FaceFluxField;
 using fvm::core::Index;
 using fvm::core::Scalar;
 using fvm::core::ScalarField;
@@ -81,16 +82,18 @@ struct MomentumAssembly
 };
 
 /**
- * @brief Assemble the momentum equation for one velocity component.
+ * @brief Assemble the momentum equation for one velocity component from
+ * a precomputed face mass-flux field.
  *
- * Reuses the diffusion (gamma = mu) and convection operators, then adds
- * the pressure-gradient source (central differences, one-sided at
- * boundary cells) and under-relaxation.
+ * Reuses the diffusion (gamma = mu) and flux-based convection
+ * operators, then adds the pressure-gradient source (central
+ * differences, one-sided at boundary cells) and under-relaxation.
  *
  * @param mesh       Computational mesh.
- * @param velocity   Current velocity field (convecting velocity + u_old
- *                   for the relaxation source).
- * @param rho        Density (constant).
+ * @param flux       Convecting face mass-flux field (e.g. the persistent
+ *                   flux maintained by solveSimple).
+ * @param velocity   Current velocity field (u_old for the relaxation
+ *                   source).
  * @param mu         Dynamic viscosity (constant).
  * @param scheme     Convection scheme.
  * @param bc         Boundary conditions for this velocity component.
@@ -101,8 +104,8 @@ struct MomentumAssembly
  * @param relaxation Under-relaxation factor in (0, 1].
  */
 MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
+    const FaceFluxField& flux,
     const VectorField& velocity,
-    Scalar rho,
     Scalar mu,
     ConvectionScheme scheme,
     const BoundaryField& bc,
@@ -128,6 +131,11 @@ MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
  * @param config   Algorithm configuration.
  * @param velocity In/out: initial guess -> converged velocity.
  * @param pressure In/out: initial guess -> converged pressure.
+ * @param flux     Out: persistent face mass-flux field. Re-initialized
+ *                 on entry from `velocity` and the velocity BCs
+ *                 (computeMassFlux); on return it holds the corrected
+ *                 conservative flux (each cell's net outflow is zero up
+ *                 to the pressure-solver accuracy).
  */
 SimpleResult solveSimple(const CartesianMesh& mesh,
     Scalar rho,
@@ -137,6 +145,7 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
     const BoundaryField& bcP,
     const SimpleConfig& config,
     VectorField& velocity,
-    ScalarField& pressure);
+    ScalarField& pressure,
+    FaceFluxField& flux);
 
 } // namespace fvm::numerical

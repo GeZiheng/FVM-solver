@@ -49,16 +49,15 @@ TEST_CASE("Simple: momentum assembly matches transport without pressure "
 
     // Reference: generic scalar transport of the u-component.
     auto ref = assembleTransport(mesh,
-        velocity,
+        interpolateCellVelocityFlux(mesh, velocity, rho),
         muField,
-        rho,
         ConvectionScheme::Upwind,
         bc);
     ref.A.finalize();
 
     auto mom = assembleMomentum(mesh,
+        interpolateCellVelocityFlux(mesh, velocity, rho),
         velocity,
-        rho,
         mu,
         ConvectionScheme::Upwind,
         bc,
@@ -96,17 +95,16 @@ TEST_CASE("Simple: under-relaxation preserves the residual at u_old")
 
     // Unrelaxed reference system for the u-component.
     auto ref = assembleTransport(mesh,
-        velocity,
+        interpolateCellVelocityFlux(mesh, velocity, rho),
         muField,
-        rho,
         ConvectionScheme::Upwind,
         bc);
     ref.A.finalize();
 
     const Scalar alpha = 0.5;
     auto mom = assembleMomentum(mesh,
+        interpolateCellVelocityFlux(mesh, velocity, rho),
         velocity,
-        rho,
         mu,
         ConvectionScheme::Upwind,
         bc,
@@ -131,8 +129,8 @@ TEST_CASE("Simple: under-relaxation preserves the residual at u_old")
 
     // Relaxed diagonal = unrelaxed diagonal / alpha.
     auto momNoRelax = assembleMomentum(mesh,
+        interpolateCellVelocityFlux(mesh, velocity, rho),
         velocity,
-        rho,
         mu,
         ConvectionScheme::Upwind,
         bc,
@@ -147,9 +145,9 @@ TEST_CASE("Simple: under-relaxation preserves the residual at u_old")
     }
 
     // The unrelaxed solution solves the relaxed system too (fixed point),
-    // verified through the actual solver path. Since assembleMomentum uses
-    // `velocity` both as convecting velocity and as u_old, first iterate to
-    // a self-consistent state where u_old solves its own unrelaxed system.
+    // verified through the actual solver path. Since the convecting flux
+    // and u_old both derive from `velocity`, first iterate to a
+    // self-consistent state where u_old solves its own unrelaxed system.
     VectorField fpVel = makeRecirculatingVelocity(mesh);
     auto directSolver = createEigenSparseLU();
     Vector cur = fpVel.u().data();
@@ -157,9 +155,8 @@ TEST_CASE("Simple: under-relaxation preserves the residual at u_old")
     {
         fpVel.u().data() = cur;
         auto sys = assembleTransport(mesh,
-            fpVel,
+            interpolateCellVelocityFlux(mesh, fpVel, rho),
             muField,
-            rho,
             ConvectionScheme::Upwind,
             bc);
         sys.A.finalize();
@@ -174,8 +171,8 @@ TEST_CASE("Simple: under-relaxation preserves the residual at u_old")
     fpVel.u().data() = cur; // self-consistent: cur solves A(cur) x = b(cur)
 
     auto momFp = assembleMomentum(mesh,
+        interpolateCellVelocityFlux(mesh, fpVel, rho),
         fpVel,
-        rho,
         mu,
         ConvectionScheme::Upwind,
         bc,
@@ -216,8 +213,8 @@ TEST_CASE("Simple: pressure gradient enters only the full right-hand side")
     const Scalar vol = mesh.cellVolume(0);
 
     auto mom = assembleMomentum(mesh,
+        interpolateCellVelocityFlux(mesh, velocity, 1.0),
         velocity,
-        1.0,
         0.1,
         ConvectionScheme::Upwind,
         bc,
@@ -237,8 +234,8 @@ TEST_CASE("Simple: pressure gradient enters only the full right-hand side")
 
     // v-component sees dp/dy = 0.
     auto momV = assembleMomentum(mesh,
+        interpolateCellVelocityFlux(mesh, velocity, 1.0),
         velocity,
-        1.0,
         0.1,
         ConvectionScheme::Upwind,
         bc,
@@ -277,6 +274,7 @@ TEST_CASE("Simple: pressure-driven channel flow reproduces Poiseuille "
 
     VectorField velocity(mesh, "u");
     ScalarField pressure(mesh, "p");
+    FaceFluxField flux(mesh, "phi");
 
     SimpleConfig config;
     config.tolerance = 1e-7;
@@ -288,7 +286,7 @@ TEST_CASE("Simple: pressure-driven channel flow reproduces Poiseuille "
 
     const SimpleResult result
         = solveSimple(mesh, rho, mu, bcU, bcV, bcP, config, velocity,
-            pressure);
+            pressure, flux);
 
     CHECK(result.converged);
     CHECK(result.history.back().continuity < config.tolerance);
@@ -310,6 +308,25 @@ TEST_CASE("Simple: pressure-driven channel flow reproduces Poiseuille "
     // Exact flow rate Q = u_max * 2/3 = 1/12.
     CHECK(flowRate == doctest::Approx(1.0 / 12.0).epsilon(0.05));
     CHECK(maxAbsV < 0.01 * 0.125);
+
+    // The corrected flux field is conservative up to the pressure
+    // solver's accuracy (relative tolerance 1e-9).
+    Scalar maxFluxImbalance = 0.0;
+    for (Index c = 0; c < mesh.cellCount(); ++c)
+    {
+        maxFluxImbalance
+            = std::max(maxFluxImbalance, std::abs(flux.cellImbalance(c)));
+    }
+    CHECK(maxFluxImbalance < 1e-8);
+
+    // Outlet mass flux (east x-faces) reproduces the exact flow rate
+    // rho * Q = 1/12.
+    Scalar outletFlux = 0.0;
+    for (Index j = 0; j < mesh.ny(); ++j)
+    {
+        outletFlux += flux.x(mesh.nx(), j);
+    }
+    CHECK(outletFlux == doctest::Approx(rho / 12.0).epsilon(0.05));
 }
 
 TEST_CASE("Simple: lid-driven cavity at Re=100 converges with recirculation")
@@ -336,6 +353,7 @@ TEST_CASE("Simple: lid-driven cavity at Re=100 converges with recirculation")
 
     VectorField velocity(mesh, "u");
     ScalarField pressure(mesh, "p");
+    FaceFluxField flux(mesh, "phi");
 
     SimpleConfig config;
     config.tolerance = 1e-6;
@@ -347,7 +365,7 @@ TEST_CASE("Simple: lid-driven cavity at Re=100 converges with recirculation")
 
     const SimpleResult result
         = solveSimple(mesh, rho, mu, bcU, bcV, bcP, config, velocity,
-            pressure);
+            pressure, flux);
 
     CHECK(result.converged);
     CHECK(result.history.back().continuity < config.tolerance);
@@ -367,4 +385,14 @@ TEST_CASE("Simple: lid-driven cavity at Re=100 converges with recirculation")
     CHECK(velocity.u()(n / 2, 1) < 0.0);
     CHECK(velocity.v()(2, n / 2) > 0.0);
     CHECK(velocity.v()(n - 3, n / 2) < 0.0);
+
+    // The corrected flux field is conservative up to the pressure
+    // solver's accuracy (relative tolerance 1e-9).
+    Scalar maxFluxImbalance = 0.0;
+    for (Index c = 0; c < mesh.cellCount(); ++c)
+    {
+        maxFluxImbalance
+            = std::max(maxFluxImbalance, std::abs(flux.cellImbalance(c)));
+    }
+    CHECK(maxFluxImbalance < 1e-8);
 }

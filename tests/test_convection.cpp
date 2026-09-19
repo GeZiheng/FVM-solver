@@ -53,7 +53,12 @@ Scalar solveAndL2Error(Index n, ConvectionScheme scheme, Scalar gammaVal)
     Vector b(s.mesh.cellCount());
     b.setZero();
     assembleDiffusion(s.mesh, s.gamma, bc, A, b);
-    assembleConvection(s.mesh, s.velocity, rho, scheme, bc, A, b);
+    assembleConvection(s.mesh,
+        interpolateCellVelocityFlux(s.mesh, s.velocity, rho),
+        scheme,
+        bc,
+        A,
+        b);
     A.finalize();
 
     auto solver = createEigenSparseLU();
@@ -130,7 +135,12 @@ TEST_CASE(
         Vector b(s.mesh.cellCount());
         b.setZero();
         assembleDiffusion(s.mesh, s.gamma, bc, A, b);
-        assembleConvection(s.mesh, s.velocity, 1.0, scheme, bc, A, b);
+        assembleConvection(s.mesh,
+            interpolateCellVelocityFlux(s.mesh, s.velocity, 1.0),
+            scheme,
+            bc,
+            A,
+            b);
         A.finalize();
 
         auto solver = createEigenSparseLU();
@@ -168,7 +178,12 @@ TEST_CASE(
         SparseMatrix A(mesh.cellCount(), mesh.cellCount());
         Vector b(mesh.cellCount());
         b.setZero();
-        assembleConvection(mesh, velocity, 1.0, scheme, bc, A, b);
+        assembleConvection(mesh,
+            interpolateCellVelocityFlux(mesh, velocity, 1.0),
+            scheme,
+            bc,
+            A,
+            b);
         A.finalize();
 
         Vector ones = Vector::Ones(mesh.cellCount());

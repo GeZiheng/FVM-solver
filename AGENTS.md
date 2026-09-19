@@ -4,6 +4,7 @@
 - Phase 1 complete: project skeleton, core data structures, linear algebra wrapper, VTK I/O, and unit tests implemented and passing.
 - Phase 2 complete: FVM discretization operators (diffusion, convection UD/CD, source-term linearization, boundary conditions) implemented. All 31 test cases pass, including grid-convergence order checks (UD ~ O(h), CD/diffusion ~ O(h^2)).
 - Phase 3 complete: SIMPLE algorithm for incompressible steady-state NS (collocated grid + Rhie-Chow interpolation, Patankar under-relaxation, pressure-correction equation with reference-cell elimination). All 36 test cases pass, including Poiseuille channel flow (quantitative parabolic profile + flow rate) and lid-driven cavity at Re=100.
+- Persistent conservative flux field (OpenFOAM-style `phi`): `FaceFluxField` in core; convection/transport/momentum assemblers take the flux field as their only convection input (velocity-based convenience interfaces removed; use `interpolateCellVelocityFlux` / `computeMassFlux` to build one). `solveSimple` maintains the flux across iterations (predicted F* written during assembly, corrected by p' afterwards) and returns it via an out parameter — the converged flux is conservative to pressure-solver accuracy. All 42 test cases pass, including per-cell flux-conservation checks.
 - Build system verified working (CMake + vcpkg).
 
 ## Architecture
@@ -15,9 +16,11 @@ src/
       Types.h        — Scalar, Index, Vector aliases (namespace fvm::core)
       Mesh.h         — CartesianMesh (2D uniform Cartesian)
       Field.h        — ScalarField, VectorField (cell-centered)
+      FluxField.h    — FaceFluxField (face-stored flux, positive along +x/+y, header-only)
     src/
       Mesh.cpp
       Field.cpp
+      FluxField.cpp
   math/
     include/
       SparseMatrix.h — triplet-based assembly, wraps Eigen sparse matrix
@@ -34,9 +37,11 @@ src/
     include/
       BoundaryCondition.h  — BCType{Dirichlet, Neumann} + BoundaryField (4 sides, header-only)
       Diffusion.h          — -div(gamma grad phi) assembly
-      Convection.h         — div(rho u phi) assembly, ConvectionScheme{Upwind, Central}
-      TransportEquation.h  — full conv-diff-source assembly -> EquationSystem{A, b}
+      Convection.h         — div(F phi) assembly from FaceFluxField, ConvectionScheme{Upwind, Central},
+                             flux constructors interpolateCellVelocityFlux / computeMassFlux
+      TransportEquation.h  — full conv-diff-source assembly from FaceFluxField -> EquationSystem{A, b}
       Simple.h             — SIMPLE algorithm: SimpleConfig/SimpleResult, assembleMomentum, solveSimple
+                             (persistent flux out parameter)
     src/
       Diffusion.cpp
       Convection.cpp
@@ -50,6 +55,7 @@ tests/
   main.cpp           — doctest entry point
   test_mesh.cpp      — mesh geometry tests
   test_field.cpp     — field accessor tests
+  test_flux.cpp      — flux field layout/sign conventions, flux constructors, conservative SIMPLE flux
   test_linalg.cpp    — sparse matrix & linear solver tests
   test_diffusion.cpp — diffusion operator: exact solutions, SPD, BC handling, O(h^2)
   test_convection.cpp— convection operator: UD O(h) / CD O(h^2), boundedness, conservation
@@ -114,9 +120,10 @@ ctest --test-dir build --output-on-failure
 - **VTK output uses `.vti` (ImageData)** — native match for Cartesian grids, opens directly in ParaView.
 - **Module isolation**: Each module (core/math/io/numerical) has its own namespace and directory structure with `include/` + `src/`.
 - **Discretization assembly accumulates**: `assembleDiffusion`/`assembleConvection` add into (A, b) without zeroing; `assembleTransport` owns the full assembly and returns an unfinalized `EquationSystem`. Boundary side indices match the mesh face convention (0=E, 1=N, 2=W, 3=S).
+- **Flux is a first-class citizen** (OpenFOAM-style): convection/transport/momentum assemblers take a `FaceFluxField` (positive along +x/+y; boundary outward fluxes signed accordingly) instead of a velocity field. Build one with `interpolateCellVelocityFlux` (given velocity field, boundary from cell velocity) or `computeMassFlux` (velocity-BC aware, in-place).
 - **Source terms follow Patankar**: S(phi) = Sc + Sp*phi per unit volume; Sp must be <= 0 (treated implicitly, enforced by exception).
 - **SolverConfig::tolerance means relative residual** |Ax-b|/|b|. The BiCGSTAB wrapper scales Eigen's absolute stopping tolerance by |b| and checks convergence itself (Eigen 5.x compares mismatched absolute/relative quantities internally — do not rely on `solver.info()` for BiCGSTAB convergence).
-- **SIMPLE (collocated, Rhie-Chow)**: momentum assembly reuses the convection/diffusion operators; the pressure-gradient source uses the Gauss form (sum_f p_f n S_f) so Dirichlet pressure boundary values drive the flow. Under-relaxed diagonal `a_P` is read from a finalized matrix copy; `d = vol/a_P` feeds the Rhie-Chow face fluxes (x-faces use the u-equation diagonal, y-faces the v-equation one).
+- **SIMPLE (collocated, Rhie-Chow)**: momentum assembly reuses the convection/diffusion operators; the pressure-gradient source uses the Gauss form (sum_f p_f n S_f) so Dirichlet pressure boundary values drive the flow. Under-relaxed diagonal `a_P` is read from a finalized matrix copy; `d = vol/a_P` feeds the Rhie-Chow face fluxes (x-faces use the u-equation diagonal, y-faces the v-equation one). The persistent flux field is overwritten with the predicted F* during p' assembly and corrected in place afterwards (`F_f -= C(p'_N - p'_P)`; Dirichlet-p boundary faces `±= Cb·p'_P`), so it stays conservative to the pressure solver's accuracy and feeds the next momentum assembly.
 - **Pressure-correction sign convention**: with F_f = F*_f - C(p'_N - p'_P), continuity gives A p' = **-**massImbalance. Getting this sign wrong creates positive feedback and blows up the velocity field.
 - **Pure-Neumann pressure is handled by reference-cell elimination** (drop cell 0, p'_0 = 0 — its equation is redundant since imbalances sum to zero), NOT a penalty diagonal; this keeps the CG system well-conditioned SPD. With any Dirichlet pressure side, no elimination is needed.
 

@@ -23,11 +23,12 @@ $$\nabla \cdot (\rho\, \mathbf{u}\, T) = \nabla \cdot (\gamma \nabla T)$$
 1. 建网格          CartesianMesh mesh(64, 64, 0, 0, 1, 1)
 2. 填场量          gamma.setConstant(0.01); 逐单元按解析式填 velocity
 3. 设边界          bc.set(West, Dirichlet, 1.0); bc.set(East, Dirichlet, 0.0)
-4. 装配            assembleTransport(..., ConvectionScheme::Upwind, bc)
-5. 冻结矩阵        sys.A.finalize()           ← 求解前必须的一步
-6. 求解            createEigenBiCGSTAB({tol=1e-10, maxIter=2000})->solve(A, b)
-7. 回填场          temperature.data() = sol  ← 场数据即 Eigen 向量，直接整体赋值
-8. 输出            VtkWriter::write("convection_diffusion.vti", mesh,
+4. 构造通量        interpolateCellVelocityFlux(mesh, velocity, rho)  ← 速度场 → 面通量
+5. 装配            assembleTransport(mesh, flux, gamma, Upwind, bc)
+6. 冻结矩阵        sys.A.finalize()           ← 求解前必须的一步
+7. 求解            createEigenBiCGSTAB({tol=1e-10, maxIter=2000})->solve(A, b)
+8. 回填场          temperature.data() = sol  ← 场数据即 Eigen 向量，直接整体赋值
+9. 输出            VtkWriter::write("convection_diffusion.vti", mesh,
                                      {{"temperature", &T}}, {{"velocity", &u}})
 ```
 
@@ -50,9 +51,10 @@ $$\nabla \cdot (\rho\, \mathbf{u}\, T) = \nabla \cdot (\gamma \nabla T)$$
 - **算法配置**：`tolerance = 1e-6`，`maxIterations = 3000`，亚松弛 `relaxationU = 0.7` / `relaxationP = 0.3`，内层线性求解器容差 1e-9。
 
 ```
-1. 建网格与场      CartesianMesh(64,64,0,0,1,1); velocity/pressure 置零
+1. 建网格与场      CartesianMesh(64,64,0,0,1,1); velocity/pressure 置零; FaceFluxField flux
 2. 设边界          bcU 北墙 = 1，其余速度墙 = 0；bcP 默认零梯度
-3. SIMPLE 迭代     solveSimple(mesh, rho, mu, bcU, bcV, bcP, cfg, u, p)
+3. SIMPLE 迭代     solveSimple(mesh, rho, mu, bcU, bcV, bcP, cfg, u, p, flux)
+                   ← flux 为出参：返回时持有守恒面通量（每单元净流出 ≈ 0）
 4. 输出            VtkWriter::write("cavity.vti", mesh,
                                    {{"pressure", &p}}, {{"velocity", &u}})
 ```
