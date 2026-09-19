@@ -61,6 +61,21 @@ void computeMassFlux(const CartesianMesh& mesh,
     FaceFluxField& flux);
 
 /**
+ * @brief Check that the net outflow across the domain boundary is zero
+ * (up to a relative tolerance); throw std::runtime_error otherwise.
+ *
+ * With pure Neumann pressure BCs (closed domain) the pressure-correction
+ * equation is only compatible when the boundary fluxes sum to zero
+ * (OpenFOAM adjustPhi checks the same invariant). Call this after
+ * computeMassFlux to catch unbalanced velocity BCs early instead of
+ * silently solving an inconsistent system.
+ *
+ * The imbalance is scaled by sum_b |F_b| (total absolute boundary flux);
+ * a domain with no boundary flux at all always passes.
+ */
+void checkFluxCompatibility(const FaceFluxField& flux, Scalar relTol = 1e-10);
+
+/**
  * @brief Assemble the convection operator div(F * phi) into A * phi = b
  * from a precomputed face mass-flux field.
  *

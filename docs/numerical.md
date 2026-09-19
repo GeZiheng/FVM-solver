@@ -16,9 +16,9 @@ $$\underbrace{\sum_f F_f\, \phi_f}_{\text{对流通量}} = \underbrace{\sum_f D_
 |------|------|
 | `include/BoundaryCondition.h` | `BCType`、`BoundaryCondition`、`BoundaryField`（header-only） |
 | `include/Diffusion.h` + `src/Diffusion.cpp` | `assembleDiffusion`：扩散项装配 |
-| `include/Convection.h` + `src/Convection.cpp` | `ConvectionScheme`、`interpolateCellVelocityFlux`、`computeMassFlux`、`assembleConvection`：通量构造与对流项装配 |
+| `include/Convection.h` + `src/Convection.cpp` | `ConvectionScheme`、`interpolateCellVelocityFlux`、`computeMassFlux`、`checkFluxCompatibility`、`assembleConvection`：通量构造/检查与对流项装配 |
 | `include/TransportEquation.h` + `src/TransportEquation.cpp` | `EquationSystem`、`assembleTransport`：完整方程装配 |
-| `include/Simple.h` + `src/Simple.cpp` | `SimpleConfig`、`assembleMomentum`、`solveSimple`：SIMPLE 算法 |
+| `include/Simple.h` + `src/Simple.cpp` | `SimpleConfig`、`assembleMomentum`、`predictMomentum`/`correctPressure`、`solveSimple`：SIMPLE 算法（预测/修正拆分） |
 
 ## BoundaryCondition：边界条件
 
@@ -77,6 +77,7 @@ A(N,N) += D_f      A(N,P) −= D_f
 |------|--------|--------|----------|
 | `interpolateCellVelocityFlux(mesh, velocity, rho)` | $\mathbf{u}_f$ 算术平均 | 相邻单元中心速度 | "给定速度场"的独立输运问题（无速度 BC 可用） |
 | `computeMassFlux(mesh, velocity, rho, bcU, bcV, flux)` | $\mathbf{u}_f$ 算术平均 | 对应分量的 Dirichlet BC 值，无则取单元速度（零梯度） | 有速度边界条件时（`solveSimple` 入口即用它初始化通量，对应 OpenFOAM 的 `createPhi.H`）；**原地填充**（`FaceFluxField` 不可赋值） |
+| `checkFluxCompatibility(flux, relTol)` | — | 检查边界净流出量是否为零（相对容差 `relTol * Σ\|F_b\|`，默认 1e-10），不满足则抛 `std::runtime_error` | 纯 Neumann 压力（封闭域）问题的相容性检查（对应 OpenFOAM 的 `adjustPhi`）；`solveSimple` 入口在初始化通量后调用 |
 
 返回值/填充结果均为正方向为正的存储约定；`assembleConvection` 读边界面时经 `outwardFlux` 还原外法向出流通量 $F_b$。
 
@@ -159,7 +160,7 @@ for P in cells:
 
 $$\nabla \cdot (\rho\, \mathbf{u}\, \mathbf{u}) = -\nabla p + \nabla \cdot (\mu \nabla \mathbf{u}), \qquad \nabla \cdot \mathbf{u} = 0$$
 
-采用**同位网格**（速度、压力均存单元中心）+ **Rhie-Chow 插值**抑制压力棋盘格振荡。`solveSimple` 为主入口，`velocity`/`pressure` 以 in-out 方式传入（初值 → 收敛解），`flux`（`FaceFluxField&`）为出参：入口用 `computeMassFlux` 从速度场与速度 BC 初始化（对应 OpenFOAM 的 `createPhi.H`），迭代中被反复覆盖修正，返回时持有**守恒通量**（每单元净流出量为零，精度等于压力求解器残差）。
+采用**同位网格**（速度、压力均存单元中心）+ **Rhie-Chow 插值**抑制压力棋盘格振荡。`solveSimple` 为主入口，`velocity`/`pressure` 以 in-out 方式传入（初值 → 收敛解），`flux`（`FaceFluxField&`）为出参：入口用 `computeMassFlux` 从速度场与速度 BC 初始化（对应 OpenFOAM 的 `createPhi.H`）；纯 Neumann 压力（封闭域）时随即调用 `checkFluxCompatibility` 检查边界通量相容性（对应 `adjustPhi`），不平衡则抛异常。迭代中 `flux` 被反复覆盖修正，返回时持有**守恒通量**（每单元净流出量为零，精度等于压力求解器残差）。
 
 ### 公开 API
 
@@ -169,6 +170,17 @@ $$\nabla \cdot (\rho\, \mathbf{u}\, \mathbf{u}) = -\nabla p + \nabla \cdot (\mu 
 | `SimpleResiduals` | 每次迭代的残差快照：`continuity`（缩放质量不平衡）、`u`/`v`（速度最大相对修正量）、`pressure`（最大 $\lvert \alpha_p p' \rvert$） |
 | `SimpleResult` | `converged`、`iterations`、`history`（逐迭代残差） |
 | `MomentumAssembly` | 动量装配结果：`system`（含压力源与亚松弛）、`diag`（松弛后对角元 $a_P$）、`rhsNoPressure`（不含压力源的右端项，供 Rhie-Chow 使用） |
+| `MomentumPrediction` | 动量预测结果：`momU`/`momV`（两个分量的装配）、`uStar`/`vStar`（预测速度）、`uHatU`/`uHatV`（$\hat{u} = H/a_P$）、`dU`/`dV`（$V/a_P$） |
+| `CorrectorResult` | 单次压力修正结果：`maxImbalance`（修正前最大质量不平衡）、`duMax`/`dvMax`/`dpMax`（修正量，供收敛判据） |
+
+### 预测/修正拆分结构
+
+`solveSimple` 的迭代体拆分为两个可复用的自由函数，分别对应 OpenFOAM 的 `UEqn.H` 与 `pEqn.H`：
+
+- `predictMomentum(mesh, flux, velocity, mu, scheme, bcU, bcV, pressure, bcP, relaxationU, momSolver)`：装配并求解 u/v 动量方程，计算 Rhie-Chow 数据（$\hat{u}$、$d = V/a_P$），返回 `MomentumPrediction`；
+- `correctPressure(mesh, rho, pred, bcU, bcV, bcP, pSolver, relaxationP, velocity, pressure, flux)`：写入 Rhie-Chow 预测通量 → 装配并求解 p' 方程（含参考单元消元）→ 就地修正面通量（保守）、单元中心速度与压力，返回 `CorrectorResult`。
+
+`solveSimple` 只负责入口通量初始化（含相容性检查）、求解器创建与收敛判断，迭代体即这两个函数的依次调用。拆分的目的是让 PISO 等非定常算法直接复用同一对预测/修正原语（每时间步一次预测 + 多次修正）。
 
 ### assembleMomentum：动量方程装配
 
@@ -261,7 +273,7 @@ $p'$ 的梯度同样用 Gauss 形式，但 Dirichlet 边界的 $p'_b$ 恒取 0�
 | 面系数 | x/y 面分别取 u/v 方程对角，$\bar d_f$ 算术平均 | 向量方程共用一套对角，`rAUf` 插值到面 |
 | 守恒通量 | `FaceFluxField` 持久存储，对流与连续性共用同一通量 | `phi` 是一等公民，对流与连续性共用同一通量 |
 | 奇异性 | 参考单元**消元**（矩阵缩一维，严格 SPD） | `pEqn.setReference(refCell, refValue)`（矩阵尺寸不变） |
-| 封闭域相容性 | 不检查 | `adjustPhi` 强制边界净通量为零 |
+| 封闭域相容性 | `checkFluxCompatibility`：入口检查边界净通量，不平衡则抛异常 | `adjustPhi` 强制边界净通量为零（自动修正而非报错） |
 | 松弛 | Patankar 动量松弛 + `p += α_p p′` | `UEqn.relax()` + `p.relax()`；另有 SIMPLEC 选项（`rAtU = 1/(1/rAU − H1)`） |
 | 收敛判据 | 质量不平衡 + 速度修正量同时 < tolerance | `residualControl` 按场配置，基于线性求解器首轮残差 |
 | 非正交修正 | 无（网格正交） | `simple.correctNonOrthogonal()` 循环 |
@@ -269,12 +281,10 @@ $p'$ 的梯度同样用 Gauss 形式，但 Dirichlet 边界的 $p'_b$ 恒取 0�
 
 ### 值得借鉴与不宜照搬
 
-**值得借鉴**（按对本项目的价值排序）：
+**值得借鉴**（尚未实现，按对本项目的价值排序）：
 
-1. ~~持久守恒通量场~~——**已实现**：`FaceFluxField` + `solveSimple` 每轮通量修正，动量方程与标量输运（`assembleTransport` 的通量接口）复用同一套通量，为 Phase 4 非定常项铺平道路；
-2. **通量相容性检查**——纯 Neumann 压力问题若边界净通量非零则方程不相容，目前会静默失败；装配前检查并可报错。
-3. **SIMPLEC 选项**——仅需改对角系数 $d = 1/(a_P - \sum_N a_N)$，教学上可直接对比迭代数差异。
-4. 次要项：动量预测开关、按场独立的收敛阈值。
+1. **SIMPLEC 选项**——仅需改对角系数 $d = 1/(a_P - \sum_N a_N)$，教学上可直接对比迭代数差异。
+2. 次要项：动量预测开关、按场独立的收敛阈值。
 
 **不宜照搬**：`setReference`（消元法更干净、矩阵更小）；patch/fvMatrix 重型抽象层（为非结构网格通用性付的代价，教学项目会淹没算法主线）；非正交修正循环（仅当引入斜交网格时才有意义）。
 

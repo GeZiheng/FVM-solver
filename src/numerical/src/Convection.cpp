@@ -1,5 +1,9 @@
 #include "Convection.h"
 
+#include <cmath>
+#include <stdexcept>
+#include <string>
+
 namespace fvm::numerical
 {
 
@@ -97,6 +101,42 @@ void computeMassFlux(const CartesianMesh& mesh,
             if (north.type == BCType::Dirichlet)
                 flux.y(i, ny) = rho * north.value * Sy;
         }
+    }
+}
+
+void checkFluxCompatibility(const FaceFluxField& flux, Scalar relTol)
+{
+    const CartesianMesh& mesh = flux.mesh();
+    const Index nx = mesh.nx();
+    const Index ny = mesh.ny();
+
+    Scalar net = 0.0;
+    Scalar scale = 0.0;
+    for (Index j = 0; j < ny; ++j)
+    {
+        const Scalar wOut = -flux.x(0, j);
+        const Scalar eOut = flux.x(nx, j);
+        net += wOut + eOut;
+        scale += std::abs(wOut) + std::abs(eOut);
+    }
+    for (Index i = 0; i < nx; ++i)
+    {
+        const Scalar sOut = -flux.y(i, 0);
+        const Scalar nOut = flux.y(i, ny);
+        net += sOut + nOut;
+        scale += std::abs(sOut) + std::abs(nOut);
+    }
+
+    if (std::abs(net) > relTol * scale)
+    {
+        throw std::runtime_error(
+            "checkFluxCompatibility: net boundary outflow "
+            + std::to_string(net)
+            + " exceeds tolerance (relative to total boundary flux "
+            + std::to_string(scale)
+            + "); the pressure-correction equation is incompatible. "
+              "Check that the velocity boundary conditions balance "
+              "(e.g. inlet flux = outlet flux).");
     }
 }
 

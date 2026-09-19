@@ -4,7 +4,8 @@
 - Phase 1 complete: project skeleton, core data structures, linear algebra wrapper, VTK I/O, and unit tests implemented and passing.
 - Phase 2 complete: FVM discretization operators (diffusion, convection UD/CD, source-term linearization, boundary conditions) implemented. All 31 test cases pass, including grid-convergence order checks (UD ~ O(h), CD/diffusion ~ O(h^2)).
 - Phase 3 complete: SIMPLE algorithm for incompressible steady-state NS (collocated grid + Rhie-Chow interpolation, Patankar under-relaxation, pressure-correction equation with reference-cell elimination). All 36 test cases pass, including Poiseuille channel flow (quantitative parabolic profile + flow rate) and lid-driven cavity at Re=100.
-- Persistent conservative flux field (OpenFOAM-style `phi`): `FaceFluxField` in core; convection/transport/momentum assemblers take the flux field as their only convection input (velocity-based convenience interfaces removed; use `interpolateCellVelocityFlux` / `computeMassFlux` to build one). `solveSimple` maintains the flux across iterations (predicted F* written during assembly, corrected by p' afterwards) and returns it via an out parameter — the converged flux is conservative to pressure-solver accuracy. All 42 test cases pass, including per-cell flux-conservation checks.
+- Persistent conservative flux field (OpenFOAM-style `phi`): `FaceFluxField` in core; convection/transport/momentum assemblers take the flux field as their only convection input (velocity-based convenience interfaces removed; use `interpolateCellVelocityFlux` / `computeMassFlux` to build one). `solveSimple` maintains the flux across iterations (predicted F* written during assembly, corrected by p' afterwards) and returns it via an out parameter — the converged flux is conservative to pressure-solver accuracy. All 43 test cases pass, including per-cell flux-conservation checks.
+- SIMPLE iteration split into reusable `predictMomentum`/`correctPressure` free functions (UEqn.H/pEqn.H-style, ready for PISO reuse); closed-domain flux compatibility enforced via `checkFluxCompatibility` (OpenFOAM adjustPhi-style) at `solveSimple` entry.
 - Build system verified working (CMake + vcpkg).
 
 ## Architecture
@@ -38,15 +39,18 @@ src/
       BoundaryCondition.h  — BCType{Dirichlet, Neumann} + BoundaryField (4 sides, header-only)
       Diffusion.h          — -div(gamma grad phi) assembly
       Convection.h         — div(F phi) assembly from FaceFluxField, ConvectionScheme{Upwind, Central},
-                             flux constructors interpolateCellVelocityFlux / computeMassFlux
+                             flux constructors interpolateCellVelocityFlux / computeMassFlux,
+                             closed-domain checkFluxCompatibility
       TransportEquation.h  — full conv-diff-source assembly from FaceFluxField -> EquationSystem{A, b}
-      Simple.h             — SIMPLE algorithm: SimpleConfig/SimpleResult, assembleMomentum, solveSimple
-                             (persistent flux out parameter)
+      Simple.h             — SIMPLE algorithm: SimpleConfig/SimpleResult, assembleMomentum,
+                             predictMomentum/correctPressure (UEqn.H/pEqn.H-style split, reusable by PISO),
+                             solveSimple (persistent flux out parameter)
     src/
       Diffusion.cpp
       Convection.cpp
       TransportEquation.cpp
       Simple.cpp           — momentum predictor, Rhie-Chow fluxes, pressure-correction eq, corrections
+                             (as free functions; solveSimple loops over them)
   app/
     main.cpp         — two demos: steady convection-diffusion (recirculating flow, hot/cold walls)
                        and lid-driven cavity at Re=100 via SIMPLE (cavity.vti)
@@ -60,7 +64,8 @@ tests/
   test_diffusion.cpp — diffusion operator: exact solutions, SPD, BC handling, O(h^2)
   test_convection.cpp— convection operator: UD O(h) / CD O(h^2), boundedness, conservation
   test_transport.cpp — combined assembly, source terms (Sc + Sp*phi), conservation
-  test_simple.cpp    — momentum assembly/under-relaxation identities, Poiseuille, cavity Re=100
+  test_simple.cpp    — momentum assembly/under-relaxation identities, Poiseuille, cavity Re=100,
+                       closed-domain flux-compatibility check
 
 docs/                 — per-module code documentation (Chinese)
   core.md            — Types, CartesianMesh, ScalarField/VectorField
@@ -125,7 +130,8 @@ ctest --test-dir build --output-on-failure
 - **SolverConfig::tolerance means relative residual** |Ax-b|/|b|. The BiCGSTAB wrapper scales Eigen's absolute stopping tolerance by |b| and checks convergence itself (Eigen 5.x compares mismatched absolute/relative quantities internally — do not rely on `solver.info()` for BiCGSTAB convergence).
 - **SIMPLE (collocated, Rhie-Chow)**: momentum assembly reuses the convection/diffusion operators; the pressure-gradient source uses the Gauss form (sum_f p_f n S_f) so Dirichlet pressure boundary values drive the flow. Under-relaxed diagonal `a_P` is read from a finalized matrix copy; `d = vol/a_P` feeds the Rhie-Chow face fluxes (x-faces use the u-equation diagonal, y-faces the v-equation one). The persistent flux field is overwritten with the predicted F* during p' assembly and corrected in place afterwards (`F_f -= C(p'_N - p'_P)`; Dirichlet-p boundary faces `±= Cb·p'_P`), so it stays conservative to the pressure solver's accuracy and feeds the next momentum assembly.
 - **Pressure-correction sign convention**: with F_f = F*_f - C(p'_N - p'_P), continuity gives A p' = **-**massImbalance. Getting this sign wrong creates positive feedback and blows up the velocity field.
-- **Pure-Neumann pressure is handled by reference-cell elimination** (drop cell 0, p'_0 = 0 — its equation is redundant since imbalances sum to zero), NOT a penalty diagonal; this keeps the CG system well-conditioned SPD. With any Dirichlet pressure side, no elimination is needed.
+- **Pure-Neumann pressure is handled by reference-cell elimination** (drop cell 0, p'_0 = 0 — its equation is redundant since imbalances sum to zero), NOT a penalty diagonal; this keeps the CG system well-conditioned SPD. With any Dirichlet pressure side, no elimination is needed. Closed-domain (pure-Neumann-p) compatibility is enforced by `checkFluxCompatibility` at `solveSimple` entry (net boundary outflow must be ~0, OpenFOAM adjustPhi-style), throwing on unbalanced velocity BCs.
+- **SIMPLE iteration is split into reusable primitives**: `predictMomentum` (UEqn.H-style) and `correctPressure` (pEqn.H-style) are free functions; `solveSimple` just loops over them. PISO/unsteady solvers should reuse them instead of duplicating the corrector logic.
 
 ## Dependencies
 - `eigen3` — sparse linear algebra

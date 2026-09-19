@@ -5,6 +5,7 @@
 #include "TransportEquation.h"
 #include <cmath>
 #include <doctest/doctest.h>
+#include <stdexcept>
 
 using namespace fvm::core;
 using namespace fvm::math;
@@ -395,4 +396,44 @@ TEST_CASE("Simple: lid-driven cavity at Re=100 converges with recirculation")
             = std::max(maxFluxImbalance, std::abs(flux.cellImbalance(c)));
     }
     CHECK(maxFluxImbalance < 1e-8);
+}
+
+TEST_CASE("Simple: unbalanced closed-domain velocity BCs throw")
+{
+    // Pure Neumann pressure (closed domain): the boundary fluxes must
+    // sum to zero, otherwise the pressure-correction equation is
+    // incompatible. West inlet u = 1 with all other sides being walls
+    // violates this; solveSimple must reject it at entry.
+    const Index n = 8;
+    CartesianMesh mesh(n, n, 0.0, 0.0, 1.0, 1.0);
+    const Scalar rho = 1.0;
+    const Scalar mu = 0.01;
+
+    BoundaryField bcU;
+    bcU.set(BoundaryField::West, BCType::Dirichlet, 1.0); // inlet
+    bcU.set(BoundaryField::East, BCType::Dirichlet, 0.0); // wall
+    bcU.set(BoundaryField::North, BCType::Dirichlet, 0.0);
+    bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
+
+    BoundaryField bcV;
+    bcV.set(BoundaryField::West, BCType::Dirichlet, 0.0);
+    bcV.set(BoundaryField::East, BCType::Dirichlet, 0.0);
+    bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
+    bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
+
+    BoundaryField bcP; // zero-gradient everywhere (default)
+
+    VectorField velocity(mesh, "u");
+    ScalarField pressure(mesh, "p");
+    FaceFluxField flux(mesh, "phi");
+
+    const SimpleConfig config;
+    CHECK_THROWS_AS(solveSimple(mesh, rho, mu, bcU, bcV, bcP, config,
+                        velocity, pressure, flux),
+        std::runtime_error);
+
+    // Balancing the inlet with an equal outlet restores compatibility.
+    bcU.set(BoundaryField::East, BCType::Dirichlet, 1.0);
+    computeMassFlux(mesh, velocity, rho, bcU, bcV, flux);
+    CHECK_NOTHROW(checkFluxCompatibility(flux));
 }
