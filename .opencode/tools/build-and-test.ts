@@ -51,7 +51,7 @@ export default tool({
     const config = args.config ?? "Release"
     const target = args.target ?? "all"
     const runOption = args.run ?? "tests"
-    const buildDir = path.join(cwd, "build", config)
+    const buildDir = path.join(cwd, "build", `${config}-opencode`)
     const sections: string[] = []
     let failed = false
 
@@ -67,7 +67,7 @@ export default tool({
     if (vcpkgRoot) {
       configureCmd.push(`-DCMAKE_TOOLCHAIN_FILE=${path.join(vcpkgRoot, "scripts", "buildsystems", "vcpkg.cmake")}`)
     }
-    sections.push(`$ ${configureCmd.join(" ")}`)
+        sections.push(`$ ${configureCmd.join(" ")}`)
     const configure = run(configureCmd, cwd)
     sections.push(tail(configure.output))
     if (configure.exitCode !== 0) {
