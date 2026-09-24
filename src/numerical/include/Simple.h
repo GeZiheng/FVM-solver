@@ -27,9 +27,9 @@ namespace fvm::numerical
 struct SimpleConfig
 {
     int maxIterations = 500;
-    Scalar tolerance = 1e-6; ///< Convergence tolerance on the scaled
-                             ///< continuity residual (max cell mass
-                             ///< imbalance / characteristic flux).
+    Scalar tolerance = 1e-6;  ///< Convergence tolerance on the scaled
+                              ///< continuity residual (max cell mass
+                              ///< imbalance / characteristic flux).
     Scalar relaxationU = 0.7; ///< Under-relaxation for momentum (0, 1].
     Scalar relaxationP = 0.3; ///< Under-relaxation for pressure (0, 1].
     ConvectionScheme scheme = ConvectionScheme::Upwind;

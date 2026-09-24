@@ -30,8 +30,9 @@ TEST_CASE("FluxField: face counts and indexing on a 3x2 mesh")
     CHECK(flux.y(2, 2) == 4.0);
 }
 
-TEST_CASE("FluxField: outwardFlux sign convention matches the mesh face "
-          "convention")
+TEST_CASE(
+    "FluxField: outwardFlux sign convention matches the mesh face "
+    "convention")
 {
     CartesianMesh mesh(3, 2, 0.0, 0.0, 3.0, 2.0);
     FaceFluxField flux(mesh, "phi");
@@ -44,8 +45,8 @@ TEST_CASE("FluxField: outwardFlux sign convention matches the mesh face "
     flux.y(1, 1) = 30.0;
     flux.y(1, 0) = 40.0;
 
-    CHECK(flux.outwardFlux(cell, 0) == doctest::Approx(10.0)); // east
-    CHECK(flux.outwardFlux(cell, 1) == doctest::Approx(30.0)); // north
+    CHECK(flux.outwardFlux(cell, 0) == doctest::Approx(10.0));  // east
+    CHECK(flux.outwardFlux(cell, 1) == doctest::Approx(30.0));  // north
     CHECK(flux.outwardFlux(cell, 2) == doctest::Approx(-20.0)); // west
     CHECK(flux.outwardFlux(cell, 3) == doctest::Approx(-40.0)); // south
 }
@@ -70,8 +71,9 @@ TEST_CASE("FluxField: cellImbalance sums the signed outward fluxes")
     CHECK(flux.cellImbalance(cell) == doctest::Approx(1.0));
 }
 
-TEST_CASE("FluxField: computeMassFlux interpolates interior faces and "
-          "honors Dirichlet velocity BCs")
+TEST_CASE(
+    "FluxField: computeMassFlux interpolates interior faces and "
+    "honors Dirichlet velocity BCs")
 {
     CartesianMesh mesh(4, 3, 0.0, 0.0, 4.0, 3.0);
     const Scalar rho = 1.5;
@@ -97,8 +99,8 @@ TEST_CASE("FluxField: computeMassFlux interpolates interior faces and "
     const Index c11 = mesh.cellIndex(1, 1);
     const Index c21 = mesh.cellIndex(2, 1);
     CHECK(flux.x(2, 1)
-          == doctest::Approx(
-              rho * 0.5 * (velocity.u()(c11) + velocity.u()(c21)) * dy));
+          == doctest::Approx(rho * 0.5 * (velocity.u()(c11) + velocity.u()(c21))
+                             * dy));
 
     // West boundary: Dirichlet value everywhere.
     for (Index j = 0; j < mesh.ny(); ++j)
@@ -109,8 +111,7 @@ TEST_CASE("FluxField: computeMassFlux interpolates interior faces and "
     for (Index j = 0; j < mesh.ny(); ++j)
     {
         CHECK(flux.x(mesh.nx(), j)
-              == doctest::Approx(
-                  rho * velocity.u()(mesh.nx() - 1, j) * dy));
+              == doctest::Approx(rho * velocity.u()(mesh.nx() - 1, j) * dy));
     }
     // North boundary: Dirichlet v.
     for (Index i = 0; i < mesh.nx(); ++i)
@@ -120,13 +121,13 @@ TEST_CASE("FluxField: computeMassFlux interpolates interior faces and "
     // South boundary: zero-gradient -> adjacent cell velocity.
     for (Index i = 0; i < mesh.nx(); ++i)
     {
-        CHECK(flux.y(i, 0)
-              == doctest::Approx(rho * velocity.v()(i, 0) * dx));
+        CHECK(flux.y(i, 0) == doctest::Approx(rho * velocity.v()(i, 0) * dx));
     }
 }
 
-TEST_CASE("FluxField: flux-based convection assembly uses the stored "
-          "face fluxes directly")
+TEST_CASE(
+    "FluxField: flux-based convection assembly uses the stored "
+    "face fluxes directly")
 {
     // Two cells side by side, unit spacing -> face area 1. A prescribed
     // flux F = 2 flows from cell 0 to cell 1 across the interior x-face;
@@ -167,8 +168,9 @@ TEST_CASE("FluxField: flux-based convection assembly uses the stored "
     }
 }
 
-TEST_CASE("FluxField: SIMPLE-corrected flux is conservative on a small "
-          "lid-driven cavity")
+TEST_CASE(
+    "FluxField: SIMPLE-corrected flux is conservative on a small "
+    "lid-driven cavity")
 {
     const Index n = 8;
     CartesianMesh mesh(n, n, 0.0, 0.0, 1.0, 1.0);
@@ -195,9 +197,16 @@ TEST_CASE("FluxField: SIMPLE-corrected flux is conservative on a small "
     config.solverConfig.tolerance = 1e-9;
     config.solverConfig.maxIterations = 2000;
 
-    const SimpleResult result
-        = solveSimple(mesh, 1.0, 0.01, bcU, bcV, bcP, config, velocity,
-            pressure, flux);
+    const SimpleResult result = solveSimple(mesh,
+        1.0,
+        0.01,
+        bcU,
+        bcV,
+        bcP,
+        config,
+        velocity,
+        pressure,
+        flux);
     REQUIRE(result.converged);
 
     // Every cell's net outflow vanishes up to the pressure solver's
@@ -205,8 +214,7 @@ TEST_CASE("FluxField: SIMPLE-corrected flux is conservative on a small "
     Scalar maxImbalance = 0.0;
     for (Index c = 0; c < mesh.cellCount(); ++c)
     {
-        maxImbalance
-            = std::max(maxImbalance, std::abs(flux.cellImbalance(c)));
+        maxImbalance = std::max(maxImbalance, std::abs(flux.cellImbalance(c)));
     }
     CHECK(maxImbalance < 1e-8);
 

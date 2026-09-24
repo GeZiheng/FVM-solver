@@ -4,7 +4,18 @@
 name: CMake Build and Test
 
 on:
+  # Runs on every pull request, on any base branch.
   pull_request:
+  workflow_dispatch:
+
+# The build only needs to read the repository.
+permissions:
+  contents: read
+
+# Cancel a run that was superseded by a newer push to the same branch or PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
@@ -16,13 +27,21 @@ env:
 
 jobs:
   build:
-    name: ${{ matrix.os }}
+    # Stable check names: the runner image can change without breaking the
+    # required status checks configured in the repository ruleset.
+    name: build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    # Fail instead of burning the 6-hour default if vcpkg stalls.
+    timeout-minutes: 30
     strategy:
       # Report the other platform as well if one of them fails.
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, windows-latest ]
+        include:
+          - name: linux-gcc
+            os: ubuntu-latest
+          - name: windows-msvc
+            os: windows-latest
 
     steps:
     - uses: actions/checkout@v7
@@ -70,9 +89,10 @@ jobs:
         -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
 
     - name: Build
-      run: cmake --build ${{ github.workspace }}/build --config ${{ env.BUILD_TYPE }}
+      run: cmake --build ${{ github.workspace }}/build --config ${{ env.BUILD_TYPE }} --parallel
 
     - name: Test
       working-directory: ${{ github.workspace }}/build
-      run: ctest -C ${{ env.BUILD_TYPE }} --output-on-failure
+      # --no-tests=error fails the step if no test was registered at all.
+      run: ctest -C ${{ env.BUILD_TYPE }} --output-on-failure --no-tests=error
 

@@ -116,7 +116,8 @@ int main()
         cavityPressure,
         cavityFlux);
 
-    std::cout << "SIMPLE: " << (simpleResult.converged ? "converged" : "NOT converged")
+    std::cout << "SIMPLE: "
+              << (simpleResult.converged ? "converged" : "NOT converged")
               << " in " << simpleResult.iterations << " iterations, "
               << "continuity residual "
               << simpleResult.history.back().continuity << "\n";

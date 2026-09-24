@@ -81,9 +81,8 @@ Scalar boundaryNormalVelocity(int face,
     const BoundaryCondition& cond = bcComp.get(face);
     const Scalar val
         = (cond.type == BCType::Dirichlet) ? cond.value : starComp(P);
-    return (face == BoundaryField::West || face == BoundaryField::South)
-               ? -val
-               : val;
+    return (face == BoundaryField::West || face == BoundaryField::South) ? -val
+                                                                         : val;
 }
 
 } // namespace
@@ -106,8 +105,8 @@ MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
     }
     if (relaxation <= 0.0 || relaxation > 1.0)
     {
-        throw std::invalid_argument(
-            "assembleMomentum: relaxation must be in (0, 1]");
+        throw std::
+            invalid_argument("assembleMomentum: relaxation must be in (0, 1]");
     }
 
     const Index nCells = mesh.cellCount();
@@ -116,14 +115,18 @@ MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
     ScalarField muField(mesh, "mu");
     muField.setConstant(mu);
 
-    MomentumAssembly result{ EquationSystem(nCells), Vector(nCells),
-        Vector(nCells) };
+    MomentumAssembly result{
+        EquationSystem(nCells), Vector(nCells), Vector(nCells)
+    };
     result.rhsNoPressure.setZero();
 
     // Convection-diffusion part (no pressure source yet).
-    assembleDiffusion(mesh, muField, bc, result.system.A,
-        result.rhsNoPressure);
-    assembleConvection(mesh, flux, scheme, bc, result.system.A,
+    assembleDiffusion(mesh, muField, bc, result.system.A, result.rhsNoPressure);
+    assembleConvection(mesh,
+        flux,
+        scheme,
+        bc,
+        result.system.A,
         result.rhsNoPressure);
 
     // Read the unrelaxed diagonal from a finalized copy.
@@ -132,8 +135,7 @@ MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
     const Vector aP0 = probe.native().diagonal();
 
     const Scalar invAlpha = 1.0 / relaxation;
-    const ScalarField& phiOld
-        = (component == 0) ? velocity.u() : velocity.v();
+    const ScalarField& phiOld = (component == 0) ? velocity.u() : velocity.v();
 
     result.diag = aP0 * invAlpha;
 
@@ -225,8 +227,8 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
 {
     if (relaxationP <= 0.0 || relaxationP > 1.0)
     {
-        throw std::invalid_argument(
-            "correctPressure: relaxationP must be in (0, 1]");
+        throw std::
+            invalid_argument("correctPressure: relaxationP must be in (0, 1]");
     }
 
     const Index nCells = mesh.cellCount();
@@ -244,11 +246,14 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
     }
     const bool pinReference = !hasDirichletP;
     const Index nP = pinReference ? nCells - 1 : nCells;
-    const auto rowOf = [pinReference](Index cell) -> Index {
+    const auto rowOf = [pinReference](Index cell) -> Index
+    {
         return pinReference ? cell - 1 : cell;
     };
-    const auto isReference
-        = [pinReference](Index cell) { return pinReference && cell == 0; };
+    const auto isReference = [pinReference](Index cell)
+    {
+        return pinReference && cell == 0;
+    };
 
     // Pressure-correction BCs: p' = 0 wherever p is fixed (Dirichlet),
     // zero gradient elsewhere.
@@ -302,9 +307,9 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
                 const Scalar delta = mesh.cellToCellDistance(P, face);
                 const Scalar dF = 0.5 * (dC(P) + dC(N));
                 const Scalar uHatF = 0.5 * (uHat(P) + uHat(N));
-                const Scalar F = rho * Sf
-                                 * (uHatF
-                                    - dF * (pressure(N) - pressure(P)) / delta);
+                const Scalar F
+                    = rho * Sf
+                      * (uHatF - dF * (pressure(N) - pressure(P)) / delta);
                 const Scalar C = rho * dF * Sf / delta;
 
                 // Store the predicted flux (positive P -> N, the
@@ -344,18 +349,18 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
                 // stored positive along +x/+y, hence the sign).
                 switch (face)
                 {
-                case BoundaryField::East:
-                    flux.x(iP + 1, jP) = Fb;
-                    break;
-                case BoundaryField::West:
-                    flux.x(iP, jP) = -Fb;
-                    break;
-                case BoundaryField::North:
-                    flux.y(iP, jP + 1) = Fb;
-                    break;
-                default: // South
-                    flux.y(iP, jP) = -Fb;
-                    break;
+                    case BoundaryField::East:
+                        flux.x(iP + 1, jP) = Fb;
+                        break;
+                    case BoundaryField::West:
+                        flux.x(iP, jP) = -Fb;
+                        break;
+                    case BoundaryField::North:
+                        flux.y(iP, jP + 1) = Fb;
+                        break;
+                    default: // South
+                        flux.y(iP, jP) = -Fb;
+                        break;
                 }
 
                 if (bcP.get(face).type == BCType::Dirichlet && !isReference(P))
@@ -498,8 +503,8 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
 {
     if (config.relaxationP <= 0.0 || config.relaxationP > 1.0)
     {
-        throw std::invalid_argument(
-            "solveSimple: relaxationP must be in (0, 1]");
+        throw std::
+            invalid_argument("solveSimple: relaxationP must be in (0, 1]");
     }
 
     const Index nCells = mesh.cellCount();
@@ -573,8 +578,7 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
                 std::hypot(velocity.u()(P), velocity.v()(P)));
         }
         const Scalar fRef
-            = std::max(rho * maxSpeed * 0.5 * (mesh.dx() + mesh.dy()),
-                1e-30);
+            = std::max(rho * maxSpeed * 0.5 * (mesh.dx() + mesh.dy()), 1e-30);
         const Scalar uRef = std::max(maxSpeed, 1e-30);
 
         SimpleResiduals res;
@@ -586,10 +590,9 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
 
         if (config.verbose)
         {
-            std::cout << "SIMPLE iter " << iter << ": continuity="
-                      << res.continuity << " du=" << res.u
-                      << " dv=" << res.v << " dp=" << res.pressure
-                      << std::endl;
+            std::cout << "SIMPLE iter " << iter
+                      << ": continuity=" << res.continuity << " du=" << res.u
+                      << " dv=" << res.v << " dp=" << res.pressure << std::endl;
         }
 
         if (res.continuity < config.tolerance && res.u < config.tolerance
