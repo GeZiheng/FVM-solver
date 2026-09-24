@@ -110,14 +110,14 @@ public:
         const auto [i, j] = mesh_.cellIJ(cell);
         switch (face)
         {
-        case 0: // east
-            return x(i + 1, j);
-        case 1: // north
-            return y(i, j + 1);
-        case 2: // west
-            return -x(i, j);
-        default: // south
-            return -y(i, j);
+            case 0: // east
+                return x(i + 1, j);
+            case 1: // north
+                return y(i, j + 1);
+            case 2: // west
+                return -x(i, j);
+            default: // south
+                return -y(i, j);
         }
     }
 

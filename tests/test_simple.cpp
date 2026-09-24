@@ -31,8 +31,9 @@ VectorField makeRecirculatingVelocity(const CartesianMesh& mesh)
 
 } // namespace
 
-TEST_CASE("Simple: momentum assembly matches transport without pressure "
-          "or relaxation")
+TEST_CASE(
+    "Simple: momentum assembly matches transport without pressure "
+    "or relaxation")
 {
     CartesianMesh mesh(12, 10, 0.0, 0.0, 1.0, 1.0);
     const Scalar rho = 1.2;
@@ -73,8 +74,7 @@ TEST_CASE("Simple: momentum assembly matches transport without pressure "
     for (Index c = 0; c < mesh.cellCount(); ++c)
     {
         CHECK(mom.system.b(c) == doctest::Approx(ref.b(c)).epsilon(1e-12));
-        CHECK(mom.rhsNoPressure(c)
-              == doctest::Approx(ref.b(c)).epsilon(1e-12));
+        CHECK(mom.rhsNoPressure(c) == doctest::Approx(ref.b(c)).epsilon(1e-12));
     }
 }
 
@@ -228,8 +228,7 @@ TEST_CASE("Simple: pressure gradient enters only the full right-hand side")
     {
         // b = b0 - dp/dx * vol, with b0 = 0 here (no convection, and a
         // pure-Neumann diffusion operator contributes nothing to b).
-        CHECK(mom.rhsNoPressure(c)
-              == doctest::Approx(0.0).epsilon(1e-12));
+        CHECK(mom.rhsNoPressure(c) == doctest::Approx(0.0).epsilon(1e-12));
         CHECK(mom.system.b(c) == doctest::Approx(-vol).epsilon(1e-10));
     }
 
@@ -250,8 +249,9 @@ TEST_CASE("Simple: pressure gradient enters only the full right-hand side")
     }
 }
 
-TEST_CASE("Simple: pressure-driven channel flow reproduces Poiseuille "
-          "profile")
+TEST_CASE(
+    "Simple: pressure-driven channel flow reproduces Poiseuille "
+    "profile")
 {
     // Unit square channel: walls at north/south (no-slip), pressure
     // difference between west (p=1) and east (p=0) drives the flow.
@@ -285,9 +285,16 @@ TEST_CASE("Simple: pressure-driven channel flow reproduces Poiseuille "
     config.solverConfig.tolerance = 1e-9;
     config.solverConfig.maxIterations = 2000;
 
-    const SimpleResult result
-        = solveSimple(mesh, rho, mu, bcU, bcV, bcP, config, velocity,
-            pressure, flux);
+    const SimpleResult result = solveSimple(mesh,
+        rho,
+        mu,
+        bcU,
+        bcV,
+        bcP,
+        config,
+        velocity,
+        pressure,
+        flux);
 
     CHECK(result.converged);
     CHECK(result.history.back().continuity < config.tolerance);
@@ -364,9 +371,16 @@ TEST_CASE("Simple: lid-driven cavity at Re=100 converges with recirculation")
     config.solverConfig.tolerance = 1e-9;
     config.solverConfig.maxIterations = 2000;
 
-    const SimpleResult result
-        = solveSimple(mesh, rho, mu, bcU, bcV, bcP, config, velocity,
-            pressure, flux);
+    const SimpleResult result = solveSimple(mesh,
+        rho,
+        mu,
+        bcU,
+        bcV,
+        bcP,
+        config,
+        velocity,
+        pressure,
+        flux);
 
     CHECK(result.converged);
     CHECK(result.history.back().continuity < config.tolerance);
@@ -428,8 +442,16 @@ TEST_CASE("Simple: unbalanced closed-domain velocity BCs throw")
     FaceFluxField flux(mesh, "phi");
 
     const SimpleConfig config;
-    CHECK_THROWS_AS(solveSimple(mesh, rho, mu, bcU, bcV, bcP, config,
-                        velocity, pressure, flux),
+    CHECK_THROWS_AS(solveSimple(mesh,
+                        rho,
+                        mu,
+                        bcU,
+                        bcV,
+                        bcP,
+                        config,
+                        velocity,
+                        pressure,
+                        flux),
         std::runtime_error);
 
     // Balancing the inlet with an equal outlet restores compatibility.
