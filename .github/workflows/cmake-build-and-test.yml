@@ -4,6 +4,7 @@
 name: CMake Build and Test
 
 on:
+  # Runs on every pull request, on any base branch.
   pull_request:
   workflow_dispatch:
 
@@ -26,13 +27,21 @@ env:
 
 jobs:
   build:
-    name: ${{ matrix.os }}
+    # Stable check names: the runner image can change without breaking the
+    # required status checks configured in the repository ruleset.
+    name: build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    # Fail instead of burning the 6-hour default if vcpkg stalls.
+    timeout-minutes: 30
     strategy:
       # Report the other platform as well if one of them fails.
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, windows-latest ]
+        include:
+          - name: linux-gcc
+            os: ubuntu-latest
+          - name: windows-msvc
+            os: windows-latest
 
     steps:
     - uses: actions/checkout@v7
