@@ -5,9 +5,8 @@ namespace fvm::numerical
 {
 
 EquationSystem assembleTransport(const CartesianMesh& mesh,
-    const VectorField& velocity,
+    const FaceFluxField& flux,
     const ScalarField& gamma,
-    Scalar rho,
     ConvectionScheme scheme,
     const BoundaryField& bc,
     const ScalarField* Sc,
@@ -16,7 +15,7 @@ EquationSystem assembleTransport(const CartesianMesh& mesh,
     EquationSystem sys(mesh.cellCount());
 
     assembleDiffusion(mesh, gamma, bc, sys.A, sys.b);
-    assembleConvection(mesh, velocity, rho, scheme, bc, sys.A, sys.b);
+    assembleConvection(mesh, flux, scheme, bc, sys.A, sys.b);
 
     const Index nCells = mesh.cellCount();
     const Scalar vol = mesh.cellVolume(0);

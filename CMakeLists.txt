@@ -16,12 +16,14 @@ target_sources(fvm_core
     PRIVATE
         src/core/src/Mesh.cpp
         src/core/src/Field.cpp
+        src/core/src/FluxField.cpp
         src/math/src/SparseMatrix.cpp
         src/math/src/LinearSolver.cpp
         src/io/src/VtkWriter.cpp
         src/numerical/src/Diffusion.cpp
         src/numerical/src/Convection.cpp
         src/numerical/src/TransportEquation.cpp
+        src/numerical/src/Simple.cpp
 )
 
 target_include_directories(fvm_core
@@ -50,9 +52,11 @@ target_sources(fvm_tests
         tests/test_mesh.cpp
         tests/test_linalg.cpp
         tests/test_field.cpp
+        tests/test_flux.cpp
         tests/test_diffusion.cpp
         tests/test_convection.cpp
         tests/test_transport.cpp
+        tests/test_simple.cpp
         tests/main.cpp
 )
 

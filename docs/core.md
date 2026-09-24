@@ -9,6 +9,7 @@
 | `include/Types.h` | `Scalar`、`Index`、`Vector` 类型别名 |
 | `include/Mesh.h` + `src/Mesh.cpp` | `CartesianMesh` 类 |
 | `include/Field.h` | `ScalarField`、`VectorField` 类（header-only，`src/Field.cpp` 仅为保持构建结构一致而存在的空文件） |
+| `include/FluxField.h` | `FaceFluxField` 类（header-only，`src/FluxField.cpp` 同样为空文件） |
 
 ## Types.h：类型别名
 
@@ -69,12 +70,29 @@ using Vector = Eigen::VectorXd;
 - `VectorField::u()` / `v()`：返回分量标量场引用。
 - `VectorField::operator()(cell)`：返回 `{u, v}` 值对（只读）。
 
+## FaceFluxField：面通量场
+
+OpenFOAM 风格 `surfaceScalarField` 的对应物：把标量通量（通常是质量通量 $\rho\,\mathbf{u}\cdot\mathbf{n}\,S$）直接存储在**面**上（含边界面），供对流装配、SIMPLE 迭代与守恒性检查共用（见 [numerical.md](numerical.md)）。
+
+### 存储布局与符号约定
+
+- x 向面 $(n_x+1)\,n_y$ 个 + y 向面 $n_x\,(n_y+1)$ 个，各存为一个 `Vector`；
+- 通量**沿坐标正方向为正**：`x(i, j)` 是穿过 x 面 $i$（单元 $i-1$ 与单元 $i$ 之间）沿 $+x$ 的通量，$i \in [0, n_x]$，$j \in [0, n_y)$；`y(i, j)` 同理（$j \in [0, n_y]$）；
+- 单元的出流通量带符号：东/北面取 $+$，西/南面取 $-$，由 `outwardFlux(cell, face)` 给出（face 遵循 0=E, 1=N, 2=W, 3=S 的全局约定）；
+- `cellImbalance(cell)` $= x_{i+1,j} - x_{i,j} + y_{i,j+1} - y_{i,j}$，即单元净流出量；守恒通量场中该值在求解器精度内为零。
+
+### 实现要点
+
+- 与 `ScalarField` 一样持有 `const CartesianMesh&`（同样需注意悬挂引用；也因此**不可拷贝赋值**，需要覆盖写时使用 `computeMassFlux` 这类原地填充接口，见 numerical 模块）；
+- header-only（`src/FluxField.cpp` 为空文件，保持构建结构一致）。
+
 ## 依赖关系
 
 ```
-Types.h  ←（被所有文件包含）
-Mesh.h   → Types.h
-Field.h  → Mesh.h, Types.h
+Types.h     ←（被所有文件包含）
+Mesh.h      → Types.h
+Field.h     → Mesh.h, Types.h
+FluxField.h → Mesh.h, Types.h
 ```
 
 core 不依赖 math / io / numerical；上层模块通过 `using fvm::core::Scalar` 等声明引用本模块类型。
