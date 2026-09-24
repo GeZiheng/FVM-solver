@@ -1,0 +1,78 @@
+# Build and test the project on Linux and Windows.
+# Dependencies are declared in vcpkg.json and resolved in manifest mode, which
+# only happens when CMake is configured with the vcpkg toolchain file.
+name: CMake Build and Test
+
+on:
+  pull_request:
+
+env:
+  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
+  BUILD_TYPE: Release
+  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+  # Must match "builtin-baseline" in vcpkg.json. The runner checks out this
+  # exact vcpkg commit, so the ports used in CI match the manifest.
+  VCPKG_BASELINE: b40f8d253202fec83a5543c869aa7576b7cfdd2f
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report the other platform as well if one of them fails.
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+
+    steps:
+    - uses: actions/checkout@v7
+
+    # Binary cache: stores the packages vcpkg built for vcpkg.json, so an
+    # unchanged dependency set is downloaded instead of compiled again.
+    # Keyed per OS because the archives are platform and compiler specific.
+    - name: Restore vcpkg binary cache
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/vcpkg-bincache
+        key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+        restore-keys: |
+          vcpkg-${{ runner.os }}-
+
+    - name: Setup vcpkg (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        git init --quiet "$VCPKG_ROOT"
+        git -C "$VCPKG_ROOT" remote add origin https://github.com/microsoft/vcpkg.git
+        git -C "$VCPKG_ROOT" fetch --depth 1 --quiet origin "$VCPKG_BASELINE"
+        git -C "$VCPKG_ROOT" checkout --quiet --detach FETCH_HEAD
+        "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+
+    - name: Setup vcpkg (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        git init --quiet $env:VCPKG_ROOT
+        git -C $env:VCPKG_ROOT remote add origin https://github.com/microsoft/vcpkg.git
+        git -C $env:VCPKG_ROOT fetch --depth 1 --quiet origin $env:VCPKG_BASELINE
+        git -C $env:VCPKG_ROOT checkout --quiet --detach FETCH_HEAD
+        & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+
+    - name: Configure CMake
+      env:
+        # "clear;" drops the other binary sources so that only the shared
+        # filesystem cache below is read from and written to.
+        VCPKG_BINARY_SOURCES: 'clear;files,${{ runner.temp }}/vcpkg-bincache,readwrite'
+      run: >
+        cmake
+        -B ${{ github.workspace }}/build
+        -S ${{ github.workspace }}
+        -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+        -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
+
+    - name: Build
+      run: cmake --build ${{ github.workspace }}/build --config ${{ env.BUILD_TYPE }}
+
+    - name: Test
+      working-directory: ${{ github.workspace }}/build
+      run: ctest -C ${{ env.BUILD_TYPE }} --output-on-failure
+
