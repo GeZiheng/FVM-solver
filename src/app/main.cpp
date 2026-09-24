@@ -103,6 +103,7 @@ int main()
     simpleCfg.relaxationP = 0.3;
     simpleCfg.solverConfig.tolerance = 1e-9;
     simpleCfg.solverConfig.maxIterations = 2000;
+    simpleCfg.solverConfig.verbose = true;
 
     const SimpleResult simpleResult = solveSimple(cavityMesh,
         1.0,

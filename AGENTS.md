@@ -138,4 +138,9 @@ ctest --test-dir build --output-on-failure
 - `doctest` — unit testing (header-only)
 
 ## Next Phase (Phase 4)
-Candidate directions: unsteady terms (theta scheme), non-orthogonal/skew mesh support, or AMGCL/Hypre solver backends for larger meshes.
+Agreed roadmap (in order):
+1. **Unsteady terms + PISO** (theta-scheme time integration; reuse `predictMomentum`/`correctPressure` per time step: one momentum predictor + multiple pressure correctors, no under-relaxation).
+2. **`pyfvm` Python bindings** (pybind11 via vcpkg, optional build target) — case setup becomes a Python script (initial fields/source terms/post-processing in numpy), replacing any JSON-config idea; `fvm_solver` exe stays as a smoke demo. Start only after the C++ solver API stabilizes (post-PISO).
+3. **Arbitrary mesh input** (Gmsh `.msh` reader first) — the main motivation for the Python front-end; may come with non-orthogonal/skew mesh support.
+
+Deferred/rejected: per-case executables under `examples/` (too cumbersome), JSON case config (redundant once Python scripting exists), per-module CMakeLists/tests/docs split (revisit only if a module is reused externally or build times degrade). AMGCL/Hypre backends remain a candidate for larger meshes.
