@@ -6,10 +6,11 @@ JSON-RPC 2.0 over stdin/stdout) to expose one tool, ``build_and_test``.
 It uses only the Python standard library, so it runs without installing
 an MCP SDK or reaching the network.
 
-The tool mirrors the opencode tool it replaces
-(``.opencode/tools/build-and-test.ts``): configure with CMake + Ninja into
-``build/<config>-agent``, build ``fvm_solver`` and/or ``fvm_tests``, then
-optionally run ctest and/or the ``fvm_solver`` demo.
+Shared by Codex (registered in ``.codex/config.toml``) and opencode
+(reached through the ``mcp`` block in ``opencode.json``), so both agents
+drive the same implementation. The tool configures with CMake + Ninja into
+``build/<config>-agent``, builds ``fvm_solver`` and/or ``fvm_tests``, then
+optionally runs ctest and/or the ``fvm_solver`` demo.
 """
 
 from __future__ import annotations
@@ -30,8 +31,18 @@ DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 CONFIGURE_TIMEOUT = 1800
 BUILD_TIMEOUT = 1800
 RUN_TIMEOUT = 1800
+ENV_TIMEOUT = 300
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+# Used to reproduce the Visual Studio developer environment; see
+# _msvc_environment(). Deliberately hard-coded rather than read from
+# os.environ: the variable that would point at it (ProgramFiles(x86)) is
+# filtered out of the environment the agent launches us with.
+VSWHERE = pathlib.Path(
+    r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+)
+VS_CPP_COMPONENT = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
 
 TOOL_DESCRIPTION = (
     "Configure (cmake -G Ninja) and build this FVM-solver project in Debug or "
@@ -86,11 +97,15 @@ def _tail(text: str) -> str:
     )
 
 
-def _run(cmd: list[str], timeout: int) -> tuple[int | None, str]:
+def _run(
+    cmd: list[str], timeout: int, env: dict[str, str] | None = None
+) -> tuple[int | None, str]:
     """Run a command in the project root.
 
     Returns ``(exit_code, output)``; ``exit_code`` is ``None`` when the
-    command could not be started or timed out.
+    command could not be started or timed out. ``env`` replaces the ambient
+    environment when given (used to run the build inside the MSVC developer
+    environment).
     """
     try:
         completed = subprocess.run(
@@ -100,6 +115,7 @@ def _run(cmd: list[str], timeout: int) -> tuple[int | None, str]:
             text=True,
             errors="replace",
             timeout=timeout,
+            env=env,
         )
     except FileNotFoundError:
         return None, f"command not found: {cmd[0]}"
@@ -147,6 +163,87 @@ def _vcpkg_root() -> str | None:
     return None
 
 
+def _find_vs_install() -> pathlib.Path | None:
+    """Locate a Visual Studio installation providing the C++ toolset."""
+    if not VSWHERE.is_file():
+        return None
+
+    code, output = _run(
+        [
+            str(VSWHERE),
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            VS_CPP_COMPONENT,
+            "-property",
+            "installationPath",
+        ],
+        ENV_TIMEOUT,
+    )
+    if code != 0 or not output.strip():
+        return None
+
+    install = output.strip().splitlines()[0].strip()
+    return pathlib.Path(install) if install else None
+
+
+def _msvc_environment() -> tuple[dict[str, str] | None, str]:
+    """Reproduce the Visual Studio developer environment.
+
+    cl.exe is never on the system PATH and needs INCLUDE/LIB to compile at
+    all, so a plain shell cannot use MSVC. Agents launch us with a filtered
+    environment, so activate the developer environment ourselves instead of
+    depending on how the agent was started.
+
+    Returns ``(environment, detail)``: on success ``environment`` is the full
+    environment produced by ``VsDevCmd.bat`` and ``detail`` is the install
+    path; on failure ``environment`` is ``None`` and ``detail`` says why.
+    """
+    install = _find_vs_install()
+    if install is None:
+        return None, "no Visual Studio install with the C++ toolset was found"
+
+    dev_cmd = install / "Common7" / "Tools" / "VsDevCmd.bat"
+    args = ["-arch=x64", "-host_arch=x64"]
+    if not dev_cmd.is_file():
+        dev_cmd = install / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+        args = []
+    if not dev_cmd.is_file():
+        return None, f"neither VsDevCmd.bat nor vcvars64.bat exists under {install}"
+
+    # Run through shell=True: passing this as an argument list makes Python
+    # escape the embedded quotes with backslashes, which cmd.exe does not
+    # understand, so VsDevCmd.bat would fail with exit code 1.
+    command = f'call "{dev_cmd}" {" ".join(args)} >nul && set'
+    try:
+        completed = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=ENV_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"{dev_cmd.name} timed out after {ENV_TIMEOUT}s"
+    if completed.returncode != 0:
+        return None, f"{dev_cmd.name} failed (exit code {completed.returncode})"
+
+    output = (completed.stdout or "") + (completed.stderr or "")
+
+    environment: dict[str, str] = {}
+    for line in output.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key:
+            environment[key] = value
+    if "INCLUDE" not in environment or "LIB" not in environment:
+        return None, f"{dev_cmd.name} did not set INCLUDE/LIB"
+
+    return environment, str(install)
+
+
 def build_and_test(
     config: str = "Release", target: str = "all", run: str = "tests"
 ) -> tuple[str, bool]:
@@ -168,6 +265,21 @@ def build_and_test(
     sections = [f"project: {REPO_ROOT}", f"build dir: {build_dir}"]
     failed = False
 
+    # --- Build environment ---
+    # Agents launch us with a filtered environment, so activate MSVC here
+    # instead of depending on the shell that started the agent.
+    build_env: dict[str, str] | None = None
+    if os.name == "nt":
+        msvc_env, detail = _msvc_environment()
+        if msvc_env is None:
+            sections.append(
+                "WARNING: could not activate the MSVC developer environment "
+                f"({detail}); falling back to the ambient environment"
+            )
+        else:
+            build_env = {**os.environ, **msvc_env}
+            sections.append(f"MSVC developer environment activated: {detail}")
+
     # --- Configure ---
     configure_cmd = [
         "cmake",
@@ -179,6 +291,16 @@ def build_and_test(
         "Ninja",
         f"-DCMAKE_BUILD_TYPE={config}",
     ]
+    if os.name == "nt":
+        # vcpkg derives the default triplet from the host architecture, which
+        # is absent from the filtered environment agents launch us with; it
+        # then warns and silently continues without itself, so doctest/eigen3
+        # are never found. Pin the triplet instead of relying on detection.
+        configure_cmd.append("-DVCPKG_TARGET_TRIPLET=x64-windows")
+    if build_env is not None:
+        # Pin the compiler too, so the project is built with the same toolset
+        # as the vcpkg dependencies rather than whatever is first on PATH.
+        configure_cmd.append("-DCMAKE_CXX_COMPILER=cl")
     vcpkg_root = _vcpkg_root()
     if vcpkg_root:
         if not os.environ.get("VCPKG_ROOT"):
@@ -201,7 +323,7 @@ def build_and_test(
             "toolchain file (eigen3/doctest will not be found)."
         )
     sections.append("\n$ " + " ".join(configure_cmd))
-    code, output = _run(configure_cmd, CONFIGURE_TIMEOUT)
+    code, output = _run(configure_cmd, CONFIGURE_TIMEOUT, build_env)
     sections.append(_tail(output))
     if code != 0:
         sections.append(f"\nCONFIGURE FAILED (exit code {code})")
@@ -212,7 +334,7 @@ def build_and_test(
     if target != "all":
         build_cmd += ["--target", target]
     sections.append("\n$ " + " ".join(build_cmd))
-    code, output = _run(build_cmd, BUILD_TIMEOUT)
+    code, output = _run(build_cmd, BUILD_TIMEOUT, build_env)
     sections.append(_tail(output))
     if code != 0:
         sections.append(f"\nBUILD FAILED (exit code {code})")
@@ -235,7 +357,7 @@ def build_and_test(
                 config,
             ]
             sections.append("\n$ " + " ".join(test_cmd))
-            code, output = _run(test_cmd, RUN_TIMEOUT)
+            code, output = _run(test_cmd, RUN_TIMEOUT, build_env)
             sections.append(_tail(output))
             if code != 0:
                 failed = True
@@ -260,6 +382,7 @@ def build_and_test(
                     text=True,
                     errors="replace",
                     timeout=RUN_TIMEOUT,
+                    env=build_env,
                 )
                 output = completed.stdout or ""
                 if completed.stderr:
