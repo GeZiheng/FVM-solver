@@ -86,13 +86,13 @@ When changing a module's classes/design/key algorithms, update the corresponding
 
 **Prerequisites:** CMake >= 3.20, vcpkg (with `VCPKG_ROOT` set as a Windows user environment variable).
 
-**IMPORTANT for agents: ALWAYS use the `build-and-test` MCP tool (`build_and_test`) to configure, build, and test this project — do NOT shell out to `cmake`, `ctest`, or `ninja` yourself.** The implementation is shared by both agents in `.agents/mcp/build_and_test_server.py`; it is registered for Codex in `.codex/config.toml` and for opencode through the `mcp` block in `opencode.json`.
+**IMPORTANT for agents:** if your environment provides the `build-and-test` MCP tool (`build_and_test`), ALWAYS use it to configure, build, and test this project — do NOT shell out to `cmake`, `ctest`, or `ninja` yourself (agent configs may deny those commands). The server implementation lives in `.agents/mcp/build_and_test_server.py` and is shared across agents; it is registered for Codex in `.codex/config.toml` and for opencode through the `mcp` block in `opencode.json`. If the MCP tool is NOT available in your environment (other agents, humans), use the manual commands below instead.
 - Default invocation (no args): Release mode, builds `fvm_solver` + `fvm_tests`, runs ctest.
 - `config`: `"Debug"` | `"Release"` (default `"Release"`).
 - `target`: `"all"` | `"fvm_solver"` | `"fvm_tests"` (default `"all"`).
 - `run`: `"none"` | `"tests"` | `"solver"` | `"both"` (default `"tests"`) — what to run after a successful build.
 - When the user directly requests a build/test, confirm the options (config, target, run) with the user first (unless the user already stated them explicitly). When building as part of a code modification workflow, proceed directly with the defaults without asking.
-- The tool configures into `build/<config>-opencode` (one directory per config), not into `build/`.
+- The tool configures into `build/<config>-agent` (one directory per config, shared by all agents), not into `build/`.
 - The server runs **outside** the agent's per-command sandbox, which is required here: vcpkg writes under `$VCPKG_ROOT`, outside this repository, so running the CMake commands from a sandboxed shell fails at the vcpkg step. The server reads `VCPKG_ROOT` from the process environment and falls back to the persisted Windows environment (HKCU, then HKLM).
 
 Manual commands (for humans, or when the MCP tool is unavailable):

@@ -8,7 +8,7 @@ an MCP SDK or reaching the network.
 
 The tool mirrors the opencode tool it replaces
 (``.opencode/tools/build-and-test.ts``): configure with CMake + Ninja into
-``build/<config>-opencode``, build ``fvm_solver`` and/or ``fvm_tests``, then
+``build/<config>-agent``, build ``fvm_solver`` and/or ``fvm_tests``, then
 optionally run ctest and/or the ``fvm_solver`` demo.
 """
 
@@ -164,7 +164,7 @@ def build_and_test(
     if run not in ("none", "tests", "solver", "both"):
         return f"invalid run {run!r}: expected none, tests, solver or both", False
 
-    build_dir = REPO_ROOT / "build" / f"{config}-opencode"
+    build_dir = REPO_ROOT / "build" / f"{config}-agent"
     sections = [f"project: {REPO_ROOT}", f"build dir: {build_dir}"]
     failed = False
 
