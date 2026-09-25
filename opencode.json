@@ -1,5 +1,19 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "skills": {
+    "paths": [".agents/skills"]
+  },
+  "mcp": {
+    "build-and-test": {
+      "type": "local",
+      "command": [
+        "python",
+        "D:/Projects/FVM-solver/.agents/mcp/build_and_test_server.py"
+      ],
+      "environment": { "VCPKG_ROOT": "D:/Projects/vcpkg" },
+      "enabled": true
+    }
+  },
   "permission": {
     "bash": {
       "*": "allow",
