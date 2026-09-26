@@ -21,6 +21,7 @@
   防止"装配一半就拿去求解"或"求解后又偷偷插入"两类错误。
 - **隐藏内部存储**：对外只暴露 `insert/finalize/native` 等少量接口。`native()` 返回底层 Eigen 矩阵的常量引用，仅供求解器实现使用；若未来替换后端，只需修改 `native()` 的返回类型或增加内部访问器，上层装配代码不变。
 - `setZero()` 将矩阵重置回未 finalize 的空状态，可重新装配。
+- **矩阵缩放**：`scale(factor)` 将全部已存系数乘以 `factor`——未 finalize 时缩放已累加的三元组，已 finalize 时缩放底层矩阵。用于隐式 θ 时间格式：由一次稳态空间算子装配 $A_{spatial}$ 廉价地得到 $\theta A_{spatial}$，无需重新装配。
 
 ## LinearSolver：抽象求解器接口
 

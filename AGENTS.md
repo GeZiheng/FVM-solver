@@ -7,6 +7,9 @@
 - Persistent conservative flux field (OpenFOAM-style `phi`): `FaceFluxField` in core; convection/transport/momentum assemblers take the flux field as their only convection input (velocity-based convenience interfaces removed; use `interpolateCellVelocityFlux` / `computeMassFlux` to build one). `solveSimple` maintains the flux across iterations (predicted F* written during assembly, corrected by p' afterwards) and returns it via an out parameter — the converged flux is conservative to pressure-solver accuracy. All 43 test cases pass, including per-cell flux-conservation checks.
 - SIMPLE iteration split into reusable `predictMomentum`/`correctPressure` free functions (UEqn.H/pEqn.H-style, ready for PISO reuse); closed-domain flux compatibility enforced via `checkFluxCompatibility` (OpenFOAM adjustPhi-style) at `solveSimple` entry.
 - Build system verified working (CMake + vcpkg).
+- Phase 4-1 in progress: implicit **theta time integration** (`TimeScheme`/`TimeTerm`) and **transient scalar transport** (`assembleTransientTransport`) implemented and tested (`tests/test_transient.cpp`: Euler first order, Crank-Nicolson second order, verified against `exp(-A_sp t/V)`). The numerical module was **refactored** so momentum assembly (`Momentum.h/.cpp`) and pressure correction (`Pressure.h/.cpp`) are first-class shared primitives; `Simple`/`Piso` are thin driver loops. Public discretization operators (`cellGradient`) live in `GridOperators.h/.cpp`.
+- **PISO** transient solver implemented on the shared primitives (`Piso.h/.cpp`), but the unrelaxed momentum-pressure coupling is currently **unstable** in validation cases (continuity satisfied while momentum diverges); `tests/test_piso.cpp` is disabled in CMake pending a fix.
+- Test count: 48 cases pass (with `test_piso.cpp` disabled).
 
 ## Architecture
 
@@ -37,20 +40,29 @@ src/
   numerical/
     include/
       BoundaryCondition.h  — BCType{Dirichlet, Neumann} + BoundaryField (4 sides, header-only)
+      GridOperators.h      — public discretization operators: cellGradient (Gauss gradient)
       Diffusion.h          — -div(gamma grad phi) assembly
       Convection.h         — div(F phi) assembly from FaceFluxField, ConvectionScheme{Upwind, Central},
                              flux constructors interpolateCellVelocityFlux / computeMassFlux,
                              closed-domain checkFluxCompatibility
-      TransportEquation.h  — full conv-diff-source assembly from FaceFluxField -> EquationSystem{A, b}
-      Simple.h             — SIMPLE algorithm: SimpleConfig/SimpleResult, assembleMomentum,
-                             predictMomentum/correctPressure (UEqn.H/pEqn.H-style split, reusable by PISO),
-                             solveSimple (persistent flux out parameter)
+      TransportEquation.h  — full conv-diff-source assembly (steady) + assembleTransientTransport
+                             (theta scheme) from FaceFluxField -> EquationSystem{A, b}
+      TimeScheme.h         — TimeScheme{Euler, CrankNicolson}, thetaOf, TimeTerm (header-only)
+      Momentum.h           — shared momentum operator: MomentumAssembly, assembleMomentum,
+                             MomentumPrediction, predictMomentum (UEqn.H-style, used by Simple + Piso)
+      Pressure.h           — shared pressure corrector: CorrectorResult, correctPressure
+                             (pEqn.H-style, used by Simple + Piso)
+      Simple.h             — steady driver: SimpleConfig/SimpleResult, solveSimple loop
+      Piso.h               — transient driver: PisoConfig/PisoResult, solvePiso loop (WIP)
     src/
+      GridOperators.cpp
       Diffusion.cpp
       Convection.cpp
       TransportEquation.cpp
-      Simple.cpp           — momentum predictor, Rhie-Chow fluxes, pressure-correction eq, corrections
-                             (as free functions; solveSimple loops over them)
+      Momentum.cpp         — momentum assembly + predictor, Rhie-Chow data (uHat, d = V/a_P)
+      Pressure.cpp         — pressure-correction eq, reference-cell elimination, flux/U/p corrections
+      Simple.cpp           — solveSimple: createPhi + compatibility check, predict/correct loop
+      Piso.cpp             — solvePiso: one predictor + nCorrectors per time step, no under-relaxation
   app/
     main.cpp         — two demos: steady convection-diffusion (recirculating flow, hot/cold walls)
                        and lid-driven cavity at Re=100 via SIMPLE (cavity.vti)
@@ -64,14 +76,19 @@ tests/
   test_diffusion.cpp — diffusion operator: exact solutions, SPD, BC handling, O(h^2)
   test_convection.cpp— convection operator: UD O(h) / CD O(h^2), boundedness, conservation
   test_transport.cpp — combined assembly, source terms (Sc + Sp*phi), conservation
+  test_transient.cpp — theta-scheme identity, Euler O(dt) / CN O(dt^2) vs exp(-A_sp t/V),
+                       constant preservation
   test_simple.cpp    — momentum assembly/under-relaxation identities, Poiseuille, cavity Re=100,
                        closed-domain flux-compatibility check
+  test_piso.cpp      — PISO impulsive Couette / transient Poiseuille (DISABLED in CMake while the
+                       unrelaxed coupling stability issue is investigated)
 
 docs/                 — per-module code documentation (Chinese)
   core.md            — Types, CartesianMesh, ScalarField/VectorField
   math.md            — SparseMatrix (triplet assembly), LinearSolver backends
   io.md              — VtkWriter (.vti output)
-  numerical.md       — BCs, diffusion/convection assembly, transport equation, SIMPLE
+  numerical.md       — BCs, grid operators, diffusion/convection assembly, steady + transient
+                       transport (theta scheme), Momentum/Pressure primitives, SIMPLE, PISO
   app.md             — fvm_solver demo walkthrough (convection-diffusion + lid-driven cavity)
 ```
 
@@ -139,15 +156,26 @@ ctest --test-dir build --output-on-failure
 - **SIMPLE (collocated, Rhie-Chow)**: momentum assembly reuses the convection/diffusion operators; the pressure-gradient source uses the Gauss form (sum_f p_f n S_f) so Dirichlet pressure boundary values drive the flow. Under-relaxed diagonal `a_P` is read from a finalized matrix copy; `d = vol/a_P` feeds the Rhie-Chow face fluxes (x-faces use the u-equation diagonal, y-faces the v-equation one). The persistent flux field is overwritten with the predicted F* during p' assembly and corrected in place afterwards (`F_f -= C(p'_N - p'_P)`; Dirichlet-p boundary faces `±= Cb·p'_P`), so it stays conservative to the pressure solver's accuracy and feeds the next momentum assembly.
 - **Pressure-correction sign convention**: with F_f = F*_f - C(p'_N - p'_P), continuity gives A p' = **-**massImbalance. Getting this sign wrong creates positive feedback and blows up the velocity field.
 - **Pure-Neumann pressure is handled by reference-cell elimination** (drop cell 0, p'_0 = 0 — its equation is redundant since imbalances sum to zero), NOT a penalty diagonal; this keeps the CG system well-conditioned SPD. With any Dirichlet pressure side, no elimination is needed. Closed-domain (pure-Neumann-p) compatibility is enforced by `checkFluxCompatibility` at `solveSimple` entry (net boundary outflow must be ~0, OpenFOAM adjustPhi-style), throwing on unbalanced velocity BCs.
-- **SIMPLE iteration is split into reusable primitives**: `predictMomentum` (UEqn.H-style) and `correctPressure` (pEqn.H-style) are free functions; `solveSimple` just loops over them. PISO/unsteady solvers should reuse them instead of duplicating the corrector logic.
+- **Solver primitives are first-class and split by equation**: momentum assembly/predictor live in `Momentum.h/.cpp`, pressure correction in `Pressure.h/.cpp`; `Simple`/`Piso` are thin driver loops. Public discretization operators (`cellGradient`) live in `GridOperators.h/.cpp` (extensible to `divergence` etc.).
+- **Time integration is an implicit theta scheme**: `TimeScheme{Euler (theta=1), CrankNicolson (theta=0.5)}` + `TimeTerm{rho, dt, scheme}` (`dt <= 0` means steady). The ddt term is assembled inside the shared momentum operator (`assembleMomentum`), so SIMPLE and PISO share it; `solveSimple` passes `TimeTerm{}` (steady, bit-for-bit unchanged), `solvePiso` passes an active term. Scalar transport has its own `assembleTransientTransport` with the same theta formula.
+- **Transient momentum requires `relaxation == 1`** (under-relaxation is a steady SIMPLE device; PISO does not use it), and the ddt diagonal `rho V/dt` is included in `a_P`, so the Rhie-Chow `d = V/a_P` is transient-consistent (OpenFOAM `rAU = 1/UEqn.A()`).
+- **`correctPressure` has a `cumulativeVelocityCorrection` flag**: steady SIMPLE (false) uses `u = u* - d grad(p')`; PISO (true, requires `relaxationP == 1`) reconstructs `u = uHat - d grad(p)` from the full pressure so repeated correctors accumulate correctly instead of dropping earlier corrections.
+- **SIMPLE/PISO reuse the same predictor/corrector**: `solveSimple` = steady loop (`TimeTerm{}`, `cumulative=false`); `solvePiso` = one predictor + `nCorrectors` correctors per time step (`cumulative=true`, no under-relaxation). Do not duplicate the corrector logic. **Note: PISO is implemented but currently unstable** (unrelaxed coupling; under investigation, `test_piso.cpp` disabled).
 
 ## Dependencies
 - `eigen3` — sparse linear algebra
 - `doctest` — unit testing (header-only)
 
 ## Next Phase (Phase 4)
-Agreed roadmap (in order):
-1. **Unsteady terms + PISO** (theta-scheme time integration; reuse `predictMomentum`/`correctPressure` per time step: one momentum predictor + multiple pressure correctors, no under-relaxation).
+Agreed roadmap (in order), with current status:
+1. **Unsteady terms + PISO** — *partially done*:
+   - ✅ theta-scheme time integration (`TimeScheme`/`TimeTerm`), transient scalar transport
+     (`assembleTransientTransport`) with verified time order; numerical module refactored into
+     `Momentum`/`Pressure`/`GridOperators` shared primitives.
+   - ⏳ **PISO stability (immediate next task)**: the unrelaxed momentum-pressure coupling diverges in
+     the Couette/Poiseuille validation cases. Candidate directions: consistent pressure-gradient /
+     `ddtCorr`-style unsteady flux correction, or a controlled PIMPLE-style relaxation. Re-enable
+     `test_piso.cpp` once fixed.
 2. **`pyfvm` Python bindings** (pybind11 via vcpkg, optional build target) — case setup becomes a Python script (initial fields/source terms/post-processing in numpy), replacing any JSON-config idea; `fvm_solver` exe stays as a smoke demo. Start only after the C++ solver API stabilizes (post-PISO).
 3. **Arbitrary mesh input** (Gmsh `.msh` reader first) — the main motivation for the Python front-end; may come with non-orthogonal/skew mesh support.
 
