@@ -36,11 +36,11 @@ ENV_TIMEOUT = 300
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 # Used to reproduce the Visual Studio developer environment; see
-# _msvc_environment(). Deliberately hard-coded rather than read from
-# os.environ: the variable that would point at it (ProgramFiles(x86)) is
-# filtered out of the environment the agent launches us with.
-VSWHERE = pathlib.Path(
-    r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+# _msvc_environment(). vswhere.exe sits under a Program Files root, which the
+# agent may filter out of the environment, so resolve it at runtime (see
+# _find_vswhere) rather than hard-coding a drive/path.
+VSWHERE_SUBPATH = (
+    pathlib.Path("Microsoft Visual Studio") / "Installer" / "vswhere.exe"
 )
 VS_CPP_COMPONENT = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
 
@@ -184,14 +184,69 @@ def _merge_env(*environments: dict[str, str]) -> dict[str, str]:
     return merged
 
 
+def _program_files_roots() -> list[pathlib.Path]:
+    """Return candidate Program Files roots, most-specific first.
+
+    The environment the agent launches us with may omit ``ProgramFiles(x86)``,
+    so fall back to the (unfiltered) registry values under
+    ``Windows\\CurrentVersion``.
+    """
+    roots: list[pathlib.Path] = []
+    for variable in ("ProgramFiles(x86)", "ProgramW6432", "ProgramFiles"):
+        value = os.environ.get(variable)
+        if value:
+            roots.append(pathlib.Path(value))
+
+    try:
+        import winreg
+    except ImportError:
+        pass
+    else:
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion",
+            ) as key:
+                for name in ("ProgramFilesDir (x86)", "ProgramFilesDir"):
+                    try:
+                        value, _ = winreg.QueryValueEx(key, name)
+                    except OSError:
+                        continue
+                    if value:
+                        roots.append(
+                            pathlib.Path(os.path.expandvars(str(value)))
+                        )
+        except OSError:
+            pass
+
+    unique: list[pathlib.Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        marker = str(root).lower()
+        if marker not in seen:
+            seen.add(marker)
+            unique.append(root)
+    return unique
+
+
+def _find_vswhere() -> pathlib.Path | None:
+    """Locate vswhere.exe without hard-coding a Program Files path."""
+    for root in _program_files_roots():
+        candidate = root / VSWHERE_SUBPATH
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _find_vs_install() -> pathlib.Path | None:
     """Locate a Visual Studio installation providing the C++ toolset."""
-    if not VSWHERE.is_file():
+    vswhere = _find_vswhere()
+    if vswhere is None:
         return None
 
     code, output = _run(
         [
-            str(VSWHERE),
+            str(vswhere),
             "-latest",
             "-products",
             "*",
