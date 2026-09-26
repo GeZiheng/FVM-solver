@@ -1,5 +1,18 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "skills": {
+    "paths": [".agents/skills"]
+  },
+  "mcp": {
+    "build-and-test": {
+      "type": "local",
+        "command": [
+          "python",
+          ".agents/mcp/build_and_test_server.py"
+        ],
+      "enabled": true
+    }
+  },
   "permission": {
     "bash": {
       "*": "allow",

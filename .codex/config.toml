@@ -1,0 +1,15 @@
+# Project-scoped Codex configuration. This file is loaded because the
+# repository is marked `trust_level = "trusted"` in ~/.codex/config.toml.
+#
+# `build-and-test` is a stdio MCP server (see .agents/mcp/build_and_test_server.py)
+# that wraps the project's CMake/Ninja/ctest workflow. opencode reaches the same
+# server through the `mcp` block in opencode.json, so both agents share a single
+# implementation.
+#
+# NOTE: `args` is a path relative to the repository root (Codex launches MCP
+# servers with the project as cwd), so this file is portable across machines as
+# long as `python` is on PATH.
+
+[mcp_servers.build-and-test]
+command = "python"
+args = ['.agents/mcp/build_and_test_server.py']
