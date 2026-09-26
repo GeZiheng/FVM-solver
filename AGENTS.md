@@ -84,7 +84,13 @@ When changing a module's classes/design/key algorithms, update the corresponding
 
 ## Build Instructions
 
-**Prerequisites:** CMake >= 3.20, vcpkg (with `VCPKG_ROOT` set as a Windows user environment variable).
+**Prerequisites:** CMake >= 3.20, vcpkg, Ninja.
+
+Two things must be present in the **environment**, not just in the repository:
+- **`VCPKG_ROOT`** — path to the vcpkg installation (e.g. `C:\Users\<user>\.vcpkg-clion\vcpkg`). Add it as a persistent **Windows user environment variable**. The `build-and-test` server reads it from the process environment and falls back to the persisted Windows environment (HKCU, then HKLM).
+- **`Path`** — must contain the directory holding `ninja.exe` (e.g. `<VisualStudio>\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja`). CMake's `Ninja` generator locates `ninja` via `PATH`.
+
+Both are inherited when the agent (opencode/Codex) is launched, so add them **before** starting it; a running agent will not pick up later changes — fully quit and relaunch it afterwards.
 
 **IMPORTANT for agents:** if your environment provides the `build-and-test` MCP tool (`build_and_test`), ALWAYS use it to configure, build, and test this project — do NOT shell out to `cmake`, `ctest`, or `ninja` yourself (agent configs may deny those commands). The server implementation lives in `.agents/mcp/build_and_test_server.py` and is shared across agents; it is registered for Codex in `.codex/config.toml` and for opencode through the `mcp` block in `opencode.json`. If the MCP tool is NOT available in your environment (other agents, humans), use the manual commands below instead.
 - Default invocation (no args): Release mode, builds `fvm_solver` + `fvm_tests`, runs ctest.

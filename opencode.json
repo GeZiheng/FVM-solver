@@ -10,7 +10,6 @@
           "python",
           ".agents/mcp/build_and_test_server.py"
         ],
-      "environment": { "VCPKG_ROOT": "D:/Projects/vcpkg" },
       "enabled": true
     }
   },

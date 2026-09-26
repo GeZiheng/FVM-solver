@@ -6,3 +6,6 @@ vcpkg_installed/
 
 # vscode settings
 .vscode/
+
+# clion settings
+.idea/

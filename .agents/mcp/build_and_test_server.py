@@ -163,6 +163,27 @@ def _vcpkg_root() -> str | None:
     return None
 
 
+def _merge_env(*environments: dict[str, str]) -> dict[str, str]:
+    """Merge environments with later values winning.
+
+    Windows treats environment variable names case-insensitively, but a plain
+    ``{**a, **b}`` keeps both ``Path`` and ``PATH``. Those collide in the child
+    process's environment block and the wrong one can win (e.g. hiding the
+    compiler that VsDevCmd just added), so collapse such keys to a single name.
+    """
+    key_case: dict[str, str] = {}
+    merged: dict[str, str] = {}
+    for environment in environments:
+        for key, value in environment.items():
+            upper = key.upper()
+            previous = key_case.get(upper)
+            if previous is not None and previous != key:
+                merged.pop(previous, None)
+            key_case[upper] = key
+            merged[key] = value
+    return merged
+
+
 def _find_vs_install() -> pathlib.Path | None:
     """Locate a Visual Studio installation providing the C++ toolset."""
     if not VSWHERE.is_file():
@@ -277,7 +298,7 @@ def build_and_test(
                 f"({detail}); falling back to the ambient environment"
             )
         else:
-            build_env = {**os.environ, **msvc_env}
+            build_env = _merge_env(os.environ, msvc_env)
             sections.append(f"MSVC developer environment activated: {detail}")
 
     # --- Configure ---
