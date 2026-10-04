@@ -315,6 +315,8 @@ Neumann 压力边的边界通量不修正。由于 $A p' = -m$ 精确等价于"�
 
   因为 $\alpha_p = 1$ 时压力场已累积全部 $p'$，多次调用（多个 PISO 修正子）能正确累积而不丢失前几次修正对速度的贡献（对应 OpenFOAM `U = HbyA - rAU·grad(p)`）。
 
+> **顺序要求（两遍更新）**：压力必须**先对所有单元更新完毕**，再重建单元速度。累积重建读的是*完整*压力场的梯度 $\nabla p$，若把 `pressure(P) += dp` 与速度重建写在同一个循环里，重建只能看到"前面单元已更新、后面仍是旧值"的半成品压力场，梯度会错到量级失真（实测某单元 $(\nabla p)_x = -58.4$，完整更新后为 $+2.42$）。SIMPLE 路径用 $p'$（循环中不变）做重建，因此不受顺序影响——这正是只有 PISO 早期发散的原因。修正后与 OpenFOAM-14 单步结果逐格对比：$\max|\Delta u| \approx 5\times10^{-11}$、$\max|\Delta v| \approx 1\times10^{-11}$、$\max|\Delta p| \approx 8\times10^{-9}$（均为求解器容差量级）。
+
 ## Simple：稳态 SIMPLE 驱动
 
 `solveSimple` 为主入口：`velocity`/`pressure` 以 in-out 方式传入（初值 → 收敛解），`flux`（`FaceFluxField&`）为出参。入口用 `computeMassFlux` 初始化通量；纯 Neumann 压力时随即 `checkFluxCompatibility`。迭代体只做三件事：

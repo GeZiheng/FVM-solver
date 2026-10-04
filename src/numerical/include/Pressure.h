@@ -45,6 +45,12 @@ struct CorrectorResult
  * (pure-Neumann p) the boundary fluxes are rebalanced first, OpenFOAM
  * adjustPhi style, so the correction equation remains solvable.
  *
+ * The pressure is updated for all cells before the cell-centered
+ * velocity is reconstructed (two passes): the cumulative velocity
+ * correction evaluates grad(p) of the full corrected pressure, so an
+ * in-place update inside the reconstruction loop would read a partially
+ * updated pressure field.
+ *
  * @param mesh        Computational mesh.
  * @param rho         Density (constant).
  * @param pred        Momentum predictor result (Rhie-Chow data).
