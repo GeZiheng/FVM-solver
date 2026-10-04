@@ -265,7 +265,15 @@ $$\hat{u}_P = \frac{b^{np}_P - \sum_{N \ne P} A_{PN}\, u^*_N}{a_P}, \qquad d_P =
 
 $$F_f = \rho\, S_f \left[ \overline{\hat{u}}_f \cdot \mathbf{n} - \bar{d}_f\, \frac{p_N - p_P}{\delta_{PN}} \right]$$
 
-边界面通量 $F_b$ 直接由边界速度给出（Dirichlet 取给定值，Neumann 取 $u^*_P$），保证壁面无穿透。算出的预测通量 $F^*$ **逐面写入持久通量场**（覆盖上一迭代/上一步的值）。
+边界面通量 $F_b$ 与内部面**同源**，同样取旧压力下的 Rhie–Chow 形式（$d_{Pb}$ 为单元中心到面的距离，$\mathbf{n}$ 为外法向）：
+
+$$F_b = \rho\, S_f \left[ (\hat{u}\cdot\mathbf{n})_b - d_P\, \frac{p_b - p_P}{d_{Pb}} \right] \ \text{（Dirichlet 压力边）}, \qquad F_b = \rho\, S_f\, (\hat{u}\cdot\mathbf{n})_b \ \text{（Neumann 压力边）}$$
+
+Neumann 压力边法向梯度为零，故不加压力项。速度分量 $(\hat{u}\cdot\mathbf{n})_b$ 在 Dirichlet 速度边取给定值，否则取 $\hat{u}_P$（零梯度），保证壁面无穿透。
+
+> **不能**用 $u^*_P$ 代替 $\hat{u}_P$：$u^*$ 含旧压力的*单元中心*梯度，而 $p'$ 方程与通量修正用的是*面法向*梯度（系数 $C_b$），两者在边界上相差一阶。混用会让每次修正都重复计入整段边界压降（压力逐次线性增长），修正子迭代因此发散。
+
+算出的预测通量 $F^*$ **逐面写入持久通量场**（覆盖上一迭代/上一步的值）。
 
 ### 压力修正方程
 
@@ -282,6 +290,8 @@ $$A\, p' = -m, \qquad m_P = \sum_f F^*_f \ \text{（预测净流出量）}$$
 - Neumann 压力边：无矩阵贡献（$F_b$ 仅进入 $m_P$）。
 
 **奇异性处理——参考单元消元**：四条边全为 Neumann 时系数矩阵奇异（零空间为常向量）。此时消去 0 号单元（$p'_0 = 0$，其连续性方程因 $\sum_P m_P = 0$ 而冗余），得到 $n-1$ 阶 SPD 系统；存在 Dirichlet 压力边时系统本已正定，保留全部单元。$p'$ 方程用 CG 求解，动量方程用 BiCGSTAB（对流使矩阵非对称）。
+
+**封闭域相容性（OpenFOAM adjustPhi）**：纯 Neumann 压力时 $p'$ 修正改变不了边界净流出量——内部面修正两两抵消，Neumann 边界又无 $p'$ 项——因此预测通量必须满足 $\sum_b F^*_b = 0$（$b$ 遍历边界面）。不满足时 $A p' = -m$ 不相容，参考单元消元会静默违反被消元单元（0 号）的连续性并累积误差。装配前先把残余净通量按"法向速度非 Dirichlet"的边界面积均摊回这些边界面（同时更新 $m_P$）；存在 Dirichlet 压力边（开放域）时不做调整。入口处的 `checkFluxCompatibility` 保留为防御性检查。
 
 ### 修正与收敛判据
 
@@ -340,7 +350,7 @@ Neumann 压力边的边界通量不修正。由于 $A p' = -m$ 精确等价于"�
 | `PisoStepInfo` | 每步诊断：`time`、`continuity`（修正后真实连续性误差）、`maxSpeed` |
 | `PisoResult` | `steps`、`history` |
 
-> **当前状态（WIP）**：PISO 代码已实现并接入上述复用结构，但无欠松弛的动量—压力耦合在验证算例（突启 Couette / 瞬态 Poiseuille）中表现出发散（连续性满足而动量指数增长）。对应测试 `tests/test_piso.cpp` 暂未编译，稳定性问题排查中。标量瞬态路径（`assembleTransientTransport`，`tests/test_transient.cpp`）已验证时间阶数正确。
+> **当前状态（WIP）**：PISO 代码已实现并接入上述复用结构。排查中已修复 `correctPressure` 的两处缺陷：边界面预测通量未与内部面同源（Dirichlet 压力边漏掉旧压力的 Rhie–Chow 项，导致修正子迭代发散）、封闭域边界净通量不平衡导致 $p'$ 方程不相容。对应测试 `tests/test_piso.cpp` 暂未编译；剩下的障碍是**无欠松弛的瞬态动量—压力耦合**——不动点正确（$A_{spatial}u = b - V\nabla p$）但迭代不稳定，候选方向为 `ddtCorr` 式瞬态通量一致性修正或 PIMPLE 式受控松弛。标量瞬态路径（`assembleTransientTransport`，`tests/test_transient.cpp`）已验证时间阶数正确。
 
 ## 与 OpenFOAM 实现的对比
 

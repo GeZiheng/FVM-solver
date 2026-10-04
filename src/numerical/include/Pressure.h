@@ -22,7 +22,9 @@ namespace fvm::numerical
  */
 struct CorrectorResult
 {
-    Scalar maxImbalance = 0.0; ///< Pre-correction max |mass imbalance|.
+    Scalar maxImbalance = 0.0; ///< Max |mass imbalance| entering the
+                               ///< correction (after the closed-domain
+                               ///< boundary-flux adjustment).
     Scalar duMax = 0.0;        ///< Max |u_new - u_old| after correction.
     Scalar dvMax = 0.0;        ///< Max |v_new - v_old| after correction.
     Scalar dpMax = 0.0;        ///< Max |relaxationP * p'|.
@@ -36,6 +38,12 @@ struct CorrectorResult
  *
  * With pure Neumann pressure BCs the correction equation is singular;
  * the reference cell 0 is eliminated (p'_0 = 0).
+ *
+ * The predicted boundary flux is built exactly like the interior
+ * Rhie-Chow flux: pressure-free velocity plus the face-normal pressure
+ * gradient (absent on zero-gradient p sides). For a closed domain
+ * (pure-Neumann p) the boundary fluxes are rebalanced first, OpenFOAM
+ * adjustPhi style, so the correction equation remains solvable.
  *
  * @param mesh        Computational mesh.
  * @param rho         Density (constant).

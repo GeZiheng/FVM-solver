@@ -13,3 +13,6 @@
 [mcp_servers.build-and-test]
 command = "python"
 args = ['.agents/mcp/build_and_test_server.py']
+
+[mcp_servers.build-and-test.tools.build_and_test]
+approval_mode = "approve"

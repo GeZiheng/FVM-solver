@@ -161,12 +161,27 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
             }
             else
             {
-                // Boundary face: predicted flux from the velocity BC.
+                // Boundary face. The predicted flux must be the Rhie-Chow
+                // flux at the OLD pressure, exactly like the interior
+                // faces: the pressure-free velocity (uHat) plus the
+                // face-normal pressure gradient. On a zero-gradient p
+                // boundary the normal gradient is zero, so no pressure
+                // term is added there. Using the cell-centred gradient
+                // (via uStar) instead double-counts the fixed boundary
+                // pressure once the correction adds its increment, which
+                // makes the corrector iteration diverge.
+                const BoundaryCondition& pCond = bcP.get(face);
                 const Scalar ub = boundaryNormalVelocity(face,
                     xFace ? bcU : bcV,
-                    xFace ? uStar : vStar,
+                    xFace ? uHatU : uHatV,
                     P);
-                const Scalar Fb = rho * ub * Sf;
+                Scalar Fb = rho * ub * Sf;
+                if (pCond.type == BCType::Dirichlet)
+                {
+                    Fb -= rho * dC(P) * Sf
+                          * (pCond.value - pressure(P))
+                          / mesh.cellToFaceDistance(face);
+                }
                 massImbalance(P) += Fb;
 
                 // Store the outward flux (west/south faces are
@@ -187,7 +202,7 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
                         break;
                 }
 
-                if (bcP.get(face).type == BCType::Dirichlet && !isReference(P))
+                if (pCond.type == BCType::Dirichlet && !isReference(P))
                 {
                     // p' = 0 at the boundary: correction Cb * p'_P.
                     const Scalar Cb
@@ -200,6 +215,84 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
 
     CorrectorResult result;
     result.maxImbalance = massImbalance.cwiseAbs().maxCoeff();
+
+    // ---- Closed-domain compatibility (OpenFOAM adjustPhi) -------------
+    // With a pure-Neumann pressure the p' correction cannot change the net
+    // boundary outflow: interior corrections cancel in pairs and Neumann
+    // boundaries take no p' term. An unbalanced predicted boundary flux
+    // therefore makes the correction equation inconsistent, and the
+    // reference-cell elimination silently violates the eliminated cell's
+    // continuity (its equation is the redundant one that gets dropped).
+    // Redistribute the residual over the boundary faces whose normal
+    // velocity is not fixed, so the p' system stays solvable and the
+    // stored flux stays conservative.
+    if (pinReference)
+    {
+        const Index nx = mesh.nx();
+        const Index ny = mesh.ny();
+        const Scalar Sx = mesh.faceArea(BoundaryField::East);
+        const Scalar Sy = mesh.faceArea(BoundaryField::North);
+
+        Scalar net = 0.0;
+        Scalar scale = 0.0;
+        Scalar adjustableArea = 0.0;
+        for (Index j = 0; j < ny; ++j)
+        {
+            const Scalar westOut = -flux.x(0, j);
+            const Scalar eastOut = flux.x(nx, j);
+            net += westOut + eastOut;
+            scale += std::abs(westOut) + std::abs(eastOut);
+            if (bcU.get(BoundaryField::West).type != BCType::Dirichlet)
+                adjustableArea += Sx;
+            if (bcU.get(BoundaryField::East).type != BCType::Dirichlet)
+                adjustableArea += Sx;
+        }
+        for (Index i = 0; i < nx; ++i)
+        {
+            const Scalar southOut = -flux.y(i, 0);
+            const Scalar northOut = flux.y(i, ny);
+            net += southOut + northOut;
+            scale += std::abs(southOut) + std::abs(northOut);
+            if (bcV.get(BoundaryField::South).type != BCType::Dirichlet)
+                adjustableArea += Sy;
+            if (bcV.get(BoundaryField::North).type != BCType::Dirichlet)
+                adjustableArea += Sy;
+        }
+
+        if (adjustableArea > 0.0 && std::abs(net) > 1e-14 * scale)
+        {
+            // Uniform outward flux per unit area over the adjustable faces.
+            const Scalar delta = -net / adjustableArea;
+
+            for (Index j = 0; j < ny; ++j)
+            {
+                if (bcU.get(BoundaryField::West).type != BCType::Dirichlet)
+                {
+                    flux.x(0, j) -= delta * Sx; // outward = -x(0, j)
+                    massImbalance(mesh.cellIndex(0, j)) += delta * Sx;
+                }
+                if (bcU.get(BoundaryField::East).type != BCType::Dirichlet)
+                {
+                    flux.x(nx, j) += delta * Sx; // outward = +x(nx, j)
+                    massImbalance(mesh.cellIndex(nx - 1, j)) += delta * Sx;
+                }
+            }
+            for (Index i = 0; i < nx; ++i)
+            {
+                if (bcV.get(BoundaryField::South).type != BCType::Dirichlet)
+                {
+                    flux.y(i, 0) -= delta * Sy; // outward = -y(i, 0)
+                    massImbalance(mesh.cellIndex(i, 0)) += delta * Sy;
+                }
+                if (bcV.get(BoundaryField::North).type != BCType::Dirichlet)
+                {
+                    flux.y(i, ny) += delta * Sy; // outward = +y(i, ny)
+                    massImbalance(mesh.cellIndex(i, ny - 1)) += delta * Sy;
+                }
+            }
+            result.maxImbalance = massImbalance.cwiseAbs().maxCoeff();
+        }
+    }
 
     for (Index P = 0; P < nCells; ++P)
     {
