@@ -439,7 +439,7 @@ OpenFOAM 因此在**每个压力修正子**开头重算 `HbyA = rAU*UEqn.H()`，
 
 - 教训：本排查中曾因**混用不同 `nCorrectors` 配置**产生的文件而得出错误结论（"边界通量差 2.7 倍"），此后所有对照均在独立目录中进行并把配置写进目录名。
 
-**复现与对照工具**（脚本未入库，位于 `%TEMP%\of_cases\`）：`map_phi.py`（把 OpenFOAM `phi` 按 owner/neighbour 映射到本项目的 $(type,i,j)$ 面布局）、`diff_flux.py`、`of_dump.awk`/`merge.awk`/`diff.awk`（单元场对比）；驱动 `%TEMP%\piso_repro\driver.cpp` 复刻 `solvePiso` 循环并可逐单元/逐面 dump，`%TEMP%\piso_repro\piso_fingerprint.cpp`（+ `build_fingerprint.cmd`）做单步指纹对照（`nCorrectors = 1/2` 的 $p(0,0)$ 与进口通量）。WSL 侧算例：`~/OpenFOAM/gzh1057-14/run/pisoPoiseuille`（基准）、`piso_of_c1`/`piso_of_c2`（单步，配置写进目录名）、`piso_c1_long_*`/`piso_c2_long_*`（多步稳定性对照）。
+这套对照流程已固化为项目 skill **`.agents/skills/openfoam-crosscheck/`**（流程与硬约束见 `SKILL.md`，OpenFOAM-14 源码/字典事实索引见 `references/openfoam-facts.md`，算例搭建与坑清单见 `references/comparison-case.md`；`scripts/make_of_case.sh` 从模板生成独立算例并运行，配置写进目录名，`scripts/of_log_summary.py` 把日志整理成每步 `Co_max`/`max|U|`/残差表）。其余一次性产物（未入库，位于 `%TEMP%\of_cases\`）：`map_phi.py`（把 OpenFOAM `phi` 按 owner/neighbour 映射到本项目的 $(type,i,j)$ 面布局）、`diff_flux.py`、`of_dump.awk`/`merge.awk`/`diff.awk`（单元场对比）；驱动 `%TEMP%\piso_repro\driver.cpp` 复刻 `solvePiso` 循环并可逐单元/逐面 dump，`%TEMP%\piso_repro\piso_fingerprint.cpp`（+ `build_fingerprint.cmd`）做单步指纹对照（`nCorrectors = 1/2` 的 $p(0,0)$ 与进口通量）。WSL 侧算例：`~/OpenFOAM/gzh1057-14/run/pisoPoiseuille`（基准）、`piso_of_c1`/`piso_of_c2`（单步，配置写进目录名）、`piso_c1_long_*`/`piso_c2_long_*`（多步稳定性对照）。
 
 以 OpenFOAM-10 `simpleFoam` / `pisoFoam`（`UEqn.H` / `pEqn.H`）为参照。两者数学上是同一算法，差异集中在公式写法、数据结构与工程化程度上。
 

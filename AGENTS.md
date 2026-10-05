@@ -11,6 +11,13 @@
 - **PISO** transient solver implemented on the shared primitives (`Piso.h/.cpp`) and **working**: `tests/test_piso.cpp` is enabled again, and the suite is 50 cases / 3271 assertions, all passing. Four defects were found and fixed while reproducing the original instability: (1) the Dirichlet-pressure boundary face flux was not same-sourced as the interior Rhie-Chow flux (each corrector re-added the fixed boundary pressure drop); (2) closed domains did not rebalance the predicted boundary fluxes (inconsistent p' system); (3) the pressure update and the velocity reconstruction were interleaved, so the cumulative reconstruction read a partially updated pressure field; (4) the driver loop never refreshed the Rhie-Chow data `uHat = H/a_P` between correctors — since `fvMatrix::H()` evaluates the matrix's current `psi_`, OpenFOAM re-evaluates `HbyA = rAU*UEqn.H()` at every corrector, while a frozen `uHat` makes the loop reach its own fixed point after the first sweep (algebraically `nCorrectors = 1`, which diverges on the comparison case in OpenFOAM too). All four are documented with their evidence chain in `docs/numerical.md` ("PISO 排查记录", 已解决).
 - Test count: 50 cases pass.
 
+## Skills (`.agents/skills/`, shared by Codex and opencode)
+
+Both agents load the project skills from `.agents/skills` (Codex: project skill root; opencode: `skills.paths` in `opencode.json`). Use them:
+
+- **`refactor-code`** — every planned change to this project's code goes through its four phases (plan → edit → review → docs). Phase 1 must present a plan and wait for the user's confirmation before any code is touched.
+- **`openfoam-crosscheck`** — when a numerical/discretization detail needs a reference-implementation check: build same-parameter cases in the WSL OpenFOAM-14 (`~/OpenFOAM/OpenFOAM-14`), compare cell-by-cell/face-by-face, read OpenFOAM source when the data alone cannot explain the difference, and record conclusions with their evidence. Reusable tools: `scripts/make_of_case.sh` (fresh case dir per configuration, config baked into the directory name) and `scripts/of_log_summary.py` (per-step `Co_max`/`max|U|`/residual table); `references/` holds the OpenFOAM-14 fact index and the pitfalls list. WSL access needs escalation in Codex.
+
 ## Architecture
 
 ```
