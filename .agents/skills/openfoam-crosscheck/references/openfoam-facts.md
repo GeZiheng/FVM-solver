@@ -30,7 +30,7 @@
 
 ## 已排除的假设（不要重复试错）
 
-以下都针对本项目的瞬态通道/库埃特算例做过对照，结论都记在 `docs/numerical.md` 的"PISO 排查记录"里：
+以下都针对本项目的瞬态通道/库埃特算例做过对照，结论都记在 `docs/numerical.md` 的"PISO 与 OpenFOAM 的对照结论"里：
 
 - `ddtCorr`（`EulerDdtScheme::fvcDdtPhiCorr`，`$OF14/src/finiteVolume/finiteVolume/ddtSchemes/EulerDdtScheme/EulerDdtScheme.C`）：逐字实现后无改善；限幅器在"通量—速度失配与通量同量级"处把该项关闭。`记录`
 - `pimple.consistent()`：显式设 `consistent no` 后对照结果**逐位相同**。`记录`

@@ -8,7 +8,7 @@
 - SIMPLE iteration split into reusable `predictMomentum`/`correctPressure` free functions (UEqn.H/pEqn.H-style, ready for PISO reuse); closed-domain flux compatibility enforced via `checkFluxCompatibility` (OpenFOAM adjustPhi-style) at `solveSimple` entry, and — inside `correctPressure` — by rebalancing the predicted boundary fluxes whenever the pressure is pure-Neumann, so the p' equation stays solvable during the iteration.
 - Build system verified working (CMake + vcpkg).
 - Phase 4-1 complete: implicit **theta time integration** (`TimeScheme`/`TimeTerm`) and **transient scalar transport** (`assembleTransientTransport`) implemented and tested (`tests/test_transient.cpp`: Euler first order, Crank-Nicolson second order, verified against `exp(-A_sp t/V)`). The numerical module was **refactored** so momentum assembly (`Momentum.h/.cpp`) and pressure correction (`Pressure.h/.cpp`) are first-class shared primitives; `Simple`/`Piso` are thin driver loops. Public discretization operators (`cellGradient`) live in `GridOperators.h/.cpp`.
-- **PISO** transient solver implemented on the shared primitives (`Piso.h/.cpp`) and **working**: `tests/test_piso.cpp` is enabled again, and the suite is 50 cases / 3271 assertions, all passing. Four defects were found and fixed while reproducing the original instability: (1) the Dirichlet-pressure boundary face flux was not same-sourced as the interior Rhie-Chow flux (each corrector re-added the fixed boundary pressure drop); (2) closed domains did not rebalance the predicted boundary fluxes (inconsistent p' system); (3) the pressure update and the velocity reconstruction were interleaved, so the cumulative reconstruction read a partially updated pressure field; (4) the driver loop never refreshed the Rhie-Chow data `uHat = H/a_P` between correctors — since `fvMatrix::H()` evaluates the matrix's current `psi_`, OpenFOAM re-evaluates `HbyA = rAU*UEqn.H()` at every corrector, while a frozen `uHat` makes the loop reach its own fixed point after the first sweep (algebraically `nCorrectors = 1`, which diverges on the comparison case in OpenFOAM too). All four are documented with their evidence chain in `docs/numerical.md` ("PISO 排查记录", 已解决).
+- **PISO** transient solver implemented on the shared primitives (`Piso.h/.cpp`) and **working**: `tests/test_piso.cpp` is enabled again, and the suite is 50 cases / 3271 assertions, all passing. Four defects were found and fixed while reproducing the original instability — most importantly, the Rhie-Chow data `uHat = H/a_P` must be re-evaluated from the current velocity before every corrector after the first (OpenFOAM's per-corrector `HbyA = rAU*UEqn.H()`); with a frozen `uHat` the corrector loop degenerates to `nCorrectors = 1`, which diverges in OpenFOAM too. Conclusions and the OpenFOAM-14 cross-check numbers: `docs/numerical.md` ("PISO 与 OpenFOAM 的对照结论"); process, pitfalls and the ruled-out list: `.agents/skills/openfoam-crosscheck/`.
 - Test count: 50 cases pass.
 
 ## Skills (`.agents/skills/`, shared by Codex and opencode)
@@ -194,23 +194,12 @@ Agreed roadmap (in order), with current status:
      Rhie-Chow data `uHat = H/a_P` re-evaluated from the current velocity before every corrector
      after the first (`refreshUHat` — OpenFOAM's per-corrector `HbyA = rAU*UEqn.H()`).
      `tests/test_piso.cpp` is enabled again; the suite is 50 cases / 3271 assertions, all passing.
-     Four defects were fixed while reproducing the original instability (evidence chain in
-     `docs/numerical.md`, "PISO 排查记录", 已解决): (1) Dirichlet-pressure boundary face flux not
-     same-sourced as the interior Rhie-Chow flux; (2) closed-domain predicted boundary fluxes not
-     rebalanced (adjustPhi-style) inside `correctPressure`; (3) pressure update and velocity
-     reconstruction interleaved (the cumulative reconstruction must read the fully updated
-     pressure — two passes); (4) the driver never refreshed `uHat` between correctors, which made
-     the corrector loop reach its own fixed point after one sweep (algebraically
-     `nCorrectors = 1`). Verification: after one corrector the first-step fields and face fluxes
-     agree with OpenFOAM-14 to ~1e-11; after the fix the two-corrector single-step fingerprint
-     agrees to ~1e-9 (OpenFOAM's p-solver tolerance): p(0,0) = 2.20767079142 (1) and
-     1.11519142931 vs 1.11519143114 (2). OpenFOAM itself diverges on this case with
-     `nCorrectors = 1` (maxUx = -2.3e10 at t = 0.5) and is stable with 2 (maxUx = 0.12352).
-     Acceptance: Couette maxErr 2.0e-3 (limit 2e-2), Poiseuille relL2 5.3e-3 (limit 8e-2),
-     Q = 0.08398 vs 1/12, continuity 2.1e-16.
-     Ruled out along the way (do not re-investigate): case setup, PIMPLE, a missing `ddtCorr`
-     (implemented faithfully, no effect), the pressure-gradient-free `UEqn` variant, the wall
-     pressure BC choice, `constrainHbyA`, and `pimple.consistent()`.
+     Four defects were fixed (boundary flux not same-sourced; closed-domain boundary fluxes not
+     rebalanced; two-pass pressure/velocity update; the decisive one: refreshing `uHat` between
+     correctors). Conclusions and the OpenFOAM-14 cross-check numbers are in `docs/numerical.md`
+     ("PISO 与 OpenFOAM 的对照结论"); the process, pitfalls and the ruled-out list (PIMPLE,
+     `ddtCorr`, `constrainHbyA`, `pimple.consistent()` — do not re-investigate) are in
+     `.agents/skills/openfoam-crosscheck/`.
 2. **`pyfvm` Python bindings** (pybind11 via vcpkg, optional build target) — case setup becomes a Python script (initial fields/source terms/post-processing in numpy), replacing any JSON-config idea; `fvm_solver` exe stays as a smoke demo. PISO is complete, so the main API-stability gate is satisfied; review the solver API once before starting.
 3. **Arbitrary mesh input** (Gmsh `.msh` reader first) — the main motivation for the Python front-end; may come with non-orthogonal/skew mesh support.
 
