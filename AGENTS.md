@@ -127,6 +127,13 @@ Both are inherited when the agent (opencode/Codex) is launched, so add them **be
 - The tool configures into `build/<config>-agent` (one directory per config, shared by all agents), not into `build/`.
 - The server runs **outside** the agent's per-command sandbox, which is required here: vcpkg writes under `$VCPKG_ROOT`, outside this repository, so running the CMake commands from a sandboxed shell fails at the vcpkg step. The server reads `VCPKG_ROOT` from the process environment and falls back to the persisted Windows environment (HKCU, then HKLM).
 
+**IMPORTANT for agents (OpenFOAM comparison runs):** if your environment provides the `openfoam` MCP tool, use it instead of shelling into WSL by hand — it also runs outside the agent sandbox, so there is no per-call escalation, and it returns structured JSON:
+- `run_case` — copy a template case into a **fresh timestamped directory** (configuration baked into the directory name), patch `endTime`/`deltaT`/`writeInterval`/`nCorrectors`, run `foamRun`, and return `case_dir`, `log_path`, the per-step residuals/Courant/continuity and a divergence flag. Default case root: `~/OpenFOAM/gzh1057-14/run`.
+- `summarize_log` — parse an existing solver log into the same per-step table.
+- `list_cases` — cases under the root, newest first, with `nCorrectors`/`deltaT`/`endTime` parsed back out of the directory name.
+
+The server `.agents/mcp/openfoam_server.py` wraps the `openfoam-crosscheck` skill scripts, which remain the single implementation and the fallback when the tool is unavailable.
+
 Manual commands (for humans, or when the MCP tool is unavailable):
 
 ```bash

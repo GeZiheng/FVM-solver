@@ -6,6 +6,12 @@
 # server through the `mcp` block in opencode.json, so both agents share a single
 # implementation.
 #
+# `openfoam` (see .agents/mcp/openfoam_server.py) wraps the
+# `.agents/skills/openfoam-crosscheck` scripts: it creates a fresh OpenFOAM case
+# in WSL, runs it, and returns the per-step summary as JSON. It runs outside the
+# agent sandbox, which is what makes the WSL invocation work without per-call
+# escalation.
+#
 # NOTE: `args` is a path relative to the repository root (Codex launches MCP
 # servers with the project as cwd), so this file is portable across machines as
 # long as `python` is on PATH.
@@ -15,4 +21,13 @@ command = "python"
 args = ['.agents/mcp/build_and_test_server.py']
 
 [mcp_servers.build-and-test.tools.build_and_test]
+approval_mode = "approve"
+
+[mcp_servers.openfoam]
+command = "python"
+args = ['.agents/mcp/openfoam_server.py']
+
+# run_case creates a directory and runs foamRun; summarize_log / list_cases are
+# read-only and need no entry.
+[mcp_servers.openfoam.tools.run_case]
 approval_mode = "approve"

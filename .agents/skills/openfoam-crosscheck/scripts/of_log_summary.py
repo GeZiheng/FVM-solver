@@ -10,11 +10,14 @@ indices larger than the number of steps, so this script builds an explicit
 per-step record instead.
 
 Usage:
-    of_log_summary.py LOG [--dt S] [--dx M] [--rows N]
+    of_log_summary.py LOG [--dt S] [--dx M] [--rows N] [--json]
 
 ``--dt`` and ``--dx`` convert ``Co_max`` into ``max|U| = Co_max * dx / dt``
 (uniform Cartesian mesh with square cells of size ``dx``), which is a free
 per-step proxy for the field magnitude.
+
+``--json`` prints the same data as a JSON object instead of the table; the
+``openfoam`` MCP server consumes that form, so the parser stays single-sourced.
 
 The ``res_*`` columns report the *last* occurrence within the step, i.e. for a
 PISO run with ``nCorrectors = 2`` that is the second pressure solve - which is
@@ -24,6 +27,7 @@ exactly the number you want when comparing corrector behaviour.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import re
 import sys
@@ -91,18 +95,75 @@ def fmt(value: float | None, width: int = 11, prec: int = 4) -> str:
     return f"{value:>{width}.{prec}g}"
 
 
+def _num(text: str) -> float | str:
+    """Time directories may be plain numbers ('0.02') or versions ('0.02.gz')."""
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+def build_report(
+    path: str, steps: list[Step], dt: float | None, dx: float | None
+) -> dict:
+    """Structured summary; consumed by ``--json`` and by the MCP server."""
+    convert = dt is not None and dx is not None
+    records = []
+    for step in steps:
+        max_u = None
+        if convert and step.co_max is not None:
+            max_u = step.co_max * dx / dt
+        records.append(
+            {
+                "t": _num(step.time),
+                "co_max": step.co_max,
+                "max_u": max_u,
+                "residuals": step.residuals,
+                "iterations": step.iterations,
+                "continuity": step.continuity,
+            }
+        )
+
+    report: dict = {
+        "log": path,
+        "n_steps": len(steps),
+        "dt": dt,
+        "dx": dx,
+        "steps": records,
+    }
+    if steps:
+        report["t_first"] = _num(steps[0].time)
+        report["t_last"] = _num(steps[-1].time)
+
+    values = [record["max_u"] for record in records if record["max_u"]]
+    if len(values) >= 2:
+        report["max_u_first"] = values[0]
+        report["max_u_last"] = values[-1]
+        if values[0] > 0 and values[-1] > values[0]:
+            report["growth_per_step"] = math.exp(
+                math.log(values[-1] / values[0]) / (len(values) - 1)
+            )
+        report["diverged"] = values[-1] > 1e3 * values[0]
+    return report
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("log")
     parser.add_argument("--dt", type=float, default=None, help="time step (for Co -> max|U|)")
     parser.add_argument("--dx", type=float, default=None, help="cell size (for Co -> max|U|)")
     parser.add_argument("--rows", type=int, default=12, help="max data rows to print")
+    parser.add_argument("--json", action="store_true", help="print the structured report instead of the table")
     args = parser.parse_args(argv)
 
     steps = parse(args.log)
     if not steps:
         print(f"{args.log}: no 'Time = ' records found", file=sys.stderr)
         return 1
+
+    if args.json:
+        print(json.dumps(build_report(args.log, steps, args.dt, args.dx), ensure_ascii=False, indent=2))
+        return 0
 
     field_names = sorted({name for step in steps for name in step.residuals})
     convert = args.dt is not None and args.dx is not None

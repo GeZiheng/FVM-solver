@@ -22,6 +22,8 @@
 
 ## 2. 运行
 
+> **优先用 MCP 工具**：若环境提供 `openfoam` MCP 工具，直接用 `run_case`（建算例 + 跑 + 结构化摘要）、`summarize_log`、`list_cases`——它跑在 agent 沙箱外，不需要逐次提权，返回 JSON（含 `case_dir`/`log_path`/每步残差）。下面的脚本是它的底层实现，也是**无 MCP 环境**（人或其它 agent）的回退路径。
+
 ```bash
 # 在 WSL 中执行（从 Windows 侧调用时用 wsl.exe -e bash -lc "..."，需要提权）
 cd /mnt/d/Projects/FVM-solver
