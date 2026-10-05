@@ -19,25 +19,19 @@ using fvm::core::VectorField;
 namespace fvm::numerical
 {
 
-/**
- * @brief Configuration for the SIMPLE algorithm.
- */
+/// Configuration for the SIMPLE algorithm.
 struct SimpleConfig
 {
     int maxIterations = 500;
-    Scalar tolerance = 1e-6;  ///< Convergence tolerance on the scaled
-                              ///< continuity residual (max cell mass
-                              ///< imbalance / characteristic flux).
-    Scalar relaxationU = 0.7; ///< Under-relaxation for momentum (0, 1].
-    Scalar relaxationP = 0.3; ///< Under-relaxation for pressure (0, 1].
+    Scalar tolerance = 1e-6;  ///< Tolerance on the scaled residuals.
+    Scalar relaxationU = 0.7; ///< Momentum under-relaxation in (0, 1].
+    Scalar relaxationP = 0.3; ///< Pressure under-relaxation in (0, 1].
     ConvectionScheme scheme = ConvectionScheme::Upwind;
     fvm::math::SolverConfig solverConfig = {};
     bool verbose = false;
 };
 
-/**
- * @brief Per-iteration residual snapshot of the SIMPLE loop.
- */
+/// Per-iteration residual snapshot (scaling is documented in docs/numerical.md).
 struct SimpleResiduals
 {
     Scalar continuity = 0.0; ///< Scaled max cell mass imbalance.
@@ -46,9 +40,7 @@ struct SimpleResiduals
     Scalar pressure = 0.0;   ///< Max |alpha_p * p'|.
 };
 
-/**
- * @brief Outcome of a SIMPLE run.
- */
+/// Outcome of a SIMPLE run.
 struct SimpleResult
 {
     bool converged = false;
@@ -56,32 +48,14 @@ struct SimpleResult
     std::vector<SimpleResiduals> history;
 };
 
-/**
- * @brief Solve the steady incompressible Navier-Stokes equations with the
- * SIMPLE algorithm on a collocated grid (Rhie-Chow interpolation).
- *
- *   div(rho u u) = -grad(p) + div(mu grad u),
- *   div(u) = 0.
- *
- * Each iteration calls the shared momentum predictor (Momentum.h) and
- * pressure corrector (Pressure.h); this file only owns the SIMPLE loop.
- *
- * @param mesh     Computational mesh.
- * @param rho      Density (constant).
- * @param mu       Dynamic viscosity (constant).
- * @param bcU      Boundary conditions for the u-velocity component.
- * @param bcV      Boundary conditions for the v-velocity component.
- * @param bcP      Boundary conditions for pressure (walls: zero-gradient
- *                 Neumann; fixed-pressure boundaries: Dirichlet).
- * @param config   Algorithm configuration.
- * @param velocity In/out: initial guess -> converged velocity.
- * @param pressure In/out: initial guess -> converged pressure.
- * @param flux     Out: persistent face mass-flux field. Re-initialized
- *                 on entry from `velocity` and the velocity BCs
- *                 (computeMassFlux); on return it holds the corrected
- *                 conservative flux (each cell's net outflow is zero up
- *                 to the pressure-solver accuracy).
- */
+/// Solve the steady incompressible Navier-Stokes equations with SIMPLE on a
+/// collocated grid (Rhie-Chow interpolation).
+///
+/// `velocity` and `pressure` are in/out (initial guess -> converged fields).
+/// `flux` is re-initialized on entry from `velocity` and the velocity BCs
+/// (computeMassFlux); on return it holds the corrected conservative flux
+/// (net outflow zero to the pressure solver's accuracy).  The iteration
+/// itself lives in the shared predictor/corrector; this file owns the loop.
 SimpleResult solveSimple(const CartesianMesh& mesh,
     Scalar rho,
     Scalar mu,

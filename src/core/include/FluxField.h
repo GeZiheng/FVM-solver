@@ -7,21 +7,15 @@
 namespace fvm::core
 {
 
-/**
- * @brief Scalar flux field stored on mesh faces (OpenFOAM-style
- * surfaceScalarField).
- *
- * Stores one scalar (typically the mass flux rho * u . n * S) per face,
- * including boundary faces. Sign convention: fluxes are positive along
- * the positive coordinate direction:
- *   - x(i, j): flux across the x-face i of row j (between cells i-1 and
- *     i), i in [0, nx], j in [0, ny);
- *   - y(i, j): flux across the y-face j of column i (between cells j-1
- *     and j), i in [0, nx), j in [0, ny].
- *
- * The outward flux of a cell therefore carries a sign: east/north faces
- * are +x/+y, west/south faces are -x/-y (see outwardFlux).
- */
+/// Scalar flux field stored on mesh faces (OpenFOAM-style surfaceScalarField):
+/// one value per face including boundaries, typically the mass flux
+/// rho * u.n * S, positive along the positive coordinate direction.
+///
+///   x(i, j): x-face i of row j, between cells i-1 and i; i in [0, nx]
+///   y(i, j): y-face j of column i, between cells j-1 and j; j in [0, ny]
+///
+/// A cell's outward flux therefore carries a sign: east/north faces are +x/+y,
+/// west/south faces are -x/-y (see outwardFlux).
 class FaceFluxField
 {
 public:
@@ -99,12 +93,8 @@ public:
         return y_;
     }
 
-    /**
-     * @brief Signed outward flux of `cell` across local `face`
-     * (0=east, 1=north, 2=west, 3=south).
-     *
-     * East/north faces take +x/+y, west/south faces take -x/-y.
-     */
+    /// Signed outward flux of `cell` across local `face` (0=east, 1=north,
+    /// 2=west, 3=south; east/north take +x/+y, west/south -x/-y).
     Scalar outwardFlux(Index cell, int face) const
     {
         const auto [i, j] = mesh_.cellIJ(cell);
@@ -121,11 +111,8 @@ public:
         }
     }
 
-    /**
-     * @brief Net outflow of a cell: sum_f outwardFlux(cell, f).
-     *
-     * Zero (up to solver accuracy) for a conservative flux field.
-     */
+    /// Net outflow of a cell: sum_f outwardFlux(cell, f).  Zero to solver
+    /// accuracy for a conservative flux field.
     Scalar cellImbalance(Index cell) const
     {
         const auto [i, j] = mesh_.cellIJ(cell);

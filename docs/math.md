@@ -2,13 +2,6 @@
 
 `fvm::math` 命名空间，提供稀疏矩阵装配与线性方程组求解能力。模块对上层（numerical/app）隐藏 Eigen 的细节：装配侧只看到三元组 API，求解侧只看到抽象接口 + 工厂函数，从而为将来替换后端（AMGCL、Hypre 等）预留空间。
 
-## 文件结构
-
-| 文件 | 内容 |
-|------|------|
-| `include/SparseMatrix.h` + `src/SparseMatrix.cpp` | `SparseMatrix`：三元组装配式稀疏矩阵包装 |
-| `include/LinearSolver.h` + `src/LinearSolver.cpp` | `SolverConfig`、`LinearSolver` 抽象接口、三个 Eigen 求解器实现及工厂函数 |
-
 ## SparseMatrix：三元组装配的稀疏矩阵
 
 ### 设计思路
@@ -58,11 +51,3 @@ Eigen 5.x 的 `BiCGSTAB` 内部以**绝对残差**作为停机判据，且其收
 
 2. **自行检查收敛**：求解后取 `solver.error()`（相对残差估计）存入 `lastResidual_`，若超过 `config_.tolerance` 则抛出"did not converge"异常——**不依赖 `solver.info()` 判断 BiCGSTAB 是否收敛**（`info()` 仅用于检查分解失败与数值崩溃）。
 
-## 依赖关系
-
-```
-math → core（Scalar/Index/Vector 别名）
-     → Eigen（Sparse、IterativeLinearSolvers、SparseLU）
-```
-
-math 不知道网格、场、离散化的存在：`solve` 的输入只有矩阵与向量。

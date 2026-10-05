@@ -19,22 +19,9 @@ using fvm::core::VectorField;
 namespace fvm::numerical
 {
 
-/**
- * @brief Assembled momentum equation for one velocity component.
- *
- * The system solves
- *
- *   A u* = b,   b = b0 - grad(p) * vol,
- *
- * with Patankar under-relaxation applied:
- *
- *   A(P,P) -> A(P,P) / alpha,
- *   b      -> b + (1 - alpha) / alpha * A0(P,P) * u_old(P).
- *
- * `diag` holds the relaxed diagonal A(P,P) and `rhsNoPressure` the
- * right-hand side without the pressure-gradient source; together they
- * provide the H/a_P data needed by the Rhie-Chow interpolation.
- */
+/// Assembled momentum equation for one velocity component.  `diag` holds the
+/// (relaxed) diagonal a_P and `rhsNoPressure` the right-hand side without the
+/// pressure-gradient source; together they give the Rhie-Chow data H/a_P.
 struct MomentumAssembly
 {
     EquationSystem system;
@@ -42,32 +29,10 @@ struct MomentumAssembly
     Vector rhsNoPressure;
 };
 
-/**
- * @brief Assemble the momentum equation for one velocity component from
- * a precomputed face mass-flux field.
- *
- * Reuses the diffusion (gamma = mu) and flux-based convection
- * operators, then adds the pressure-gradient source (central
- * differences, one-sided at boundary cells) and under-relaxation.
- *
- * @param mesh       Computational mesh.
- * @param flux       Convecting face mass-flux field (e.g. the persistent
- *                   flux maintained by solveSimple).
- * @param velocity   Current velocity field (u_old for the relaxation
- *                   source).
- * @param mu         Dynamic viscosity (constant).
- * @param scheme     Convection scheme.
- * @param bc         Boundary conditions for this velocity component.
- * @param component  0 for the u-equation, 1 for the v-equation.
- * @param pressure   Current pressure field.
- * @param bcP        Pressure boundary conditions (the pressure-gradient
- *                   source uses the Dirichlet boundary values).
- * @param relaxation Under-relaxation factor in (0, 1].
- * @param time       Transient ddt term (rho V/dt). If inactive the
- *                   assembly is steady and `relaxation` applies
- *                   (Patankar). If active, `relaxation` must be 1 and
- *                   the theta-scheme ddt term is added instead.
- */
+/// Assemble the momentum equation for one velocity component from a
+/// pre-computed face mass-flux field: diffusion + convection + pressure-gradient
+/// source + under-relaxation (or the transient ddt term).
+/// @note `time.active()` requires `relaxation == 1`; the two are alternatives.
 MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
     const FaceFluxField& flux,
     const VectorField& velocity,
@@ -80,41 +45,22 @@ MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
     Scalar relaxation,
     const TimeTerm& time = {});
 
-/**
- * @brief Result of the momentum predictor: the predicted velocity plus
- * the Rhie-Chow data (uHat = H/a_P, d = vol/a_P) needed by the pressure
- * corrector.
- */
+/// Momentum predictor result: the predicted velocities plus the Rhie-Chow data
+/// (`uHat = H/a_P`, `d = V/a_P`) consumed by the pressure corrector.
 struct MomentumPrediction
 {
     MomentumAssembly momU;
     MomentumAssembly momV;
-    Vector uStar; ///< Predicted u (solution of the relaxed momentum eq).
+    Vector uStar; ///< Predicted u (solution of the relaxed momentum equation).
     Vector vStar; ///< Predicted v.
-    Vector uHatU; ///< u velocity without the pressure-gradient part.
-    Vector uHatV; ///< v velocity without the pressure-gradient part.
-    Vector dU;    ///< vol / a_P of the u equation.
-    Vector dV;    ///< vol / a_P of the v equation.
+    Vector uHatU; ///< u without the pressure-gradient contribution.
+    Vector uHatV; ///< v without the pressure-gradient contribution.
+    Vector dU;    ///< V / a_P of the u equation.
+    Vector dV;    ///< V / a_P of the v equation.
 };
 
-/**
- * @brief Run the momentum predictor: assemble and solve the u/v momentum
- * equations and compute the Rhie-Chow data (OpenFOAM UEqn.H).
- *
- * @param mesh       Computational mesh.
- * @param flux       Convecting face mass-flux field.
- * @param velocity   Current velocity field (u_old for under-relaxation).
- * @param mu         Dynamic viscosity (constant).
- * @param scheme     Convection scheme.
- * @param bcU        Boundary conditions for the u component.
- * @param bcV        Boundary conditions for the v component.
- * @param pressure   Current pressure field.
- * @param bcP        Pressure boundary conditions.
- * @param relaxationU Momentum under-relaxation factor in (0, 1].
- * @param time        Transient ddt term (see assembleMomentum); inactive
- *                    for steady SIMPLE.
- * @param momSolver  Linear solver used for both momentum systems.
- */
+/// Assemble and solve the u/v momentum equations and compute the Rhie-Chow data
+/// (OpenFOAM UEqn.H).
 MomentumPrediction predictMomentum(const CartesianMesh& mesh,
     const FaceFluxField& flux,
     const VectorField& velocity,
@@ -128,26 +74,17 @@ MomentumPrediction predictMomentum(const CartesianMesh& mesh,
     const TimeTerm& time,
     fvm::math::LinearSolver& momSolver);
 
-/**
- * @brief Re-evaluate the Rhie-Chow data (uHat = H/a_P) from the current
- * velocity field. This is OpenFOAM's `HbyA = rAU*UEqn.H()`, which is
- * evaluated at the top of *every* pressure corrector: `fvMatrix::H()` is
- * built from the matrix's current `psi_`, so the second and later
- * correctors solve an equation assembled from the velocity corrected by
- * the previous one.
- *
- * `predictMomentum` evaluates uHat once, at the predicted velocity. A
- * PISO driver must call this before each additional corrector; with a
- * frozen uHat the corrector loop reaches its own fixed point after a
- * single sweep, which is algebraically equivalent to `nCorrectors = 1`
- * (unstable for these problems: OpenFOAM diverges there too).
- *
- * @param pred     In/out predictor result; `momU`/`momV` must be the
- *                 finalized assemblies produced by `predictMomentum`.
- *                 `uHatU`/`uHatV` are overwritten.
- * @param velocity Current cell-centered velocity (the corrected velocity
- *                 of the previous corrector).
- */
+/// Re-evaluate the Rhie-Chow data `uHat = H(u)/a_P` from the current velocity
+/// (OpenFOAM `HbyA = rAU*UEqn.H()`).  OpenFOAM re-evaluates it at *every*
+/// corrector because `fvMatrix::H()` reads the matrix's current `psi_`.
+///
+/// `predictMomentum` evaluates uHat once, at the predicted velocity; a PISO
+/// driver must call this before each *additional* corrector.  With a frozen
+/// uHat the loop reaches its own fixed point after one sweep, i.e.
+/// `nCorrectors = 1`, which diverges for these problems (OpenFOAM too).
+///
+/// `pred.momU`/`momV` must be the finalized assemblies from `predictMomentum`;
+/// `uHatU`/`uHatV` are overwritten from `velocity`.
 void refreshUHat(MomentumPrediction& pred, const VectorField& velocity);
 
 } // namespace fvm::numerical

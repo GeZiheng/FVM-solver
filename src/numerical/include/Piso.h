@@ -20,23 +20,19 @@ using fvm::core::VectorField;
 namespace fvm::numerical
 {
 
-/**
- * @brief Configuration for the PISO transient solver.
- */
+/// Configuration for the PISO transient solver.
 struct PisoConfig
 {
-    Scalar dt = 0.01; ///< Time-step size (> 0).
-    int nSteps = 100; ///< Number of time steps to advance.
-    int nCorrectors = 2; ///< Pressure correctors per time step (>= 1).
+    Scalar dt = 0.01;    ///< Time-step size (> 0).
+    int nSteps = 100;    ///< Number of time steps to advance.
+    int nCorrectors = 2; ///< Pressure correctors per step (>= 2 for stability).
     TimeScheme timeScheme = TimeScheme::Euler; ///< ddt scheme.
     ConvectionScheme scheme = ConvectionScheme::Upwind;
     fvm::math::SolverConfig solverConfig = {};
     bool verbose = false;
 };
 
-/**
- * @brief Per-time-step diagnostics of the PISO loop.
- */
+/// Per-time-step diagnostics of the PISO loop.
 struct PisoStepInfo
 {
     Scalar time = 0.0;       ///< Time at the end of the step.
@@ -45,45 +41,25 @@ struct PisoStepInfo
     Scalar maxSpeed = 0.0;   ///< Max |u| after the step.
 };
 
-/**
- * @brief Outcome of a PISO run.
- */
+/// Outcome of a PISO run.
 struct PisoResult
 {
     int steps = 0;
     std::vector<PisoStepInfo> history;
 };
 
-/**
- * @brief Advance the transient incompressible Navier-Stokes equations with
- * PISO on a collocated grid (Rhie-Chow interpolation).
- *
- * Each time step performs one momentum predictor
- * (predictMomentum, no under-relaxation) followed by `nCorrectors`
- * pressure-correction steps (correctPressure). Before each corrector
- * after the first, the Rhie-Chow data is re-evaluated from the velocity
- * corrected so far (OpenFOAM's `HbyA = rAU*UEqn.H()`), so the extra
- * correctors solve updated equations instead of re-solving the first
- * one. The momentum ddt term is
- * the theta scheme selected by PisoConfig::timeScheme. The persistent
- * face flux is carried between steps and is conservative to the pressure
- * solver's accuracy.
- *
- * A pure-Neumann pressure (closed domain) is tolerated: the reference
- * cell is eliminated in the correction equation, and the boundary fluxes
- * are checked for compatibility at entry (checkFluxCompatibility).
- *
- * @param mesh     Computational mesh.
- * @param rho      Density (constant).
- * @param mu       Dynamic viscosity (constant).
- * @param bcU      Boundary conditions for the u-velocity component.
- * @param bcV      Boundary conditions for the v-velocity component.
- * @param bcP      Pressure boundary conditions.
- * @param config   Algorithm configuration.
- * @param velocity In/out: initial field -> field after the last step.
- * @param pressure In/out: initial guess -> pressure after the last step.
- * @param flux     Out: persistent conservative face mass-flux field.
- */
+/// Advance the transient incompressible Navier-Stokes equations with PISO on a
+/// collocated grid (Rhie-Chow interpolation).
+///
+/// Each step is one momentum predictor (no under-relaxation) plus
+/// `nCorrectors` pressure corrections.  Before every corrector after the first
+/// the Rhie-Chow data is re-evaluated from the velocity corrected so far
+/// (OpenFOAM `HbyA = rAU*UEqn.H()`); without that refresh the loop stalls after
+/// one sweep (see `refreshUHat`).  The ddt term is the theta scheme in
+/// `PisoConfig::timeScheme`; the persistent flux is carried between steps and
+/// is conservative to the pressure solver's accuracy.  Closed domains
+/// (pure-Neumann pressure) are supported via reference-cell elimination and the
+/// entry flux-compatibility check.
 PisoResult solvePiso(const CartesianMesh& mesh,
     Scalar rho,
     Scalar mu,

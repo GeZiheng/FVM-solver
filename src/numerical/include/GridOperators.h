@@ -13,27 +13,14 @@ using fvm::core::ScalarField;
 namespace fvm::numerical
 {
 
-/**
- * @brief Cell-center gradient of a scalar field, component `dir`, via the
- * Gauss divergence theorem:
- *
- *   grad(phi)_P = (1 / vol_P) * sum_f phi_f * n_f,dir * S_f.
- *
- * Interior face values are arithmetic means; boundary faces take the
- * Dirichlet value or the cell value (zero normal gradient) for Neumann.
- * On a uniform grid this reduces to central differences in the interior.
- *
- * This is a shared discretization operator: it is used by the momentum
- * pressure-gradient source and by the pressure-correction velocity
- * reconstruction. Future operators (divergence, ...) should live here too
- * so that other solvers can reuse them.
- *
- * @param mesh Computational mesh.
- * @param phi  Cell-centered scalar field.
- * @param bc   Boundary conditions (used for boundary face values).
- * @param P    Cell index.
- * @param dir  Gradient direction: 0 = x, 1 = y.
- */
+/// Cell-center gradient of `phi`, component `dir`, by the Gauss theorem:
+///   grad(phi)_P = (1 / vol_P) * sum_f phi_f * n_f,dir * S_f
+/// (arithmetic face means in the interior; Dirichlet value or cell value on
+/// boundaries; central differences on a uniform grid).
+///
+/// Shared operator: used by the momentum pressure-gradient source and by the
+/// pressure-correction velocity reconstruction.  Put future operators
+/// (divergence, ...) here too so other solvers can reuse them.
 Scalar cellGradient(const CartesianMesh& mesh,
     const ScalarField& phi,
     const BoundaryField& bc,

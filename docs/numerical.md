@@ -10,23 +10,6 @@ $$\nabla \cdot (\rho\, \mathbf{u}\, \phi) = \nabla \cdot (\gamma \nabla \phi) + 
 
 $$\underbrace{\sum_f F_f\, \phi_f}_{\text{对流通量}} = \underbrace{\sum_f D_f\, (\phi_N - \phi_P)}_{\text{扩散通量}} + \underbrace{(S_c + S_p\, \phi_P)\, V_P}_{\text{源项}}$$
 
-## 文件结构
-
-| 文件 | 内容 |
-|------|------|
-| `include/BoundaryCondition.h` | `BCType`、`BoundaryCondition`、`BoundaryField`（header-only） |
-| `include/GridOperators.h` + `src/GridOperators.cpp` | 公共离散算子：`cellGradient`（Gauss 梯度）；后续 `divergence` 等也放此处 |
-| `include/Diffusion.h` + `src/Diffusion.cpp` | `assembleDiffusion`：扩散项装配 |
-| `include/Convection.h` + `src/Convection.cpp` | `ConvectionScheme`、`interpolateCellVelocityFlux`、`computeMassFlux`、`checkFluxCompatibility`、`assembleConvection`：通量构造/检查与对流项装配 |
-| `include/TransportEquation.h` + `src/TransportEquation.cpp` | `EquationSystem`、`assembleTransport`、`assembleTransientTransport`：稳态/瞬态标量方程装配 |
-| `include/TimeScheme.h` | `TimeScheme`、`thetaOf`、`TimeTerm`（header-only）：时间离散配置 |
-| `include/Momentum.h` + `src/Momentum.cpp` | `MomentumAssembly`、`assembleMomentum`、`MomentumPrediction`、`predictMomentum`：动量方程装配与预测子 |
-| `include/Pressure.h` + `src/Pressure.cpp` | `CorrectorResult`、`correctPressure`：压力修正方程装配与修正子 |
-| `include/Simple.h` + `src/Simple.cpp` | `SimpleConfig`/`SimpleResiduals`/`SimpleResult`、`solveSimple`：稳态 SIMPLE 驱动循环 |
-| `include/Piso.h` + `src/Piso.cpp` | `PisoConfig`/`PisoStepInfo`/`PisoResult`、`solvePiso`：瞬态 PISO 驱动循环 |
-
-> 动量装配（`Momentum`）与压力修正（`Pressure`）是 **SIMPLE / PISO 共享的一等公民**；`Simple` 与 `Piso` 只负责各自的时间/迭代控制。`Pressure.h` 依赖 `Momentum.h`（需要 `MomentumPrediction`），无循环依赖。
-
 ## BoundaryCondition：边界条件
 
 - `BCType { Dirichlet, Neumann }`：Dirichlet 给定边界面值 $\phi_b$；Neumann 给定外法向导数 $g = \mathrm{d}\phi / \mathrm{d}n$。
@@ -169,21 +152,6 @@ $$\left(\theta\, A_{sp} + \frac{V}{\Delta t} I\right)\phi^{n+1} = \frac{V}{\Delt
 ### 装配的累加语义
 
 `assembleDiffusion` / `assembleConvection` 均**向既有的 (A, b) 累加**而不清零——这是刻意设计：`assembleTransport` 借此组合多个算子，用户也可先装配标准算子再叠加自定义项。若需全新系统，调用方须自行清零（`A.setZero()`、`b.setZero()`）。
-
-### 装配循环结构（Diffusion/Convection 共用）
-
-```
-for P in cells:
-    for face in {0,1,2,3}:
-        N = mesh.neighbor(P, face)
-        if N 存在:          # 内部面
-            只处理 East/North，避免每个面被两侧单元重复计算
-        else:               # 边界面
-            立即处理（West/South 边界面不会被任何其他单元访问到，
-                       因此不存在重复计数问题）
-```
-
-该结构保证每个内部面恰好装配一次、每个边界面恰好装配一次，时间复杂度 $O(n_{\text{cells}})$。
 
 ## TimeScheme：时间离散
 
@@ -417,37 +385,18 @@ $$p^{(k)}=p^{(k-1)}+p'^{(k)},\qquad u^{(k)}=\hat u_k-d\,\nabla p^{(k)}$$
 |------|--------|----------|
 | 动量对角 | `MomentumAssembly.diag` 显式导出 | `rAU = 1.0/UEqn.A()` |
 | 非压力速度 | `computeUHat`：$(b^{np}_P - \sum_{N\ne P} A_{PN} u_N)/a_P$；步初用 $u^{*}$ 求值，之后每个附加修正子前用当前 $u$ 重算（`refreshUHat`） | `HbyA = rAU * UEqn.H()`；`H()` 用矩阵当前持有的 `psi_`，因此每个修正子自动重算 |
-| 面系数 | x/y 面分别取 u/v 方程对角，$\bar d_f$ 算术平均 | 向量方程共用一套对角，`rAUf` 插值到面 |
-| 守恒通量 | `FaceFluxField` 持久存储，对流与连续性共用同一通量 | `phi` 是一等公民，对流与连续性共用同一通量 |
-| 时间格式 | θ 格式（`TimeScheme`/`TimeTerm`；Euler / Crank–Nicolson） | `ddtSchemes`（Euler / backward / CrankNicolson，含 `ddtCorr`） |
 | 瞬态算法 | PISO：一次预测 + `nCorrectors` 次修正，无欠松弛；每个附加修正子前重算 $\hat u$ | PISO / PIMPLE，`nCorrectors`/`nOuterCorrectors` |
 | 奇异性 | 参考单元**消元**（矩阵缩一维，严格 SPD） | `pEqn.setReference(refCell, refValue)`（矩阵尺寸不变） |
 | 封闭域相容性 | `checkFluxCompatibility`：入口检查边界净通量，不平衡则抛异常 | `adjustPhi` 强制边界净通量为零（自动修正而非报错） |
 | 松弛 | 稳态 Patankar 动量松弛 + `p += α_p p′`；瞬态无松弛 | `UEqn.relax()` + `p.relax()`；另有 SIMPLEC 选项 |
-| 收敛判据 | 质量不平衡 + 速度修正量同时 < tolerance | `residualControl` 按场配置，基于线性求解器首轮残差 |
-| 非正交修正 | 无（网格正交） | `correctNonOrthogonal()` 循环 |
-| 求解器 | Eigen BiCGSTAB（动量）/ CG（p′） | GAMG/PCG/PBiCGStab，`fvSolution` 配置 |
 
 ### 值得借鉴与不宜照搬
 
 **值得借鉴**（尚未实现，按对本项目的价值排序）：
 
 1. **SIMPLEC 选项**——仅需改对角系数 $d = 1/(a_P - \sum_N a_N)$，教学上可直接对比迭代数差异。
-2. PISO 的 `ddtCorr` 等瞬态通量一致性修正（当前 PISO 稳定性排查的可能方向之一）。
+2. **PIMPLE 外层迭代**（`nOuterCorrectors > 1`，每个外层重新解动量方程）——大 Courant 数时的标准做法，是修正子数不够用时的正解。（`ddtCorr` 已排除，见 skill 的 facts。）
 3. 次要项：动量预测开关、按场独立的收敛阈值。
 
 **不宜照搬**：`setReference`（消元法更干净、矩阵更小）；patch/fvMatrix 重型抽象层（为非结构网格通用性付的代价，教学项目会淹没算法主线）；非正交修正循环（仅当引入斜交网格时才有意义）。
 
-## 依赖关系
-
-```
-numerical → core（Mesh/Field/FluxField/Types）
-          → math（SparseMatrix/Vector；Simple/Piso 另用 LinearSolver）
-
-Momentum → Diffusion, Convection, GridOperators, TransportEquation, TimeScheme
-Pressure → Momentum, GridOperators
-Simple   → Momentum, Pressure, Convection
-Piso     → Momentum, Pressure, Convection
-```
-
-标量输运部分不依赖线性求解器与 io——它只负责装配，求解与输出由 app 层组织；`Simple`/`Piso` 是例外，它们内部持有 BiCGSTAB（动量）与 CG（压力修正）求解器以驱动各自的循环。

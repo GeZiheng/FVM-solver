@@ -57,11 +57,9 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
 
     const Index nCells = mesh.cellCount();
 
-    // With pure Neumann pressure BCs the correction equation is singular
-    // (null space: constants). Eliminate the reference cell 0 (p'_0 = 0);
-    // its continuity equation is redundant because the mass imbalances
-    // sum to zero. With at least one Dirichlet side the system is already
-    // definite and all cells are kept.
+    // Pure-Neumann p makes the correction equation singular (constants null
+    // space): eliminate reference cell 0 (p'_0 = 0; its continuity equation is
+    // redundant). Any Dirichlet p side makes the system definite -> keep all.
     bool hasDirichletP = false;
     for (int side = 0; side < 4; ++side)
     {
@@ -79,8 +77,7 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
         return pinReference && cell == 0;
     };
 
-    // Pressure-correction BCs: p' = 0 wherever p is fixed (Dirichlet),
-    // zero gradient elsewhere.
+    // Pressure-correction BCs: p' = 0 on Dirichlet p sides, zero gradient else.
     BoundaryField bcPrime = bcP;
     for (int side = 0; side < 4; ++side)
     {
@@ -96,17 +93,13 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
     const Vector& dV = pred.dV;
 
     // ---- Pressure-correction equation -------------------------------
-    // Continuity per cell: sum_f F_f = 0 with
-    //   F_f = F*_f - rho d_f S_f (p'_N - p'_P) / delta  (interior),
-    //   F_b = F*_b + rho d_P S_f p'_P / dist            (Dirichlet p),
-    //   F_b = F*_b                                      (Neumann p).
-    // Collecting the p' terms on the left gives the diffusion-like
-    // system A p' = -massImbalance, where A has coefficient rho * d
-    // and massImbalance(P) is the predicted net outflow of cell P.
-    // The predicted flux F* is written into the persistent flux
-    // field; the correction step below applies the p' correction to
-    // it in place, which makes the stored flux conservative up to the
-    // solver accuracy.
+    // Cell continuity sum_f F_f = 0 with
+    //   F_f = F*_f - rho d_f S_f (p'_N - p'_P)/delta   (interior)
+    //   F_b = F*_b + rho d_P S_f p'_P/dist             (Dirichlet p)
+    //   F_b = F*_b                                     (Neumann p)
+    // -> A p' = -massImbalance with coefficients rho*d.  F* is written into the
+    // persistent flux and corrected in place below, so it stays conservative to
+    // the solver accuracy.
     EquationSystem pSys(nP);
     Vector massImbalance(nCells);
     massImbalance.setZero();
@@ -136,8 +129,7 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
                       * (uHatF - dF * (pressure(N) - pressure(P)) / delta);
                 const Scalar C = rho * dF * Sf / delta;
 
-                // Store the predicted flux (positive P -> N, the
-                // stored convention).
+                // Store the predicted flux (positive P -> N, stored convention).
                 if (face == BoundaryField::East)
                     flux.x(iP + 1, jP) = F;
                 else
@@ -161,15 +153,11 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
             }
             else
             {
-                // Boundary face. The predicted flux must be the Rhie-Chow
-                // flux at the OLD pressure, exactly like the interior
-                // faces: the pressure-free velocity (uHat) plus the
-                // face-normal pressure gradient. On a zero-gradient p
-                // boundary the normal gradient is zero, so no pressure
-                // term is added there. Using the cell-centred gradient
-                // (via uStar) instead double-counts the fixed boundary
-                // pressure once the correction adds its increment, which
-                // makes the corrector iteration diverge.
+                // Boundary face: same Rhie-Chow form as the interior -- uHat plus
+                // the face-normal pressure gradient (no pressure term on
+                // zero-gradient p sides).  Using uStar (cell-centred gradient)
+                // would re-add the fixed boundary pressure every corrector and
+                // diverge.
                 const BoundaryCondition& pCond = bcP.get(face);
                 const Scalar ub = boundaryNormalVelocity(face,
                     xFace ? bcU : bcV,
@@ -184,8 +172,7 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
                 }
                 massImbalance(P) += Fb;
 
-                // Store the outward flux (west/south faces are
-                // stored positive along +x/+y, hence the sign).
+                // Outward flux (west/south are stored along +x/+y -> sign).
                 switch (face)
                 {
                     case BoundaryField::East:
@@ -217,15 +204,11 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
     result.maxImbalance = massImbalance.cwiseAbs().maxCoeff();
 
     // ---- Closed-domain compatibility (OpenFOAM adjustPhi) -------------
-    // With a pure-Neumann pressure the p' correction cannot change the net
-    // boundary outflow: interior corrections cancel in pairs and Neumann
-    // boundaries take no p' term. An unbalanced predicted boundary flux
-    // therefore makes the correction equation inconsistent, and the
-    // reference-cell elimination silently violates the eliminated cell's
-    // continuity (its equation is the redundant one that gets dropped).
-    // Redistribute the residual over the boundary faces whose normal
-    // velocity is not fixed, so the p' system stays solvable and the
-    // stored flux stays conservative.
+    // Pure-Neumann p: the correction cannot change the net boundary outflow
+    // (interior terms cancel, Neumann faces take no p' term), so an unbalanced
+    // predicted boundary flux makes the system inconsistent and silently
+    // violates the eliminated cell's continuity.  Spread the residual over the
+    // faces whose normal velocity is not fixed.
     if (pinReference)
     {
         const Index nx = mesh.nx();
@@ -315,12 +298,9 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
 
     // ---- Corrections -------------------------------------------------
     // 1. Conservative flux correction (OpenFOAM pEqn.flux):
-    //   interior faces:         F_f -= C (p'_N - p'_P),
-    //   Dirichlet-p boundaries: F_b += Cb p'_P (outward; west/south
-    //   are stored with a sign, so they subtract instead).
-    // After this pass each cell's net outflow equals the linear
-    // solver's residual: the stored flux is conservative up to the
-    // solver accuracy.
+    //   interior: F_f -= C (p'_N - p'_P); Dirichlet-p: F_b += Cb p'_P (outward,
+    //   so west/south subtract).  Each cell's net outflow then equals the
+    //   linear solver's residual.
     const Index nx = mesh.nx();
     const Index ny = mesh.ny();
     const Scalar Sx = mesh.faceArea(BoundaryField::East);
@@ -387,13 +367,10 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
         }
     }
 
-    // 2a. Update the pressure (all cells first, Jacobi-style).
-    // The cumulative reconstruction below evaluates grad(p) of the FULL
-    // corrected pressure. Updating pressure in the same loop that
-    // reconstructs the velocity makes the gradient read a partially
-    // updated field, which is order dependent and wrong by orders of
-    // magnitude (verified against OpenFOAM: cell-by-cell agreement to
-    // ~1e-11 is only recovered with this two-pass split).
+    // 2a. Update the pressure for *all* cells first (Jacobi-style).  The
+    // cumulative reconstruction below evaluates grad(p) of the full corrected
+    // pressure; updating in the same loop would read a partially updated field
+    // (order dependent, wrong by orders of magnitude).
     for (Index P = 0; P < nCells; ++P)
     {
         const Scalar dp = relaxationP * pCorr(P);
@@ -408,10 +385,8 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
         Scalar vNew;
         if (cumulativeVelocityCorrection)
         {
-            // Reconstitute U = uHat - d grad(p) from the full pressure.
-            // relaxationP == 1 guarantees the full p' correction is stored
-            // in `pressure`, so repeated calls (PISO correctors) accumulate
-            // correctly instead of dropping earlier corrections.
+            // U = uHat - d grad(p) from the full pressure; relaxationP == 1
+            // guarantees all corrections are stored, so repeated calls accumulate.
             uNew = uHatU(P) - dU(P) * cellGradient(mesh, pressure, bcP, P, 0);
             vNew = uHatV(P) - dV(P) * cellGradient(mesh, pressure, bcP, P, 1);
         }

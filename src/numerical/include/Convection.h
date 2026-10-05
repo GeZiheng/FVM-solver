@@ -17,42 +17,25 @@ using fvm::math::SparseMatrix;
 namespace fvm::numerical
 {
 
-/**
- * @brief Convection interpolation scheme for face values.
- */
+/// Convection interpolation scheme for face values.
 enum class ConvectionScheme
 {
     Upwind, ///< First-order upwind (bounded, diagonally dominant)
     Central ///< Second-order central differencing (may be unbounded)
 };
 
-/**
- * @brief Build the face mass-flux field from a cell-centered velocity,
- * using the cell-center velocity on boundary faces.
- *
- * Interior faces: F_f = rho * (u_f . n) * S_f with u_f the arithmetic
- * mean of the adjacent cell velocities. Boundary faces: F_b uses the
- * adjacent cell velocity (suitable for transport problems with a given
- * velocity field, where no velocity BCs are at hand).
- */
+/// Build the face mass flux F_f = rho * (u_f . n) * S_f from a cell-centered
+/// velocity: arithmetic mean in the interior, the adjacent cell value on
+/// boundary faces (for transport with a prescribed velocity, no BCs at hand).
 FaceFluxField interpolateCellVelocityFlux(const CartesianMesh& mesh,
     const VectorField& velocity,
     Scalar rho);
 
-/**
- * @brief Fill the face mass-flux field from a cell-centered velocity,
- * honoring the velocity boundary conditions on boundary faces
- * (OpenFOAM-style createPhi).
- *
- * Interior faces: F_f = rho * (u_f . n) * S_f with u_f the arithmetic
- * mean of the adjacent cell velocities. Boundary faces use the
- * Dirichlet value of the matching velocity component (u on east/west,
- * v on north/south) when prescribed, otherwise the adjacent cell
- * velocity (zero normal gradient).
- *
- * The field is filled in place (FaceFluxField is not assignable because
- * it references its mesh).
- */
+/// Fill the face mass flux from a cell-centered velocity, honouring the velocity
+/// BCs on boundary faces (OpenFOAM-style createPhi): Dirichlet value of the
+/// matching component (u on east/west, v on north/south), else the adjacent cell
+/// velocity (zero normal gradient).  Filled in place -- FaceFluxField references
+/// its mesh and is not assignable.
 void computeMassFlux(const CartesianMesh& mesh,
     const VectorField& velocity,
     Scalar rho,
@@ -60,39 +43,22 @@ void computeMassFlux(const CartesianMesh& mesh,
     const BoundaryField& bcV,
     FaceFluxField& flux);
 
-/**
- * @brief Check that the net outflow across the domain boundary is zero
- * (up to a relative tolerance); throw std::runtime_error otherwise.
- *
- * With pure Neumann pressure BCs (closed domain) the pressure-correction
- * equation is only compatible when the boundary fluxes sum to zero
- * (OpenFOAM adjustPhi checks the same invariant). Call this after
- * computeMassFlux to catch unbalanced velocity BCs early instead of
- * silently solving an inconsistent system.
- *
- * The imbalance is scaled by sum_b |F_b| (total absolute boundary flux);
- * a domain with no boundary flux at all always passes.
- */
+/// Throw std::runtime_error if the net boundary outflow is not zero (relative
+/// tolerance).  With pure-Neumann pressure the correction equation is only
+/// compatible when the boundary fluxes sum to zero (OpenFOAM adjustPhi checks
+/// the same invariant); call it after computeMassFlux to fail fast on
+/// unbalanced velocity BCs.  Scaled by sum_b |F_b|.
 void checkFluxCompatibility(const FaceFluxField& flux, Scalar relTol = 1e-10);
 
-/**
- * @brief Assemble the convection operator div(F * phi) into A * phi = b
- * from a precomputed face mass-flux field.
- *
- * The flux field provides F_f on every face (positive along the
- * coordinate direction); boundary-face fluxes are taken from the field
- * as outward fluxes.
- *
- * Boundary faces (F_b > 0 outflow / F_b < 0 inflow):
- *   - Outflow: face value extrapolated from the cell (upwind),
- *       A(P,P) += F_b.
- *   - Inflow with Dirichlet BC: face value = phi_b (known),
- *       b(P) -= F_b * phi_b.
- *   - Inflow with Neumann BC: zero normal gradient is assumed,
- *       face value = phi_P, A(P,P) += F_b.
- *
- * @note A and b are accumulated into (not reset); A must not be finalized.
- */
+/// Assemble div(F phi) into A*phi = b from a face mass-flux field (positive
+/// along the coordinate direction; boundary entries are outward fluxes).
+///
+/// Boundary faces, with F_b > 0 outflow / F_b < 0 inflow:
+///   outflow            -> upwind face value,      A(P,P) += F_b
+///   inflow, Dirichlet  -> phi_b (known),          b(P)   -= F_b * phi_b
+///   inflow, Neumann    -> zero normal gradient,   A(P,P) += F_b
+///
+/// Accumulates into A and b (A must not be finalized).
 void assembleConvection(const CartesianMesh& mesh,
     const FaceFluxField& flux,
     ConvectionScheme scheme,
