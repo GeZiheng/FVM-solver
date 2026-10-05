@@ -67,7 +67,7 @@ PisoResult solvePiso(const CartesianMesh& mesh,
     {
         // One momentum predictor (no under-relaxation in PISO). The ddt
         // term references the old-time velocity currently in `velocity`.
-        const MomentumPrediction pred = predictMomentum(mesh,
+        MomentumPrediction pred = predictMomentum(mesh,
             flux,
             velocity,
             mu,
@@ -84,6 +84,18 @@ PisoResult solvePiso(const CartesianMesh& mesh,
         // the velocity consistent with the full corrected pressure.
         for (int corrector = 0; corrector < config.nCorrectors; ++corrector)
         {
+            // OpenFOAM re-evaluates HbyA = rAU*UEqn.H() at the top of every
+            // pressure corrector, so the second and later correctors solve
+            // an equation built from the velocity corrected by the previous
+            // one (fvMatrix::H() reads the matrix's current psi_). With a
+            // frozen uHat instead, the loop reaches its own fixed point after
+            // one sweep, i.e. algebraically nCorrectors = 1, which is unstable
+            // for this class of problems (OpenFOAM diverges there too).
+            if (corrector > 0)
+            {
+                refreshUHat(pred, velocity);
+            }
+
             correctPressure(mesh,
                 rho,
                 pred,

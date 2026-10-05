@@ -128,4 +128,26 @@ MomentumPrediction predictMomentum(const CartesianMesh& mesh,
     const TimeTerm& time,
     fvm::math::LinearSolver& momSolver);
 
+/**
+ * @brief Re-evaluate the Rhie-Chow data (uHat = H/a_P) from the current
+ * velocity field. This is OpenFOAM's `HbyA = rAU*UEqn.H()`, which is
+ * evaluated at the top of *every* pressure corrector: `fvMatrix::H()` is
+ * built from the matrix's current `psi_`, so the second and later
+ * correctors solve an equation assembled from the velocity corrected by
+ * the previous one.
+ *
+ * `predictMomentum` evaluates uHat once, at the predicted velocity. A
+ * PISO driver must call this before each additional corrector; with a
+ * frozen uHat the corrector loop reaches its own fixed point after a
+ * single sweep, which is algebraically equivalent to `nCorrectors = 1`
+ * (unstable for these problems: OpenFOAM diverges there too).
+ *
+ * @param pred     In/out predictor result; `momU`/`momV` must be the
+ *                 finalized assemblies produced by `predictMomentum`.
+ *                 `uHatU`/`uHatV` are overwritten.
+ * @param velocity Current cell-centered velocity (the corrected velocity
+ *                 of the previous corrector).
+ */
+void refreshUHat(MomentumPrediction& pred, const VectorField& velocity);
+
 } // namespace fvm::numerical

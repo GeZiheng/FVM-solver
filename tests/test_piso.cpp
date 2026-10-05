@@ -60,7 +60,11 @@ TEST_CASE("PISO: impulsive Couette start matches the exact series")
     PisoConfig config;
     config.dt = 0.005;
     config.nSteps = 100; // t = 0.5
-    config.nCorrectors = 1;
+    // Two correctors: PISO's second corrector re-evaluates H/a_P at the
+    // corrected velocity. A single corrector is unstable for this class of
+    // problems; OpenFOAM's pure PISO diverges on the analogous case too
+    // (see docs/numerical.md).
+    config.nCorrectors = 2;
     config.timeScheme = TimeScheme::Euler;
     config.solverConfig.tolerance = 1e-9;
     config.solverConfig.maxIterations = 20000;

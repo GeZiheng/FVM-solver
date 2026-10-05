@@ -62,8 +62,7 @@ target_sources(fvm_tests
         tests/test_transport.cpp
         tests/test_simple.cpp
         tests/test_transient.cpp
-        # tests/test_piso.cpp  # temporarily disabled while the PISO
-        # stability issue is investigated (solver code stays in place).
+        tests/test_piso.cpp
         tests/main.cpp
 )
 

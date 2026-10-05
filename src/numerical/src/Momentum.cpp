@@ -192,4 +192,10 @@ MomentumPrediction predictMomentum(const CartesianMesh& mesh,
     return pred;
 }
 
+void refreshUHat(MomentumPrediction& pred, const VectorField& velocity)
+{
+    pred.uHatU = computeUHat(pred.momU, velocity.u().data());
+    pred.uHatV = computeUHat(pred.momV, velocity.v().data());
+}
+
 } // namespace fvm::numerical

@@ -60,7 +60,11 @@ struct PisoResult
  *
  * Each time step performs one momentum predictor
  * (predictMomentum, no under-relaxation) followed by `nCorrectors`
- * pressure-correction steps (correctPressure). The momentum ddt term is
+ * pressure-correction steps (correctPressure). Before each corrector
+ * after the first, the Rhie-Chow data is re-evaluated from the velocity
+ * corrected so far (OpenFOAM's `HbyA = rAU*UEqn.H()`), so the extra
+ * correctors solve updated equations instead of re-solving the first
+ * one. The momentum ddt term is
  * the theta scheme selected by PisoConfig::timeScheme. The persistent
  * face flux is carried between steps and is conservative to the pressure
  * solver's accuracy.
