@@ -8,6 +8,14 @@
 # Usage:
 #   make_of_case.sh --template <case> --root <dir> --name <label> --nc <N>
 #                   [--dt <s>] [--end <t>] [--dx <m>] [--solver <name>]
+#                   [--setup-only]
+#
+# --setup-only: set up the case (copy + patch) and exit before running.
+# dt/dx/nc/solver are recorded in mcp_run so a launcher can rebuild the
+# summary parameters; the caller is responsible for running foamRun and
+# writing its exit code to .exitcode.  (Background processes spawned from a
+# `wsl.exe -e` invocation do not survive it, so the caller must keep a
+# wsl.exe process alive for the run - this is what the MCP server does.)
 #
 # Requires an OpenFOAM environment (source etc/bashrc) - pass FOAM_BASHRC to
 # override the default ~/OpenFOAM/OpenFOAM-14/etc/bashrc.
@@ -22,6 +30,7 @@ dt=""
 end=""
 dx=""
 solver="incompressibleFluid"
+setup_only=""
 foam_bashrc="${FOAM_BASHRC:-$HOME/OpenFOAM/OpenFOAM-14/etc/bashrc}"
 
 usage() { sed -n '3,14p' "$0"; exit "${1:-0}"; }
@@ -36,6 +45,7 @@ while [ $# -gt 0 ]; do
         --end)      end="$2"; shift 2 ;;
         --dx)       dx="$2"; shift 2 ;;
         --solver)   solver="$2"; shift 2 ;;
+        --setup-only) setup_only="yes"; shift ;;
         -h|--help)  usage 0 ;;
         *) echo "unknown argument: $1" >&2; usage 1 ;;
     esac
@@ -76,6 +86,17 @@ patch_value "$case_dir/system/fvSolution" nCorrectors "$nc"
 echo "case: $case_dir"
 echo "  nCorrectors=$nc  deltaT=${dt:-<template>}  endTime=${end:-<template>}  solver=$solver"
 echo "  (config is part of the directory name on purpose - never mix outputs from different settings)"
+
+if [ -n "$setup_only" ]; then
+    {
+        [ -n "$dt" ] && echo "dt=$dt"
+        [ -n "$dx" ] && echo "dx=$dx"
+        echo "nc=$nc"
+        echo "solver=$solver"
+    } > "$case_dir/mcp_run"
+    echo "setup-only: case ready (run foamRun separately)"
+    exit 0
+fi
 
 set +u
 # shellcheck disable=SC1090

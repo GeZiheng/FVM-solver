@@ -358,7 +358,7 @@ u^{(1)} = \hat u_1 - d\nabla p^{(1)} = u^{*} - d\,\nabla p'^{(1)} .$$
 
 ### PISO 与 OpenFOAM 的对照结论（2026-10）
 
-本项目的 PISO 与 OpenFOAM-14 做过逐单元/逐面、单步与多步的对照（参照算例 `~/OpenFOAM/gzh1057-14/run/pisoPoiseuille`：16×16、$\nu=1$、$\Delta t=0.02$、进出口 `fixedValue p`、进出口 U 零梯度、上下壁 no-slip、迎风、Euler、纯 PISO）。**完整排查过程、已排除假设清单与踩坑**见 `.agents/skills/openfoam-crosscheck/`。
+本项目的 PISO 与 OpenFOAM-14 做过逐单元/逐面、单步与多步的对照（参照算例 `~/OpenFOAM/gzh1057-14/run/pisoPoiseuille`：16×16、$\nu=1$、$\Delta t=0.02$、进出口 `fixedValue p`、进出口 U 零梯度、上下壁 no-slip、迎风、Euler、纯 PISO）。复现与对照用 `openfoam` MCP server（`run_case` / `summarize_log` / `extract_fields` / `find_source` / `read_source`，见 `AGENTS.md`）；被排除的假设见下一小节。
 
 **必须维持的四条不变量**（对应上文的"Rhie–Chow 面通量与预测通量""封闭域相容性""修正与收敛判据"与下文 Key Design Decisions）：
 
@@ -377,6 +377,17 @@ u^{(1)} = \hat u_1 - d\nabla p^{(1)} = u^{*} - d\,\nabla p'^{(1)} .$$
 一次修正后一致到 $\sim10^{-11}$，两次后 $\sim10^{-9}$（即 OpenFOAM 的 p 求解容差量级）。**单修正子在两边同样发散**：OpenFOAM 纯 PISO `nCorrectors = 1` 在 $t=0.5$ 时 $\max u_x=-2.3\times10^{10}$，`nCorrectors = 2` 为 0.12352 —— 所以"$n_{\text{correctors}}\ge2$"是算法本身的要求，不是本实现的缺陷。
 
 **瞬态验收**：突启 Couette $\max|u-u_{\text{exact}}|=2.0\times10^{-3}$（限值 $2\times10^{-2}$）、瞬态 Poiseuille 相对 $L_2$ 误差 $5.3\times10^{-3}$（限值 $8\times10^{-2}$）、$Q=0.08398\approx1/12$、连续性 $2.1\times10^{-16}$。
+
+### 已排除的假设（不要重复试错，2026-10）
+
+对照中验证过、**不是**差异原因的假设（都在同一套瞬态通道/库埃特算例上做过单步与多步对照）：
+
+- `ddtCorr`（动量的 `EulerDdtScheme::fvcDdtPhiCorr`）：逐字实现后无改善——其限幅器在"通量—速度失配与通量同量级"处把该项关闭，`stats` 显示几乎处处为零。
+- `pimple.consistent()`：在 OpenFOAM 侧显式设 `consistent no`，对照结果与本项目**逐位相同**。
+- 壁面压力 BC（`fixedFluxPressure` vs `zeroGradient`）：两种都稳定，不是差异点。
+- 动量方程去掉压力梯度源、或加 PIMPLE 外层迭代：前者改变不动点、后者不属于 PISO 定义，都不是差异原因。
+
+真正的根因是漏掉了每个附加修正子前的 `HbyA = rAU*UEqn.H()` 刷新（上文"必须维持的四条不变量"第 4 条）。
 
 以 OpenFOAM-14 的 `incompressibleFluid` 模块（`correctPressure.C` / `momentumPredictor.C`）为参照。两者数学上是同一算法，差异集中在公式写法、数据结构与工程化程度上。
 
@@ -409,7 +420,7 @@ u^{(1)} = \hat u_1 - d\nabla p^{(1)} = u^{*} - d\,\nabla p'^{(1)} .$$
 **值得借鉴**（尚未实现，按对本项目的价值排序）：
 
 1. **SIMPLEC 选项**——仅需改对角系数 $d = 1/(a_P - \sum_N a_N)$，教学上可直接对比迭代数差异。
-2. **PIMPLE 外层迭代**（`nOuterCorrectors > 1`，每个外层重新解动量方程）——大 Courant 数时的标准做法，是修正子数不够用时的正解。（`ddtCorr` 已排除，见 skill 的 facts。）
+2. **PIMPLE 外层迭代**（`nOuterCorrectors > 1`，每个外层重新解动量方程）——大 Courant 数时的标准做法，是修正子数不够用时的正解。（`ddtCorr` 已排除，见上文"已排除的假设"。）
 3. 次要项：动量预测开关、按场独立的收敛阈值。
 
 **不宜照搬**：`setReference`（消元法更干净、矩阵更小）；patch/fvMatrix 重型抽象层（为非结构网格通用性付的代价，教学项目会淹没算法主线）；非正交修正循环（仅当引入斜交网格时才有意义）。

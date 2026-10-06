@@ -18,7 +18,8 @@
         "python",
         ".agents/mcp/openfoam_server.py"
       ],
-      "enabled": true
+      "enabled": true,
+      "timeout": 300000
     }
   },
   "permission": {
