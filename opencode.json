@@ -11,6 +11,15 @@
           ".agents/mcp/build_and_test_server.py"
         ],
       "enabled": true
+    },
+    "openfoam": {
+      "type": "local",
+      "command": [
+        "python",
+        ".agents/mcp/openfoam_server.py"
+      ],
+      "enabled": true,
+      "timeout": 300000
     }
   },
   "permission": {

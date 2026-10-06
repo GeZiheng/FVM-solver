@@ -9,3 +9,6 @@ vcpkg_installed/
 
 # clion settings
 .idea/
+
+# python bytecode
+__pycache__/

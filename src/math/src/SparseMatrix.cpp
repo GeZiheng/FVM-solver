@@ -35,6 +35,20 @@ void SparseMatrix::setZero()
     finalized_ = false;
 }
 
+void SparseMatrix::scale(Scalar factor)
+{
+    if (finalized_)
+    {
+        mat_ *= factor;
+        return;
+    }
+    for (auto& triplet : triplets_)
+    {
+        triplet = Eigen::Triplet<Scalar>(
+            triplet.row(), triplet.col(), factor * triplet.value());
+    }
+}
+
 Index SparseMatrix::rows() const
 {
     return static_cast<Index>(mat_.rows());

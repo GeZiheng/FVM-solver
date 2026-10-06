@@ -2,12 +2,6 @@
 
 `fvm::io` 命名空间，负责将计算结果写出为可视化文件。目前只有一个类 `VtkWriter`，输出 VTK ImageData（`.vti`）格式。
 
-## 文件结构
-
-| 文件 | 内容 |
-|------|------|
-| `include/VtkWriter.h` + `src/VtkWriter.cpp` | `VtkWriter` 类（仅静态方法，无状态） |
-
 ## VtkWriter：.vti 输出
 
 ### 设计思路
@@ -44,10 +38,3 @@
 
 文件打开失败时抛 `std::runtime_error`（含路径信息）。
 
-## 依赖关系
-
-```
-io → core（CartesianMesh, ScalarField, VectorField）
-```
-
-io 不依赖 math / numerical，可在任何持有网格与场的上下文中使用。

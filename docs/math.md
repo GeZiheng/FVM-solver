@@ -2,13 +2,6 @@
 
 `fvm::math` 命名空间，提供稀疏矩阵装配与线性方程组求解能力。模块对上层（numerical/app）隐藏 Eigen 的细节：装配侧只看到三元组 API，求解侧只看到抽象接口 + 工厂函数，从而为将来替换后端（AMGCL、Hypre 等）预留空间。
 
-## 文件结构
-
-| 文件 | 内容 |
-|------|------|
-| `include/SparseMatrix.h` + `src/SparseMatrix.cpp` | `SparseMatrix`：三元组装配式稀疏矩阵包装 |
-| `include/LinearSolver.h` + `src/LinearSolver.cpp` | `SolverConfig`、`LinearSolver` 抽象接口、三个 Eigen 求解器实现及工厂函数 |
-
 ## SparseMatrix：三元组装配的稀疏矩阵
 
 ### 设计思路
@@ -21,6 +14,7 @@
   防止"装配一半就拿去求解"或"求解后又偷偷插入"两类错误。
 - **隐藏内部存储**：对外只暴露 `insert/finalize/native` 等少量接口。`native()` 返回底层 Eigen 矩阵的常量引用，仅供求解器实现使用；若未来替换后端，只需修改 `native()` 的返回类型或增加内部访问器，上层装配代码不变。
 - `setZero()` 将矩阵重置回未 finalize 的空状态，可重新装配。
+- **矩阵缩放**：`scale(factor)` 将全部已存系数乘以 `factor`——未 finalize 时缩放已累加的三元组，已 finalize 时缩放底层矩阵。用于隐式 θ 时间格式：由一次稳态空间算子装配 $A_{spatial}$ 廉价地得到 $\theta A_{spatial}$，无需重新装配。
 
 ## LinearSolver：抽象求解器接口
 
@@ -57,11 +51,3 @@ Eigen 5.x 的 `BiCGSTAB` 内部以**绝对残差**作为停机判据，且其收
 
 2. **自行检查收敛**：求解后取 `solver.error()`（相对残差估计）存入 `lastResidual_`，若超过 `config_.tolerance` 则抛出"did not converge"异常——**不依赖 `solver.info()` 判断 BiCGSTAB 是否收敛**（`info()` 仅用于检查分解失败与数值崩溃）。
 
-## 依赖关系
-
-```
-math → core（Scalar/Index/Vector 别名）
-     → Eigen（Sparse、IterativeLinearSolvers、SparseLU）
-```
-
-math 不知道网格、场、离散化的存在：`solve` 的输入只有矩阵与向量。

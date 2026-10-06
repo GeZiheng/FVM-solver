@@ -26,6 +26,15 @@ public:
     void finalize();
     void setZero();
 
+    /**
+     * @brief Multiply every stored coefficient by `factor`.
+     *
+     * Before finalize() the accumulated triplets are scaled in place; after
+     * finalize() the assembled Eigen matrix is scaled. Used by implicit
+     * theta-scheme time integration to form theta * A_spatial cheaply.
+     */
+    void scale(Scalar factor);
+
     Index rows() const;
     Index cols() const;
     Index nnz() const;

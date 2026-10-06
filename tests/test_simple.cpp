@@ -1,6 +1,7 @@
 #include "Field.h"
 #include "LinearSolver.h"
 #include "Mesh.h"
+#include "Momentum.h"
 #include "Simple.h"
 #include "TransportEquation.h"
 #include <cmath>

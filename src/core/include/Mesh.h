@@ -8,18 +8,11 @@
 namespace fvm::core
 {
 
-/**
- * @brief 2D uniform Cartesian mesh.
- *
- * Layout: cells are indexed as (i, j) where i runs along x and j along y.
- * Linear index: cellIndex = j * nx + i.
- *
- * Face indexing convention:
- *   - Face 0 (east)  : normal = (+1, 0)
- *   - Face 1 (north) : normal = (0, +1)
- *   - Face 2 (west)  : normal = (-1, 0)
- *   - Face 3 (south) : normal = (0, -1)
- */
+/// 2D uniform Cartesian mesh.  Cells are (i, j) with i along x, j along y and
+/// linear index cellIndex = j * nx + i.
+///
+/// Face indices (used by every boundary array in the project):
+///   0 = east (+x), 1 = north (+y), 2 = west (-x), 3 = south (-y)
 class CartesianMesh
 {
 public:
@@ -55,10 +48,7 @@ public:
     }
     Scalar cellVolume(Index cell) const;
 
-    /**
-     * @brief Cell-center coordinates.
-     * @return (x, y) of cell center.
-     */
+    /// Cell-center coordinates (x, y).
     std::pair<Scalar, Scalar> cellCenter(Index cell) const;
     std::pair<Scalar, Scalar> cellCenter(Index i, Index j) const;
 
@@ -72,41 +62,22 @@ public:
         return { cell % nx_, cell / nx_ };
     }
 
-    /**
-     * @brief Get neighbor cell across a face.
-     * @param cell Cell index.
-     * @param face Face index (0=east, 1=north, 2=west, 3=south).
-     * @return Neighbor cell index, or cellCount() if boundary.
-     */
+    /// Neighbour cell across `face`; returns cellCount() on a boundary.
     Index neighbor(Index cell, int face) const;
 
-    /**
-     * @brief Face area (2D: length of edge).
-     */
+    /// Face area (2D: edge length).
     Scalar faceArea(int face) const;
 
-    /**
-     * @brief Outward face normal vector.
-     */
+    /// Outward face normal.
     std::pair<Scalar, Scalar> faceNormal(int face) const;
 
-    /**
-     * @brief Distance from cell center to neighbor cell center across face.
-     * Returns 0 if neighbor is boundary.
-     */
+    /// Cell-center to neighbour-center distance; 0 on a boundary.
     Scalar cellToCellDistance(Index cell, int face) const;
 
-    /**
-     * @brief Distance from cell center to face center.
-     */
+    /// Cell-center to face-center distance.
     Scalar cellToFaceDistance(int face) const;
 
-    /**
-     * @brief Check if cell is on a boundary.
-     * @param cell Cell index.
-     * @param face Face index.
-     * @return true if the face is on domain boundary.
-     */
+    /// True if the given cell face lies on the domain boundary.
     bool isBoundaryFace(Index cell, int face) const;
 
     // Domain bounds

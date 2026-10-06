@@ -2,15 +2,6 @@
 
 `fvm::core` 命名空间，提供整个求解器的基础数据结构与几何描述：标量/索引类型别名、二维均匀笛卡尔网格、单元中心场。本模块不依赖其他 fvm 模块，是依赖关系的最底层。
 
-## 文件结构
-
-| 文件 | 内容 |
-|------|------|
-| `include/Types.h` | `Scalar`、`Index`、`Vector` 类型别名 |
-| `include/Mesh.h` + `src/Mesh.cpp` | `CartesianMesh` 类 |
-| `include/Field.h` | `ScalarField`、`VectorField` 类（header-only，`src/Field.cpp` 仅为保持构建结构一致而存在的空文件） |
-| `include/FluxField.h` | `FaceFluxField` 类（header-only，`src/FluxField.cpp` 同样为空文件） |
-
 ## Types.h：类型别名
 
 ```cpp
@@ -86,13 +77,3 @@ OpenFOAM 风格 `surfaceScalarField` 的对应物：把标量通量（通常是�
 - 与 `ScalarField` 一样持有 `const CartesianMesh&`（同样需注意悬挂引用；也因此**不可拷贝赋值**，需要覆盖写时使用 `computeMassFlux` 这类原地填充接口，见 numerical 模块）；
 - header-only（`src/FluxField.cpp` 为空文件，保持构建结构一致）。
 
-## 依赖关系
-
-```
-Types.h     ←（被所有文件包含）
-Mesh.h      → Types.h
-Field.h     → Mesh.h, Types.h
-FluxField.h → Mesh.h, Types.h
-```
-
-core 不依赖 math / io / numerical；上层模块通过 `using fvm::core::Scalar` 等声明引用本模块类型。

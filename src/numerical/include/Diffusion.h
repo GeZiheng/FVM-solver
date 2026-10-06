@@ -14,25 +14,14 @@ using fvm::math::SparseMatrix;
 namespace fvm::numerical
 {
 
-/**
- * @brief Assemble the diffusion operator -div(gamma * grad(phi)) into A * phi =
- * b.
- *
- * Interior faces use central differencing:
- *   D_f = gamma_f * S_f / d_PN   (gamma_f: arithmetic mean of cell values)
- *
- * Boundary faces:
- *   - Dirichlet (phi = phi_b): D_b = gamma_P * S_f / d_Pb
- *       A(P,P) += D_b,  b(P) += D_b * phi_b
- *   - Neumann (d(phi)/dn = g, outward normal): flux is known
- *       b(P) += gamma_P * g * S_f
- *
- * With Dirichlet/Neumann BCs only, the resulting matrix is symmetric
- * positive semi-definite (SPD if any Dirichlet BC is present).
- *
- * @note A and b are accumulated into (not reset); callers must zero them
- *       beforehand if assembling a fresh system. A must not be finalized.
- */
+/// Assemble -div(gamma grad(phi)) into A*phi = b, accumulating into A and b
+/// (callers zero them first; A must not be finalized).
+///
+/// Interior faces: D_f = gamma_f * S_f / d_PN (gamma_f = arithmetic mean).
+/// Dirichlet (phi = phi_b): A(P,P) += D_b, b(P) += D_b * phi_b.
+/// Neumann (d(phi)/dn = g, outward): b(P) += gamma_P * g * S_f.
+///
+/// The matrix is symmetric positive semi-definite (definite with any Dirichlet).
 void assembleDiffusion(const CartesianMesh& mesh,
     const ScalarField& gamma,
     const BoundaryField& bc,
