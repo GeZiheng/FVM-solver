@@ -736,8 +736,10 @@ EXTRACT_FIELDS_DESCRIPTION = (
     "along +x/+y; owner/neighbour are used, so the OpenFOAM orientation does "
     "not matter), plus per-patch boundary values with their owner cells, a "
     "West/East/South/North side guess and the sign that converts them to this "
-    "project's face storage. time='latest' (default) takes the largest numeric "
-    "time directory."
+    "project's face storage. nx and ny must equal the mesh's own cell counts "
+    "(nCells): a mismatch is rejected with 'nx*ny does not match the mesh cell "
+    "count' instead of mapping onto a wrong grid. time='latest' (default) "
+    "takes the largest numeric time directory."
 )
 
 EXTRACT_FIELDS_SCHEMA = {
@@ -1262,6 +1264,10 @@ def extract_fields(
                 "mapping disabled"
             )
         else:
+            n_cells_note = None
+            note = re.search(r"nCells:\s*(\d+)", owner_text)
+            if note:
+                n_cells_note = int(note.group(1))
             note = re.search(r"nInternalFaces:\s*(\d+)", owner_text)
             if note:
                 n_internal = int(note.group(1))
@@ -1275,6 +1281,30 @@ def extract_fields(
                 owners = [int(v) for v in owner_values]
                 neighbours = [int(v) for v in neighbour_values]
                 n_internal = n_internal or len(neighbours)
+                # Derive the cell count from the mesh itself: cell labels are
+                # contiguous and every cell owns or neighbours at least one
+                # face, so max+1 is exact.  The header note (nCells) is only a
+                # cross-check - some meshes do not carry it.
+                n_cells = max(
+                    max(owners, default=-1), max(neighbours, default=-1)
+                ) + 1
+                if n_cells_note is not None and n_cells_note != n_cells:
+                    payload["warnings"].append(
+                        f"polyMesh header says nCells: {n_cells_note} but "
+                        f"owner/neighbour imply {n_cells}; using {n_cells}"
+                    )
+                if int(nx) * int(ny) != n_cells:
+                    return _error(
+                        "nx*ny does not match the mesh cell count",
+                        nx=nx,
+                        ny=ny,
+                        nx_times_ny=int(nx) * int(ny),
+                        n_cells=n_cells,
+                        hint=(
+                            "pass the mesh's own (i,j) cell counts; see "
+                            "constant/polyMesh/owner"
+                        ),
+                    )
                 for name, block in _named_blocks(_strip_foam_comments(boundary_text)):
                     n_faces = re.search(r"nFaces\s+(\d+)\s*;", block)
                     start_face = re.search(r"startFace\s+(\d+)\s*;", block)

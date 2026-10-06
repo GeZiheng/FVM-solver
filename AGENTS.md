@@ -4,7 +4,7 @@
 - **Status**: phases 1–4-1 complete; all 50 test cases (3271 assertions) pass. Everything described below is implemented and verified.
 - **Capabilities**: 2D uniform-Cartesian FVM (core/io), Eigen-backed sparse solvers (math), steady SIMPLE and transient PISO for incompressible NS on a collocated grid with Rhie–Chow interpolation, and theta-scheme transient scalar transport. A persistent `FaceFluxField` (`phi`) is the only convection input of the assemblers.
 - **Solver structure**: the iteration is split into reusable `predictMomentum` / `correctPressure` primitives (`Momentum.h/.cpp`, `Pressure.h/.cpp`); `Simple`/`Piso` are thin driver loops. Extend those primitives rather than duplicating the loops.
-- **PISO**: working; `tests/test_piso.cpp` is enabled. The invariant that cost the most to find: refresh `uHat = H/a_P` from the current velocity before every corrector after the first (OpenFOAM's per-corrector `HbyA = rAU*UEqn.H()`). A frozen `uHat` degenerates to `nCorrectors = 1`, which diverges in OpenFOAM too. The pressure is solved in **absolute form** (`A p = b`, RHS `div(phiHbyA)` + Dirichlet-p terms), which is algebraically identical to the earlier p' form and reproduces the same OpenFOAM single-step fingerprints. Conclusions, cross-check numbers and the ruled-out list: `docs/numerical.md`; run comparisons with the `openfoam` MCP server.
+- **PISO**: working; `tests/test_piso.cpp` is enabled. Two invariants dominated the implementation — the per-corrector `refreshUHat` and the absolute-pressure form; both are spelled out under **Key Design Decisions** below and reproduce the OpenFOAM single-step fingerprints. Cross-check numbers and the ruled-out list: `docs/numerical.md`; run comparisons with the `openfoam` MCP server.
 
 ## Skills (`.agents/skills/`, shared by Codex and opencode)
 
@@ -60,20 +60,7 @@ docs/                    — module docs (Chinese): core.md, math.md, io.md, num
 - **`VCPKG_ROOT`** — the vcpkg installation.
 - **`Path`** — must contain the directory holding `ninja.exe`.
 
-**IMPORTANT for agents:** if your environment provides the `build-and-test` MCP tool (`build_and_test`), ALWAYS use it — do NOT shell out to `cmake`/`ctest`/`ninja` (agent configs deny them). It configures into `build/<config>-agent`, and runs **outside** the agent sandbox, which is required because vcpkg writes under `$VCPKG_ROOT` (outside this repository). Options: `config` Release/Debug, `target` all/fvm_solver/fvm_tests, `run` none/tests/solver/both (defaults: Release, all, tests). As part of a code-modification workflow, proceed with the defaults; when the user asks for a build/test directly, confirm the options first. The server lives in `.agents/mcp/build_and_test_server.py`, registered for Codex in `.codex/config.toml` and for opencode in `opencode.json`.
-
-**IMPORTANT for agents (OpenFOAM comparisons):** whenever a numerical/discretization detail needs a reference-implementation check, use the `openfoam` MCP server (`.agents/mcp/openfoam_server.py`) — the single entry point. It runs outside the agent sandbox (no per-call escalation) and returns structured JSON:
-
-- `run_case` — fresh timestamped case dir with the configuration baked into the name (patches `endTime`/`deltaT`/`writeInterval`/`nCorrectors`), starts `foamRun` in the background and returns immediately with `status: "running"`; default root `~/OpenFOAM/gzh1057-14/run`. The run stays alive only while the MCP server process lives — do not restart the agent session mid-run.
-- `run_status` — poll a background run: `running` / `finished` / `failed` (from the case's `.exitcode` marker and the log) plus a partial or complete per-step summary. Poll this after `run_case` until it leaves `running`.
-- `summarize_log` — per-step table from a solver log (`res_p` of the *second* p solve is the fingerprint that the extra corrector is really advancing).
-- `extract_fields` — read a time directory's fields; with `nx`/`ny` it maps cell fields to `grid[j][i]` (matches `CartesianMesh::cellIndex = j*nx + i`) and `phi` to `x_faces[j][i]`/`y_faces[j][i]` in this project's sign convention, plus per-patch boundary values with owner cells and a West/East/South/North side guess.
-- `find_source` / `read_source` — grep and read the OpenFOAM-14 tree (`~/OpenFOAM/OpenFOAM-14`) when the data alone cannot explain a difference. Note: OF-14 has no `pEqn.H`/`UEqn.H` for the modern solvers; the incompressible pressure correction is `applications/modules/incompressibleFluid/correctPressure.C`.
-- `list_cases` — existing case directories under the root.
-
-Discipline for a comparison (this is what keeps conclusions valid): fix the contract first (mesh, properties, schemes, every BC, `dt`, solver tolerances, algorithm settings such as `nCorrectors`); compare a **single step** first (`end_time == dt`) and check `p(0,0)` and the inlet `phi/S` to solver-tolerance level; one configuration per directory (never reuse a directory with different settings); run both `nCorrectors = 1` and `= 2`; never loosen a test tolerance to hide a difference. Record the conclusion (with its evidence and any ruled-out hypotheses) in `docs/numerical.md`, not in this file.
-
-The helper scripts the server drives (`make_of_case.sh`, `of_log_summary.py`) live in `.agents/mcp/openfoam/` — the fallback for humans when the MCP tool is unavailable. Nothing in this workflow ever modifies the OpenFOAM source tree or an existing case directory.
+**IMPORTANT for agents:** use the `build-and-test` MCP tool (see **MCP Servers** below) instead of shelling out to `cmake`/`ctest`/`ninja`. It configures into `build/<config>-agent` and runs **outside** the agent sandbox, which is required because vcpkg writes under `$VCPKG_ROOT` (outside this repository). Options: `config` Release/Debug, `target` all/fvm_solver/fvm_tests, `run` none/tests/solver/both (defaults: Release, all, tests). As part of a code-modification workflow, proceed with the defaults; when the user asks for a build/test directly, confirm the options first.
 
 Manual commands (humans, or when the MCP tool is unavailable):
 
@@ -83,6 +70,29 @@ cmake --build build --config Release
 ctest --test-dir build --output-on-failure
 ./build/Release/fvm_solver        # demos
 ```
+
+## MCP Servers
+
+Two project-scoped servers, both plain-stdlib Python speaking newline-delimited JSON-RPC over stdio: `build-and-test` (`.agents/mcp/build_and_test_server.py`) and `openfoam` (`.agents/mcp/openfoam_server.py`). They are registered for Codex in `.codex/config.toml` and for opencode in `opencode.json`, and both run **outside** the agent sandbox — that is what makes WSL and vcpkg access work without per-call escalation, and it is the reason they exist. Prefer them; fall back to the manual commands above only when a server is unavailable.
+
+### build-and-test (`.agents/mcp/build_and_test_server.py`)
+
+One tool, `build_and_test(config, target, run)`: configure (`cmake -G Ninja`) + build + optionally run ctest and/or the demo. Always use it instead of shelling out to `cmake`/`ctest`/`ninja` — the opencode bash permission block denies those commands, and in Codex this instruction is the rule. Options, defaults (Release / all / tests) and when to confirm them with the user: see **Build Instructions** above.
+
+### openfoam (`.agents/mcp/openfoam_server.py`)
+
+The single entry point for reference-implementation checks; it returns structured JSON. Parameters live in the tool schemas, so only "when to use which" is repeated here:
+
+- `run_case` — fresh timestamped case dir with the configuration baked into the name (patches `endTime`/`deltaT`/`writeInterval`/`nCorrectors`), starts `foamRun` in the background and returns immediately with `status: "running"`. The run stays alive only while the MCP server process lives — do not restart the agent session mid-run.
+- `run_status` — poll a background run (`running` / `finished` / `failed`) plus a partial or complete per-step summary; poll this after `run_case` until it leaves `running`.
+- `summarize_log` — per-step table from a solver log (`res_p` of the *second* p solve is the fingerprint that the extra corrector is really advancing).
+- `extract_fields` — read a time directory's fields and map them onto this project's layout (`grid[j][i]`, `x_faces`/`y_faces`, per-patch values with owner cells and a side guess); `nx`/`ny` must equal the mesh's own cell counts (`nCells`).
+- `find_source` / `read_source` — grep and read the OpenFOAM-14 tree (`~/OpenFOAM/OpenFOAM-14`) when the data alone cannot explain a difference. Note: OF-14 has no `pEqn.H`/`UEqn.H` for the modern solvers; the incompressible pressure correction is `applications/modules/incompressibleFluid/correctPressure.C`.
+- `list_cases` — existing case directories under the root.
+
+Discipline for a comparison (this is what keeps conclusions valid): fix the contract first (mesh, properties, schemes, every BC, `dt`, solver tolerances, algorithm settings such as `nCorrectors`); compare a **single step** first (`end_time == dt`) and check `p(0,0)` and the inlet `phi/S` to solver-tolerance level; one configuration per directory (never reuse a directory with different settings); run both `nCorrectors = 1` and `= 2`; never loosen a test tolerance to hide a difference. Record the conclusion (with its evidence and any ruled-out hypotheses) in `docs/numerical.md`, not in this file.
+
+In Codex every `openfoam` tool except `list_cases` is `approval_mode = "approve"`, so expect a prompt. The helper scripts the server drives (`make_of_case.sh`, `of_log_summary.py`) live in `.agents/mcp/openfoam/` — the fallback for humans when the MCP tool is unavailable. Nothing in this workflow ever modifies the OpenFOAM source tree or an existing case directory.
 
 ## Key Design Decisions
 
@@ -107,7 +117,7 @@ ctest --test-dir build --output-on-failure
 
 ## Next Phase (Phase 4)
 Agreed roadmap, in order:
-1. ✅ **Unsteady terms + PISO** — theta-scheme time integration, transient scalar transport (verified time order), the shared `Momentum`/`Pressure`/`GridOperators` primitives, and `solvePiso` (one predictor + `nCorrectors`, per-corrector `refreshUHat`). `tests/test_piso.cpp` enabled. Details, cross-check numbers and the ruled-out list: `docs/numerical.md`.
+1. ✅ **Unsteady terms + PISO** — done: transient theta scheme (time order verified), transient transport, the shared `Momentum`/`Pressure`/`GridOperators` primitives and `solvePiso`; `tests/test_piso.cpp` enabled. Cross-check numbers and the ruled-out list: `docs/numerical.md`.
 2. **`pyfvm` Python bindings** (pybind11 via vcpkg, optional target) — case setup and post-processing from Python/numpy, replacing any JSON-config idea; the `fvm_solver` exe stays a smoke demo. PISO is complete, so the API-stability gate is satisfied; review the solver API once before starting.
 3. **Arbitrary mesh input** (Gmsh `.msh` first) — the main motivation for the Python front-end; may come with non-orthogonal/skew mesh support.
 

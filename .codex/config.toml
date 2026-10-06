@@ -32,3 +32,18 @@ args = ['.agents/mcp/openfoam_server.py']
 # read-only and need no entry.
 [mcp_servers.openfoam.tools.run_case]
 approval_mode = "approve"
+
+[mcp_servers.openfoam.tools.find_source]
+approval_mode = "approve"
+
+[mcp_servers.openfoam.tools.read_source]
+approval_mode = "approve"
+
+[mcp_servers.openfoam.tools.run_status]
+approval_mode = "approve"
+
+[mcp_servers.openfoam.tools.summarize_log]
+approval_mode = "approve"
+
+[mcp_servers.openfoam.tools.extract_fields]
+approval_mode = "approve"
