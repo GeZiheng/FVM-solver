@@ -6,14 +6,13 @@
 #include <utility>
 #include <vector>
 
+namespace fvm::io
+{
 using fvm::core::CartesianMesh;
 using fvm::core::Index;
 using fvm::core::Scalar;
 using fvm::core::ScalarField;
 using fvm::core::VectorField;
-
-namespace fvm::io
-{
 
 /**
  * @brief Write fields to VTK ImageData (.vti) format.

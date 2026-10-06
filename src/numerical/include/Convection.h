@@ -7,15 +7,15 @@
 #include "SparseMatrix.h"
 #include "Types.h"
 
+namespace fvm::numerical
+{
 using fvm::core::CartesianMesh;
 using fvm::core::FaceFluxField;
+using fvm::core::Index;
 using fvm::core::Scalar;
 using fvm::core::Vector;
 using fvm::core::VectorField;
 using fvm::math::SparseMatrix;
-
-namespace fvm::numerical
-{
 
 /// Convection interpolation scheme for face values.
 enum class ConvectionScheme
@@ -49,6 +49,23 @@ void computeMassFlux(const CartesianMesh& mesh,
 /// the same invariant); call it after computeMassFlux to fail fast on
 /// unbalanced velocity BCs.  Scaled by sum_b |F_b|.
 void checkFluxCompatibility(const FaceFluxField& flux, Scalar relTol = 1e-10);
+
+/// True if any side of `bcP` prescribes a Dirichlet pressure.  A Dirichlet-p
+/// side makes the pressure equation definite, so no reference cell is needed.
+bool hasDirichletPressure(const BoundaryField& bcP);
+
+/// Shared entry step of solveSimple and solvePiso: build the persistent flux
+/// from the velocity field and its BCs (OpenFOAM createPhi), then fail fast
+/// when a closed domain (pure-Neumann p) has an unbalanced boundary flux
+/// (OpenFOAM adjustPhi), which would make the correction equation
+/// incompatible.
+void initializeMassFlux(const CartesianMesh& mesh,
+    const VectorField& velocity,
+    Scalar rho,
+    const BoundaryField& bcU,
+    const BoundaryField& bcV,
+    const BoundaryField& bcP,
+    FaceFluxField& flux);
 
 /// Assemble div(F phi) into A*phi = b from a face mass-flux field (positive
 /// along the coordinate direction; boundary entries are outward fluxes).

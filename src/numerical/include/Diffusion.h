@@ -6,13 +6,13 @@
 #include "SparseMatrix.h"
 #include "Types.h"
 
+namespace fvm::numerical
+{
 using fvm::core::CartesianMesh;
+using fvm::core::Index;
 using fvm::core::ScalarField;
 using fvm::core::Vector;
 using fvm::math::SparseMatrix;
-
-namespace fvm::numerical
-{
 
 /// Assemble -div(gamma grad(phi)) into A*phi = b, accumulating into A and b
 /// (callers zero them first; A must not be finalized).

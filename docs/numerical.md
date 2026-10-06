@@ -71,13 +71,15 @@ A(N,N) += D_f      A(N,P) −= D_f
 
 ### 通量构造函数
 
-两个自由函数把单元中心速度场转为面通量场（$F_f = \rho\, (\mathbf{u}_f \cdot \mathbf{n})\, S_f$）：
+若干自由函数把单元中心速度场转为面通量场（$F_f = \rho\, (\mathbf{u}_f \cdot \mathbf{n})\, S_f$）：
 
 | 函数 | 内部面 | 边界面 | 适用场景 |
 |------|--------|--------|----------|
 | `interpolateCellVelocityFlux(mesh, velocity, rho)` | $\mathbf{u}_f$ 算术平均 | 相邻单元中心速度 | "给定速度场"的独立输运问题（无速度 BC 可用） |
-| `computeMassFlux(mesh, velocity, rho, bcU, bcV, flux)` | $\mathbf{u}_f$ 算术平均 | 对应分量的 Dirichlet BC 值，无则取单元速度（零梯度） | 有速度边界条件时（`solveSimple`/`solvePiso` 入口即用它初始化通量，对应 OpenFOAM 的 `createPhi.H`）；**原地填充**（`FaceFluxField` 不可赋值） |
-| `checkFluxCompatibility(flux, relTol)` | — | 检查边界净流出量是否为零（相对容差 `relTol * Σ\|F_b\|`，默认 1e-10），不满足则抛 `std::runtime_error` | 纯 Neumann 压力（封闭域）问题的相容性检查（对应 OpenFOAM 的 `adjustPhi`）；`solveSimple`/`solvePiso` 入口在初始化通量后调用 |
+| `computeMassFlux(mesh, velocity, rho, bcU, bcV, flux)` | $\mathbf{u}_f$ 算术平均 | 对应分量的 Dirichlet BC 值，无则取单元速度（零梯度） | 有速度边界条件时的底层填充函数（对应 OpenFOAM 的 `createPhi.H`）；**原地填充**（`FaceFluxField` 不可赋值） |
+| `initializeMassFlux(mesh, velocity, rho, bcU, bcV, bcP, flux)` | — | — | `solveSimple`/`solvePiso` 的共享入口：先 `computeMassFlux`，纯 Neumann 压力时再 `checkFluxCompatibility`——把"建通量 + 封闭域相容性检查"合成一步 |
+| `hasDirichletPressure(bcP)` | — | — | 判定压力方程是否已正定（任一边为 Dirichlet 压力即无需参考单元）；被 `initializeMassFlux` 与 `correctPressure` 共用 |
+| `checkFluxCompatibility(flux, relTol)` | — | 检查边界净流出量是否为零（相对容差 `relTol * Σ\|F_b\|`，默认 1e-10），不满足则抛 `std::runtime_error` | 纯 Neumann 压力（封闭域）问题的相容性检查（对应 OpenFOAM 的 `adjustPhi`）；`initializeMassFlux` 按需调用，也可由调用方直接用于自检 |
 
 返回值/填充结果均为正方向为正的存储约定；`assembleConvection` 读边界面时经 `outwardFlux` 还原外法向出流通量 $F_b$。
 
@@ -259,7 +261,7 @@ $$A\, p = b, \qquad b_P = -\sum_f \text{outward}\big(F^{\hat u}_f\big) \; + \sum
 
 **与增量形式（$p'$）的等价性**：把 $p$ 写作 $p_{\text{old}} + p'$，则 $A p' = b - A p_{\text{old}} = -m$，其中 $m_P$ 正是旧形式的预测净流出量（$-m + A p_{\text{old}} \equiv b$ 是恒等式）。两种写法组装同一个矩阵、解出同一个修正量；绝对形式的收益是右端直接就是 `div(phiHbyA)`，不必形成"旧压力梯度 − 矩阵系数"的相消差，右端的量级（因此 CG 相对残差容差的含义）也由此明确。
 
-**奇异性处理——参考单元消元**：四条边全为 Neumann 时矩阵奇异（零空间为常向量）。此时消去 0 号单元并把它钉在**旧值** $p_0 = p_{\text{old},0}$（等价于旧形式的 $p'_0 = 0$，压力水平不漂移），被消掉的第 0 列对邻居行的贡献移到右端（2D 最多两个邻居），得到 $n-1$ 阶 SPD 系统；存在 Dirichlet 压力边时系统本已正定，保留全部单元。压力方程用 CG 求解，动量方程用 BiCGSTAB（对流使矩阵非对称）。
+**奇异性处理——参考单元消元**：四条边全为 Neumann 时矩阵奇异（零空间为常向量）。此时消去 0 号单元并把它钉在**旧值** $p_0 = p_{\text{old},0}$（等价于旧形式的 $p'_0 = 0$，压力水平不漂移），被消掉的第 0 列对邻居行的贡献移到右端（2D 最多两个邻居），得到 $n-1$ 阶 SPD 系统；存在 Dirichlet 压力边时系统本已正定，保留全部单元（由 `hasDirichletPressure` 判定）。压力方程用 CG 求解，动量方程用 BiCGSTAB（对流使矩阵非对称）。
 
 **封闭域相容性（OpenFOAM adjustPhi）**：纯 Neumann 压力时压力项改变不了边界净流出量——内部面两两抵消，Neumann 边界又无压力项——因此 $F^{\hat u}$ 的边界净通量必须为零。不满足时方程不相容，参考单元消元会静默违反被消元单元（0 号）的连续性并累积误差。装配时先把残余净通量按"法向速度非 Dirichlet"的边界面积均摊回这些边界面，**同一调整同步进入右端**；存在 Dirichlet 压力边（开放域）时不做调整。入口处的 `checkFluxCompatibility` 保留为防御性检查。
 
@@ -270,6 +272,8 @@ $$A\, p = b, \qquad b_P = -\sum_f \text{outward}\big(F^{\hat u}_f\big) \; + \sum
 $$F_f \leftarrow F^{\hat u}_f - C_f\,(p_N - p_P) \quad \text{（内部面）}, \qquad F_b \leftarrow F^{\hat u}_b - C_b\,(p_b - p_P) \quad \text{（Dirichlet 压力边，外法向）}$$
 
 Neumann 压力边的边界通量保持 $F^{\hat u}_b$。由于右端与重建用的是**同一份**（封闭域下还经过 `adjustPhi` 调整的）$F^{\hat u}$，$A p = b$ 精确等价于"修正后每单元净流出量为零"，该步之后通量场在**压力求解器精度内严格离散守恒**；下一轮/下一步动量装配直接使用该通量。
+
+**系数 $C_f$ / $C_b$ 只在一处产生**：装配阶段把它们按面存入数组，重建阶段直接读取，不再用 `dx`/`dy` 重算一遍。方程与它的修正在结构上因此不可能因两处重复的公式而失配（早期版本正是装配与重建各算一遍，均匀网格上恰好相等，一旦网格或离散改写就会静默偏离）。
 
 **压力与速度重建**：压力场按松弛更新 $p \leftarrow p + \alpha_p\,(p_{\text{sol}} - p_{\text{old}})$，而速度和面通量用**未松弛**的解 $p_{\text{sol}}$ 重建：
 
@@ -283,7 +287,7 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P\, (\nabla p_{\text{sol}})_P$$
 
 ## Simple：稳态 SIMPLE 驱动
 
-`solveSimple` 为主入口：`velocity`/`pressure` 以 in-out 方式传入（初值 → 收敛解），`flux`（`FaceFluxField&`）为出参。入口用 `computeMassFlux` 初始化通量；纯 Neumann 压力时随即 `checkFluxCompatibility`。迭代体只做三件事：
+`solveSimple` 为主入口：`velocity`/`pressure` 以 in-out 方式传入（初值 → 收敛解），`flux`（`FaceFluxField&`）为出参。入口用 `initializeMassFlux` 初始化通量（`computeMassFlux` + 纯 Neumann 压力时的 `checkFluxCompatibility`）。迭代体只做三件事：
 
 1. `predictMomentum(..., TimeTerm{}, momSolver)`——稳态动量预测（`dt = 0`，走 Patankar 松弛分支）；
 2. `correctPressure(..., relaxationP, ...)`——单次压力修正（解绝对压力；压力场松弛 $\alpha_p$，速度/通量用未松弛解重建）；
@@ -304,7 +308,7 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P\, (\nabla p_{\text{sol}})_P$$
 
 `solvePiso` 复用共享的 `predictMomentum` / `correctPressure`，每个时间步执行**一次动量预测 + `nCorrectors` 次压力修正**，不使用欠松弛（对应 OpenFOAM `PISO`）：
 
-1. 入口 `computeMassFlux` 初始化持久通量（纯 Neumann 压力时 `checkFluxCompatibility`）；
+1. 入口 `initializeMassFlux` 初始化持久通量（`createPhi` + 封闭域 `adjustPhi` 式相容性检查）；
 2. 每个时间步：
    - `predictMomentum(..., 1.0, time, momSolver)`，`time = TimeTerm{rho, dt, timeScheme}`（θ 格式 ddt）；它同时给出 $u^{*}$ 与 $\hat u_1 = H(u^{*})/a_P$；
    - 第一个修正子：`correctPressure(..., 1.0, ...)`——解绝对压力；$\alpha_p = 1$ 时存储压力就是解；
@@ -313,7 +317,7 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P\, (\nabla p_{\text{sol}})_P$$
 
 | 类型 | 说明 |
 |------|------|
-| `PisoConfig` | `dt`、`nSteps`、`nCorrectors`、`timeScheme`、`scheme`、`solverConfig`、`verbose` |
+| `PisoConfig` | `dt`、`nSteps`、`nCorrectors`（**必须 ≥ 2**，`solvePiso` 会拒绝更小的值——单修正子在一次扫掠后就到达不动点并发散）、`timeScheme`、`scheme`、`solverConfig`、`verbose` |
 | `PisoStepInfo` | 每步诊断：`time`、`continuity`（修正后真实连续性误差）、`maxSpeed` |
 | `PisoResult` | `steps`、`history` |
 

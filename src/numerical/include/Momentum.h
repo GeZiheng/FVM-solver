@@ -9,15 +9,15 @@
 #include "TransportEquation.h"
 #include "Types.h"
 
+namespace fvm::numerical
+{
 using fvm::core::CartesianMesh;
 using fvm::core::FaceFluxField;
+using fvm::core::Index;
 using fvm::core::Scalar;
 using fvm::core::ScalarField;
 using fvm::core::Vector;
 using fvm::core::VectorField;
-
-namespace fvm::numerical
-{
 
 /// Assembled momentum equation for one velocity component.  `diag` holds the
 /// (relaxed) diagonal a_P and `rhsNoPressure` the right-hand side without the

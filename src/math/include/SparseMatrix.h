@@ -4,11 +4,10 @@
 #include <Eigen/Sparse>
 #include <vector>
 
-using fvm::core::Index;
-using fvm::core::Scalar;
-
 namespace fvm::math
 {
+using fvm::core::Index;
+using fvm::core::Scalar;
 
 /*
  * @brief Lightweight wrapper around Eigen sparse matrix.
