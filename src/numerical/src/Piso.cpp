@@ -80,8 +80,8 @@ PisoResult solvePiso(const CartesianMesh& mesh,
             time,
             *momSolver);
 
-        // Several pressure correctors; the cumulative reconstruction keeps
-        // the velocity consistent with the full corrected pressure.
+        // Several pressure correctors; correctPressure rebuilds the velocity
+        // from the absolute pressure, so repeated calls accumulate.
         for (int corrector = 0; corrector < config.nCorrectors; ++corrector)
         {
             // OpenFOAM re-evaluates HbyA = rAU*UEqn.H() at the top of every
@@ -106,8 +106,7 @@ PisoResult solvePiso(const CartesianMesh& mesh,
                 1.0,
                 velocity,
                 pressure,
-                flux,
-                /*cumulativeVelocityCorrection=*/true);
+                flux);
         }
 
         t += config.dt;

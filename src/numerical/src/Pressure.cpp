@@ -40,26 +40,20 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
     Scalar relaxationP,
     VectorField& velocity,
     ScalarField& pressure,
-    FaceFluxField& flux,
-    bool cumulativeVelocityCorrection)
+    FaceFluxField& flux)
 {
     if (relaxationP <= 0.0 || relaxationP > 1.0)
     {
         throw std::
             invalid_argument("correctPressure: relaxationP must be in (0, 1]");
     }
-    if (cumulativeVelocityCorrection && relaxationP != 1.0)
-    {
-        throw std::invalid_argument(
-            "correctPressure: cumulativeVelocityCorrection requires "
-            "relaxationP == 1");
-    }
 
     const Index nCells = mesh.cellCount();
 
-    // Pure-Neumann p makes the correction equation singular (constants null
-    // space): eliminate reference cell 0 (p'_0 = 0; its continuity equation is
-    // redundant). Any Dirichlet p side makes the system definite -> keep all.
+    // Pure-Neumann p makes the equation singular (constants null space):
+    // eliminate reference cell 0 and keep its value fixed (its continuity
+    // equation is redundant). Any Dirichlet p side makes the system definite
+    // -> keep all cells.
     bool hasDirichletP = false;
     for (int side = 0; side < 4; ++side)
     {
@@ -77,32 +71,28 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
         return pinReference && cell == 0;
     };
 
-    // Pressure-correction BCs: p' = 0 on Dirichlet p sides, zero gradient else.
-    BoundaryField bcPrime = bcP;
-    for (int side = 0; side < 4; ++side)
-    {
-        if (bcPrime.get(side).type == BCType::Dirichlet)
-            bcPrime.set(side, BCType::Dirichlet, 0.0);
-    }
-
-    const Vector& uStar = pred.uStar;
-    const Vector& vStar = pred.vStar;
     const Vector& uHatU = pred.uHatU;
     const Vector& uHatV = pred.uHatV;
     const Vector& dU = pred.dU;
     const Vector& dV = pred.dV;
 
-    // ---- Pressure-correction equation -------------------------------
+    // ---- Pressure equation for the absolute pressure (OpenFOAM pEqn) ----
     // Cell continuity sum_f F_f = 0 with
-    //   F_f = F*_f - rho d_f S_f (p'_N - p'_P)/delta   (interior)
-    //   F_b = F*_b + rho d_P S_f p'_P/dist             (Dirichlet p)
-    //   F_b = F*_b                                     (Neumann p)
-    // -> A p' = -massImbalance with coefficients rho*d.  F* is written into the
-    // persistent flux and corrected in place below, so it stays conservative to
-    // the solver accuracy.
+    //   F_f = rho S_f uHat_f - C_f (p_N - p_P)   (interior, C_f = rho d_f S_f/delta)
+    //   F_b = rho S_f u_b    - C_b (p_b - p_P)   (Dirichlet p)
+    //   F_b = rho S_f u_b                        (Neumann p)
+    // -> A p = b,  b = -sum_f outward(phiHbyA_f) + sum_Dirichlet C_b p_b.
+    // The pressure-free flux phiHbyA = rho S_f uHat_f is written into the
+    // persistent flux and corrected in place below (phi = phiHbyA - pEqn.flux()),
+    // so the corrected flux stays conservative to the solver accuracy.
     EquationSystem pSys(nP);
-    Vector massImbalance(nCells);
+    Vector massImbalance(nCells); // net outward phiHbyA (adjusted below)
+    Vector rhsExtra(nCells);      // known boundary / reference pressure terms
     massImbalance.setZero();
+    rhsExtra.setZero();
+
+    // Value of the eliminated reference cell (kept at its previous level).
+    const Scalar pRefValue = pressure(0);
 
     for (Index P = 0; P < nCells; ++P)
     {
@@ -124,12 +114,10 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
                 const Scalar delta = mesh.cellToCellDistance(P, face);
                 const Scalar dF = 0.5 * (dC(P) + dC(N));
                 const Scalar uHatF = 0.5 * (uHat(P) + uHat(N));
-                const Scalar F
-                    = rho * Sf
-                      * (uHatF - dF * (pressure(N) - pressure(P)) / delta);
+                const Scalar F = rho * Sf * uHatF; // phiHbyA: no pressure
                 const Scalar C = rho * dF * Sf / delta;
 
-                // Store the predicted flux (positive P -> N, stored convention).
+                // Store phiHbyA (positive P -> N, stored convention).
                 if (face == BoundaryField::East)
                     flux.x(iP + 1, jP) = F;
                 else
@@ -150,26 +138,24 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
                     if (!isReference(P))
                         pSys.A.insert(rowOf(N), rowOf(P), -C);
                 }
+
+                // Reference-cell elimination: the neighbour row lost the
+                // -C p_0 entry, so move the known value to the right-hand side.
+                if (isReference(P))
+                    rhsExtra(N) += C * pRefValue;
             }
             else
             {
-                // Boundary face: same Rhie-Chow form as the interior -- uHat plus
-                // the face-normal pressure gradient (no pressure term on
-                // zero-gradient p sides).  Using uStar (cell-centred gradient)
-                // would re-add the fixed boundary pressure every corrector and
-                // diverge.
+                // Boundary face: the same pressure-free uHat flux as the
+                // interior; a Dirichlet-p face adds C_b p_b to the right-hand
+                // side (the unknown C_b p_P stays on the diagonal).  u_b must
+                // come from uHat (or the velocity BC), never from uStar.
                 const BoundaryCondition& pCond = bcP.get(face);
                 const Scalar ub = boundaryNormalVelocity(face,
                     xFace ? bcU : bcV,
                     xFace ? uHatU : uHatV,
                     P);
-                Scalar Fb = rho * ub * Sf;
-                if (pCond.type == BCType::Dirichlet)
-                {
-                    Fb -= rho * dC(P) * Sf
-                          * (pCond.value - pressure(P))
-                          / mesh.cellToFaceDistance(face);
-                }
+                const Scalar Fb = rho * ub * Sf;
                 massImbalance(P) += Fb;
 
                 // Outward flux (west/south are stored along +x/+y -> sign).
@@ -189,26 +175,25 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
                         break;
                 }
 
-                if (pCond.type == BCType::Dirichlet && !isReference(P))
+                if (pCond.type == BCType::Dirichlet)
                 {
-                    // p' = 0 at the boundary: correction Cb * p'_P.
                     const Scalar Cb
                         = rho * dC(P) * Sf / mesh.cellToFaceDistance(face);
-                    pSys.A.insert(rowOf(P), rowOf(P), Cb);
+                    if (!isReference(P))
+                        pSys.A.insert(rowOf(P), rowOf(P), Cb);
+                    rhsExtra(P) += Cb * pCond.value;
                 }
             }
         }
     }
 
-    CorrectorResult result;
-    result.maxImbalance = massImbalance.cwiseAbs().maxCoeff();
-
     // ---- Closed-domain compatibility (OpenFOAM adjustPhi) -------------
-    // Pure-Neumann p: the correction cannot change the net boundary outflow
-    // (interior terms cancel, Neumann faces take no p' term), so an unbalanced
-    // predicted boundary flux makes the system inconsistent and silently
-    // violates the eliminated cell's continuity.  Spread the residual over the
-    // faces whose normal velocity is not fixed.
+    // Pure-Neumann p: the p terms cannot change the net boundary outflow
+    // (interior terms cancel, Neumann faces take no pressure term), so an
+    // unbalanced phiHbyA makes the system inconsistent and silently violates
+    // the eliminated cell's continuity.  Spread the residual over the faces
+    // whose normal velocity is not fixed; the same adjustment must reach the
+    // right-hand side, which is why massImbalance is updated here too.
     if (pinReference)
     {
         const Index nx = mesh.nx();
@@ -273,34 +258,60 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
                     massImbalance(mesh.cellIndex(i, ny - 1)) += delta * Sy;
                 }
             }
-            result.maxImbalance = massImbalance.cwiseAbs().maxCoeff();
         }
     }
 
+    // ---- Assemble the right-hand side and solve for the absolute p ----
+    // b = -sum_f outward(phiHbyA_f) + sum_Dirichlet C_b p_b + reference term.
+    Vector pOld(nP);
+    if (pinReference)
+        pOld = pressure.data().tail(nCells - 1);
+    else
+        pOld = pressure.data();
+
+    Vector b(nP);
     for (Index P = 0; P < nCells; ++P)
     {
         if (!isReference(P))
-            pSys.b(rowOf(P)) = -massImbalance(P);
+            b(rowOf(P)) = -massImbalance(P) + rhsExtra(P);
     }
-    pSys.A.finalize();
-    const Vector pCorrSol = pSolver.solve(pSys.A, pSys.b);
 
-    ScalarField pCorr(mesh, "pCorr");
+    pSys.A.finalize();
+
+    // Initial residual at the previous pressure: the mass imbalance this
+    // correction has to remove (identical to the p' form's right-hand side).
+    CorrectorResult result;
+    const Vector residual = b - pSys.A.native() * pOld;
+    result.maxImbalance = residual.cwiseAbs().maxCoeff();
     if (pinReference)
     {
-        pCorr.data()(0) = 0.0;
-        pCorr.data().tail(nCells - 1) = pCorrSol;
+        // The eliminated row is redundant: its imbalance is minus the sum of
+        // the solved rows (the adjusted boundary fluxes balance).
+        result.maxImbalance
+            = std::max(result.maxImbalance, std::abs(residual.sum()));
+    }
+
+    const Vector pSol = pSolver.solve(pSys.A, b);
+
+    // Absolute pressure used to rebuild the flux and the velocity; the
+    // eliminated reference cell keeps its previous value.
+    ScalarField pNew(mesh, "p");
+    if (pinReference)
+    {
+        pNew.data()(0) = pRefValue;
+        pNew.data().tail(nCells - 1) = pSol;
     }
     else
     {
-        pCorr.data() = pCorrSol;
+        pNew.data() = pSol;
     }
 
     // ---- Corrections -------------------------------------------------
     // 1. Conservative flux correction (OpenFOAM pEqn.flux):
-    //   interior: F_f -= C (p'_N - p'_P); Dirichlet-p: F_b += Cb p'_P (outward,
-    //   so west/south subtract).  Each cell's net outflow then equals the
-    //   linear solver's residual.
+    //   F_f = phiHbyA_f - C (p_N - p_P) on interior faces, and
+    //   F_b = phiHbyA_b - Cb (p_b - p_P) on Dirichlet-p faces (stored sign on
+    //   west/south is flipped).  Each cell's net outflow then equals the linear
+    //   solver's residual.
     const Index nx = mesh.nx();
     const Index ny = mesh.ny();
     const Scalar Sx = mesh.faceArea(BoundaryField::East);
@@ -316,7 +327,7 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
             const Index N = mesh.cellIndex(i, j);
             const Scalar dF = 0.5 * (dU(P) + dU(N));
             const Scalar C = rho * dF * Sx / mesh.dx();
-            flux.x(i, j) -= C * (pCorr(N) - pCorr(P));
+            flux.x(i, j) -= C * (pNew(N) - pNew(P));
         }
     }
     for (Index j = 1; j < ny; ++j)
@@ -327,75 +338,71 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
             const Index N = mesh.cellIndex(i, j);
             const Scalar dF = 0.5 * (dV(P) + dV(N));
             const Scalar C = rho * dF * Sy / mesh.dy();
-            flux.y(i, j) -= C * (pCorr(N) - pCorr(P));
+            flux.y(i, j) -= C * (pNew(N) - pNew(P));
         }
     }
     if (bcP.get(BoundaryField::West).type == BCType::Dirichlet)
     {
+        const Scalar pb = bcP.get(BoundaryField::West).value;
         for (Index j = 0; j < ny; ++j)
         {
             const Index P = mesh.cellIndex(0, j);
             const Scalar Cb = rho * dU(P) * Sx / hx;
-            flux.x(0, j) -= Cb * pCorr(P); // outward = -x(0, j)
+            flux.x(0, j) += Cb * (pb - pNew(P)); // outward = -x(0, j)
         }
     }
     if (bcP.get(BoundaryField::East).type == BCType::Dirichlet)
     {
+        const Scalar pb = bcP.get(BoundaryField::East).value;
         for (Index j = 0; j < ny; ++j)
         {
             const Index P = mesh.cellIndex(nx - 1, j);
             const Scalar Cb = rho * dU(P) * Sx / hx;
-            flux.x(nx, j) += Cb * pCorr(P); // outward = +x(nx, j)
+            flux.x(nx, j) -= Cb * (pb - pNew(P)); // outward = +x(nx, j)
         }
     }
     if (bcP.get(BoundaryField::South).type == BCType::Dirichlet)
     {
+        const Scalar pb = bcP.get(BoundaryField::South).value;
         for (Index i = 0; i < nx; ++i)
         {
             const Index P = mesh.cellIndex(i, 0);
             const Scalar Cb = rho * dV(P) * Sy / hy;
-            flux.y(i, 0) -= Cb * pCorr(P); // outward = -y(i, 0)
+            flux.y(i, 0) += Cb * (pb - pNew(P)); // outward = -y(i, 0)
         }
     }
     if (bcP.get(BoundaryField::North).type == BCType::Dirichlet)
     {
+        const Scalar pb = bcP.get(BoundaryField::North).value;
         for (Index i = 0; i < nx; ++i)
         {
             const Index P = mesh.cellIndex(i, ny - 1);
             const Scalar Cb = rho * dV(P) * Sy / hy;
-            flux.y(i, ny) += Cb * pCorr(P); // outward = +y(i, ny)
+            flux.y(i, ny) -= Cb * (pb - pNew(P)); // outward = +y(i, ny)
         }
     }
 
-    // 2a. Update the pressure for *all* cells first (Jacobi-style).  The
-    // cumulative reconstruction below evaluates grad(p) of the full corrected
-    // pressure; updating in the same loop would read a partially updated field
-    // (order dependent, wrong by orders of magnitude).
+    // 2a. Relaxed pressure update (OpenFOAM p.relax): p += alpha_p (p_solved
+    // - p_old).  PISO uses alpha_p = 1, so the stored field is the solution.
     for (Index P = 0; P < nCells; ++P)
     {
-        const Scalar dp = relaxationP * pCorr(P);
+        const Scalar dp = relaxationP * (pNew(P) - pressure(P));
         pressure(P) += dp;
         result.dpMax = std::max(result.dpMax, std::abs(dp));
     }
 
-    // 2b. Cell-centered velocity reconstruction.
+    // 2b. Cell-centered velocity reconstruction from the *unrelaxed* solved
+    // pressure: u = uHat - d grad(p) (OpenFOAM U = HbyA - rAU*grad(p), but with
+    // the unrelaxed p, unlike OpenFOAM's steady p.relax() ordering - see
+    // docs/numerical.md).  For SIMPLE this equals u* - d grad(p') because
+    // uHat = u* + d grad(p_old); for PISO it is the cumulative reconstruction
+    // across correctors.
     for (Index P = 0; P < nCells; ++P)
     {
-        Scalar uNew;
-        Scalar vNew;
-        if (cumulativeVelocityCorrection)
-        {
-            // U = uHat - d grad(p) from the full pressure; relaxationP == 1
-            // guarantees all corrections are stored, so repeated calls accumulate.
-            uNew = uHatU(P) - dU(P) * cellGradient(mesh, pressure, bcP, P, 0);
-            vNew = uHatV(P) - dV(P) * cellGradient(mesh, pressure, bcP, P, 1);
-        }
-        else
-        {
-            // Steady SIMPLE: apply the unrelaxed p' correction directly.
-            uNew = uStar(P) - dU(P) * cellGradient(mesh, pCorr, bcPrime, P, 0);
-            vNew = vStar(P) - dV(P) * cellGradient(mesh, pCorr, bcPrime, P, 1);
-        }
+        const Scalar uNew
+            = uHatU(P) - dU(P) * cellGradient(mesh, pNew, bcP, P, 0);
+        const Scalar vNew
+            = uHatV(P) - dV(P) * cellGradient(mesh, pNew, bcP, P, 1);
         result.duMax = std::max(result.duMax, std::abs(uNew - velocity.u()(P)));
         result.dvMax = std::max(result.dvMax, std::abs(vNew - velocity.v()(P)));
         velocity.u()(P) = uNew;

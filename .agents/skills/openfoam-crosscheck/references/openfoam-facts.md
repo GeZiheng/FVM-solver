@@ -23,6 +23,8 @@
 - `rAU = 1.0/UEqn.A()`；`A()` 的对角含边界对角贡献（`addBoundaryDiag`）并除以体积。`源码`
 - 压力修正序列（`correctPressure.C`，对照本项目 `predictMomentum`/`correctPressure`）：
   `HbyA = constrainHbyA(rAU*UEqn.H(), U, p)` → `phiHbyA = fvc::flux(HbyA) + interpolate(rAU)*ddtCorr(U, phi, Uf)` → `adjustPhi` → `fvm::laplacian(rAU, p) == fvc::div(phiHbyA)`（**绝对压力形式**）→ `setReference` → `phi = phiHbyA - pEqn.flux()` → `U = HbyA - rAU*fvc::grad(p)` → `U.correctBoundaryConditions()`。`记录`
+- **`p.relax()` 在 `U` 重建之前**：`phi = phiHbyA - pEqn.flux()` 在 `pEqn.solve()` 之后、`p.relax()` 之前取走通量（所以 `phi` 用**未松弛**解，离散守恒），而 `p.relax()` 之后才 `U = HbyA - rAU*fvc::grad(p)`（所以稳态速度吃到的是**松弛后**的压力）。本项目速度/通量都用未松弛解、只松弛压力场——这是有意的 SIMPLE 变体差异（PISO 时 α_p=1 无差别）。`源码`（`correctPressure.C`）+`记录`
+- `fvMatrix::setReference` 的实现是软钉：`source()[ref] += diag()[ref]*value; diag()[ref] *= 2.0;`（矩阵尺寸不变、仍对称正定）。本项目用参考单元消元（矩阵缩一维、钉住旧压力），两者压力水平等价。`源码`（`src/finiteVolume/fvMatrices/fvMatrix/fvMatrix.C`）+`记录`
 - **RC 的落点**：面通量用**面法向差商**（`snGrad`/`laplacian`），而动量源与速度重构用**单元中心 Gauss 梯度**（`fvc::grad`）。两者之差就是 RC 修正项；棋盘格在单元梯度下恒为零、在面差商下被强惩罚。`记录`
 - `createPhi`（`$OF14/src/finiteVolume/cfdTools/incompressible/createPhi.H`）用 `linearInterpolate(U) & mesh.Sf()` —— **初始通量不是 RC**，与本项目 `computeMassFlux`/`interpolateCellVelocityFlux` 对应。`记录`
 - `adjustPhi`（`$OF14/src/finiteVolume/cfdTools/general/adjustPhi/`）在封闭域强制边界净通量为零（自动修正）；本项目对应 `checkFluxCompatibility`（报错）+ `correctPressure` 内的纯 Neumann 再平衡。`记录`
