@@ -5,5 +5,13 @@
   "dependencies": [
     "eigen3",
     "doctest"
-  ]
+  ],
+  "features": {
+    "python": {
+      "description": "pyfvm Python bindings (pybind11); enabled by configuring with -DFVM_BUILD_PYTHON=ON",
+      "dependencies": [
+        "pybind11"
+      ]
+    }
+  }
 }

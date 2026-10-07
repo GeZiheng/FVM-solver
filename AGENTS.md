@@ -1,8 +1,8 @@
 # AGENTS.md
 
 ## Project State
-- **Status**: phases 1–4-1 complete; all 50 test cases (3271 assertions) pass. Everything described below is implemented and verified.
-- **Capabilities**: 2D uniform-Cartesian FVM (core/io), Eigen-backed sparse solvers (math), steady SIMPLE and transient PISO for incompressible NS on a collocated grid with Rhie–Chow interpolation, and theta-scheme transient scalar transport. A persistent `FaceFluxField` (`phi`) is the only convection input of the assemblers.
+- **Status**: phases 1–4-1 complete; `pyfvm` Python bindings (Phase 4 item 2) done. C++ suite: 50 test cases (3271 assertions) pass; binding suite (`pyfvm_tests`) passes. Everything described below is implemented and verified.
+- **Capabilities**: 2D uniform-Cartesian FVM (core/io), Eigen-backed sparse solvers (math), steady SIMPLE and transient PISO for incompressible NS on a collocated grid with Rhie–Chow interpolation, and theta-scheme transient scalar transport. A persistent `FaceFluxField` (`phi`) is the only convection input of the assemblers. Cases are written as Python scripts through the optional `pyfvm` bindings (pybind11, numpy-interop); there is no C++ demo executable any more.
 - **Solver structure**: the iteration is split into reusable `predictMomentum` / `correctPressure` primitives (`Momentum.h/.cpp`, `Pressure.h/.cpp`); `Simple`/`Piso` are thin driver loops. Extend those primitives rather than duplicating the loops.
 - **PISO**: working; `tests/test_piso.cpp` is enabled. Two invariants dominated the implementation — the per-corrector `refreshUHat` and the absolute-pressure form; both are spelled out under **Key Design Decisions** below and reproduce the OpenFOAM single-step fingerprints. Cross-check numbers and the ruled-out list: `docs/numerical.md`; run comparisons with the `openfoam` MCP server.
 
@@ -40,12 +40,15 @@ src/
                            (computeUHat -> uHat = H/a_P, d = V/a_P); Pressure.cpp holds the
                            absolute-pressure equation, reference-cell elimination and the
                            flux/U/p reconstruction.
-  app/main.cpp           — demos: steady convection-diffusion; lid-driven cavity Re=100 (cavity.vti)
-
 tests/                   — doctest: mesh, field, flux, linalg, diffusion, convection, transport,
                            transient (time order), simple (Poiseuille, cavity Re=100),
                            piso (impulsive Couette, transient Poiseuille)
-docs/                    — module docs (Chinese): core.md, math.md, io.md, numerical.md, app.md
+python/                  — pyfvm bindings (optional, -DFVM_BUILD_PYTHON=ON): pyfvm.cpp (pybind11
+                           layer, snake_case API), _path.py (sys.path bootstrap), examples/
+                           (case scripts: convection_diffusion.py, cavity.py, impulsive_couette.py),
+                           tests/test_pyfvm.py (binding-contract tests = ctest entry pyfvm_tests),
+                           overlay-ports/python3 (empty vcpkg port: link against system Python)
+docs/                    — module docs (Chinese): core.md, math.md, io.md, numerical.md, python.md
 ```
 
 ## Naming Conventions
@@ -60,7 +63,7 @@ docs/                    — module docs (Chinese): core.md, math.md, io.md, num
 - **`VCPKG_ROOT`** — the vcpkg installation.
 - **`Path`** — must contain the directory holding `ninja.exe`.
 
-**IMPORTANT for agents:** use the `build-and-test` MCP tool (see **MCP Servers** below) instead of shelling out to `cmake`/`ctest`/`ninja`. It configures into `build/<config>-agent` and runs **outside** the agent sandbox, which is required because vcpkg writes under `$VCPKG_ROOT` (outside this repository). Options: `config` Release/Debug, `target` all/fvm_solver/fvm_tests, `run` none/tests/solver/both (defaults: Release, all, tests). As part of a code-modification workflow, proceed with the defaults; when the user asks for a build/test directly, confirm the options first.
+**IMPORTANT for agents:** use the `build-and-test` MCP tool (see **MCP Servers** below) instead of shelling out to `cmake`/`ctest`/`ninja`. It configures into `build/<config>-agent` and runs **outside** the agent sandbox, which is required because vcpkg writes under `$VCPKG_ROOT` (outside this repository). Options: `config` Release/Debug, `target` all/fvm_tests/pyfvm, `run` none/tests, `python` true/false (defaults: Release, all, tests, false). `python=true` builds the `pyfvm` bindings (`-DFVM_BUILD_PYTHON=ON`) into the separate `build/<config>-agent-py` directory, and ctest there additionally runs `pyfvm_tests` (the Python binding tests). As part of a code-modification workflow, proceed with the defaults; when the user asks for a build/test directly, confirm the options first. Running a Python case script needs no sandbox escape — just `python python/examples/<name>.py`.
 
 Manual commands (humans, or when the MCP tool is unavailable):
 
@@ -68,8 +71,18 @@ Manual commands (humans, or when the MCP tool is unavailable):
 cmake -B build -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
 cmake --build build --config Release
 ctest --test-dir build --output-on-failure
-./build/Release/fvm_solver        # demos
 ```
+
+Python bindings (optional; adds the `pyfvm` module and the `pyfvm_tests` ctest entry):
+
+```bash
+cmake -B build/release-py -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake -DCMAKE_BUILD_TYPE=Release -DFVM_BUILD_PYTHON=ON
+cmake --build build/release-py
+ctest --test-dir build/release-py --output-on-failure
+python python/examples/cavity.py     # case scripts
+```
+
+The extension is version-locked to the interpreter: pass `-DPython_EXECUTABLE=...` to override, otherwise the first `python3.14`/`python3`/`python` on `Path` is used. See `docs/python.md` for the vcpkg feature/overlay mechanics and the API.
 
 ## MCP Servers
 
@@ -77,7 +90,7 @@ Two project-scoped servers, both plain-stdlib Python speaking newline-delimited 
 
 ### build-and-test (`.agents/mcp/build_and_test_server.py`)
 
-One tool, `build_and_test(config, target, run)`: configure (`cmake -G Ninja`) + build + optionally run ctest and/or the demo. Always use it instead of shelling out to `cmake`/`ctest`/`ninja` — the opencode bash permission block denies those commands, and in Codex this instruction is the rule. Options, defaults (Release / all / tests) and when to confirm them with the user: see **Build Instructions** above.
+One tool, `build_and_test(config, target, run, python)`: configure (`cmake -G Ninja`) + build + optionally run ctest. Always use it instead of shelling out to `cmake`/`ctest`/`ninja` — the opencode bash permission block denies those commands, and in Codex this instruction is the rule. Options, defaults (Release / all / tests / false) and when to confirm them with the user: see **Build Instructions** above. It deliberately does **not** run arbitrary scripts: Python case scripts run fine inside the agent sandbox, and regression coverage for the bindings lives in `pyfvm_tests`.
 
 ### openfoam (`.agents/mcp/openfoam_server.py`)
 
@@ -114,11 +127,13 @@ In Codex every `openfoam` tool except `list_cases` is `approval_mode = "approve"
 ## Dependencies
 - `eigen3` — sparse linear algebra
 - `doctest` — unit testing (header-only)
+- `pybind11` — Python bindings (optional; only via the vcpkg `python` manifest feature when `FVM_BUILD_PYTHON=ON`)
 
 ## Next Phase (Phase 4)
 Agreed roadmap, in order:
 1. ✅ **Unsteady terms + PISO** — done: transient theta scheme (time order verified), transient transport, the shared `Momentum`/`Pressure`/`GridOperators` primitives and `solvePiso`; `tests/test_piso.cpp` enabled. Cross-check numbers and the ruled-out list: `docs/numerical.md`.
-2. **`pyfvm` Python bindings** (pybind11 via vcpkg, optional target) — case setup and post-processing from Python/numpy, replacing any JSON-config idea; the `fvm_solver` exe stays a smoke demo. PISO is complete, so the API-stability gate is satisfied; review the solver API once before starting.
+2. ✅ **`pyfvm` Python bindings** — done: pybind11 (vcpkg `python` feature, `FVM_BUILD_PYTHON=ON`, optional), snake_case API over mesh/fields/BC/SIMPLE/PISO/transport/vti with zero-copy numpy views; case scripts in `python/examples/`; binding-contract tests in `python/tests/` (ctest entry `pyfvm_tests`); the C++ `fvm_solver` demo exe was removed — cases are Python scripts now. Details: `docs/python.md`.
 3. **Arbitrary mesh input** (Gmsh `.msh` first) — the main motivation for the Python front-end; may come with non-orthogonal/skew mesh support.
+4. **Application tests for the example cases** — run `python/examples/` scripts as a separate test tier (distinct from the unit tests), e.g. as labelled ctest entries. Agreed in principle, not scheduled.
 
 Deferred/rejected: per-case executables under `examples/` (cumbersome), JSON case config (redundant with Python scripting), per-module CMakeLists/tests/docs split (revisit only if a module is reused externally or build times degrade). AMGCL/Hypre backends remain candidates for larger meshes.

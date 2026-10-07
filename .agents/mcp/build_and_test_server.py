@@ -9,8 +9,10 @@ an MCP SDK or reaching the network.
 Shared by Codex (registered in ``.codex/config.toml``) and opencode
 (reached through the ``mcp`` block in ``opencode.json``), so both agents
 drive the same implementation. The tool configures with CMake + Ninja into
-``build/<config>-agent``, builds ``fvm_solver`` and/or ``fvm_tests``, then
-optionally runs ctest and/or the ``fvm_solver`` demo.
+``build/<config>-agent``, builds ``fvm_tests``, then optionally runs ctest.
+With ``python=true`` it configures ``-DFVM_BUILD_PYTHON=ON`` into
+``build/<config>-agent-py`` instead, which adds the ``pyfvm`` extension
+target and the ``pyfvm_tests`` ctest entry.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ import sys
 
 MAX_OUTPUT_CHARS = 8000
 SERVER_NAME = "build-and-test"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 # Used only when the client does not request a version; otherwise the
 # requested version is echoed back so the client keeps the negotiation.
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
@@ -46,13 +48,15 @@ VS_CPP_COMPONENT = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
 
 TOOL_DESCRIPTION = (
     "Configure (cmake -G Ninja) and build this FVM-solver project in Debug or "
-    "Release mode (default Release), building fvm_solver and/or fvm_tests "
-    "(default both), then optionally run ctest and/or the fvm_solver demo. Use "
+    "Release mode (default Release), building fvm_tests (default) and, with "
+    "python=true, the pyfvm extension, then optionally run ctest (which "
+    "includes the pyfvm_tests Python binding tests when python=true). Use "
     "this instead of invoking cmake/ctest/ninja directly for project builds. "
     "When the user directly requests a build or test, confirm the options "
-    "(config, target, run) with the user first unless they already stated them. "
+    "(config, target, run, python) with the user first unless they already "
+    "stated them. "
     "When building as part of a code modification workflow, proceed with the "
-    "defaults (config=Release, target=all, run=tests)."
+    "defaults (config=Release, target=all, run=tests, python=false)."
 )
 
 TOOL_SCHEMA = {
@@ -66,20 +70,29 @@ TOOL_SCHEMA = {
         },
         "target": {
             "type": "string",
-            "enum": ["all", "fvm_solver", "fvm_tests"],
+            "enum": ["all", "fvm_tests", "pyfvm"],
             "default": "all",
             "description": (
-                "Which target(s) to build: all (default), fvm_solver, or fvm_tests."
+                "Which target(s) to build: all (default), fvm_tests, or pyfvm "
+                "(pyfvm requires python=true)."
             ),
         },
         "run": {
             "type": "string",
-            "enum": ["none", "tests", "solver", "both"],
+            "enum": ["none", "tests"],
             "default": "tests",
             "description": (
-                "What to run after a successful build: none, tests (ctest, "
-                "requires fvm_tests), solver (run the fvm_solver demo, requires "
-                "fvm_solver), or both (default tests)."
+                "What to run after a successful build: none or tests "
+                "(ctest; includes pyfvm_tests when python=true). Default tests."
+            ),
+        },
+        "python": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Build with -DFVM_BUILD_PYTHON=ON (pybind11 bindings) into "
+                "build/<config>-agent-py, separate from the default build. "
+                "ctest then also runs the Python binding tests."
             ),
         },
     },
@@ -321,7 +334,10 @@ def _msvc_environment() -> tuple[dict[str, str] | None, str]:
 
 
 def build_and_test(
-    config: str = "Release", target: str = "all", run: str = "tests"
+    config: str = "Release",
+    target: str = "all",
+    run: str = "tests",
+    python: bool = False,
 ) -> tuple[str, bool]:
     """Configure, build and optionally run the project.
 
@@ -329,15 +345,17 @@ def build_and_test(
     """
     if config not in ("Debug", "Release"):
         return f"invalid config {config!r}: expected Debug or Release", False
-    if target not in ("all", "fvm_solver", "fvm_tests"):
+    if target not in ("all", "fvm_tests", "pyfvm"):
         return (
-            f"invalid target {target!r}: expected all, fvm_solver or fvm_tests",
+            f"invalid target {target!r}: expected all, fvm_tests or pyfvm",
             False,
         )
-    if run not in ("none", "tests", "solver", "both"):
-        return f"invalid run {run!r}: expected none, tests, solver or both", False
+    if run not in ("none", "tests"):
+        return f"invalid run {run!r}: expected none or tests", False
+    if target == "pyfvm" and not python:
+        return "invalid combination: target=pyfvm requires python=true", False
 
-    build_dir = REPO_ROOT / "build" / f"{config}-agent"
+    build_dir = REPO_ROOT / "build" / f"{config}-agent{'-py' if python else ''}"
     sections = [f"project: {REPO_ROOT}", f"build dir: {build_dir}"]
     failed = False
 
@@ -393,6 +411,8 @@ def build_and_test(
                 / "vcpkg.cmake"
             )
         )
+    if python:
+        configure_cmd.append("-DFVM_BUILD_PYTHON=ON")
     else:
         sections.append(
             "WARNING: VCPKG_ROOT is not set; configuring without the vcpkg "
@@ -418,8 +438,8 @@ def build_and_test(
     sections.append(f"\nBUILD SUCCEEDED ({config}, target: {target})")
 
     # --- Run ---
-    if run in ("tests", "both"):
-        if target == "fvm_solver":
+    if run == "tests":
+        if target == "pyfvm":
             sections.append(
                 f"\nSKIPPED tests: fvm_tests was not built (target={target})"
             )
@@ -440,43 +460,6 @@ def build_and_test(
                 sections.append(f"\nTESTS FAILED (exit code {code})")
             else:
                 sections.append("\nALL TESTS PASSED")
-
-    if run in ("solver", "both"):
-        if target == "fvm_tests":
-            sections.append(
-                f"\nSKIPPED solver: fvm_solver was not built (target={target})"
-            )
-        else:
-            suffix = ".exe" if os.name == "nt" else ""
-            solver_exe = build_dir / f"fvm_solver{suffix}"
-            sections.append(f"\n$ {solver_exe} (cwd: {build_dir})")
-            try:
-                completed = subprocess.run(
-                    [str(solver_exe)],
-                    cwd=str(build_dir),
-                    capture_output=True,
-                    text=True,
-                    errors="replace",
-                    timeout=RUN_TIMEOUT,
-                    env=build_env,
-                )
-                output = completed.stdout or ""
-                if completed.stderr:
-                    output += ("\n" if output else "") + completed.stderr
-                sections.append(_tail(output.strip()))
-                if completed.returncode != 0:
-                    failed = True
-                    sections.append(
-                        f"\nSOLVER FAILED (exit code {completed.returncode})"
-                    )
-                else:
-                    sections.append("\nSOLVER RUN SUCCEEDED")
-            except FileNotFoundError:
-                failed = True
-                sections.append(f"\nSOLVER FAILED: {solver_exe} not found")
-            except subprocess.TimeoutExpired:
-                failed = True
-                sections.append(f"\nSOLVER FAILED: timed out after {RUN_TIMEOUT}s")
 
     sections.append("\n" + ("RESULT: FAILED" if failed else "RESULT: SUCCESS"))
     return "\n".join(sections), not failed
@@ -548,6 +531,7 @@ def _handle(message: dict) -> None:
                 config=arguments.get("config") or "Release",
                 target=arguments.get("target") or "all",
                 run=arguments.get("run") or "tests",
+                python=bool(arguments.get("python")),
             )
         except Exception as exc:  # never take the server down
             text, ok = f"build_and_test crashed: {exc!r}", False

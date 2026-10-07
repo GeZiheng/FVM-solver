@@ -1,4 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
+
+# Python bindings pull pybind11 through the vcpkg "python" manifest feature,
+# and replace the vcpkg python3 port with the empty overlay in
+# python/overlay-ports (the extension targets the system interpreter via
+# FindPython; vcpkg's own CPython is never needed). Both variables must be
+# set before project() so the vcpkg toolchain picks them up.
+if(DEFINED FVM_BUILD_PYTHON AND FVM_BUILD_PYTHON)
+    set(VCPKG_MANIFEST_FEATURES "python" CACHE STRING "vcpkg manifest features" FORCE)
+    set(VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_SOURCE_DIR}/python/overlay-ports"
+        CACHE PATH "vcpkg overlay ports" FORCE)
+endif()
+
 project(FVM-solver VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -43,10 +55,6 @@ target_link_libraries(fvm_core
         Eigen3::Eigen
 )
 
-# Main executable
-add_executable(fvm_solver src/app/main.cpp)
-target_link_libraries(fvm_solver PRIVATE fvm_core)
-
 # Tests
 enable_testing()
 add_executable(fvm_tests)
@@ -74,5 +82,29 @@ target_link_libraries(fvm_tests
 
 add_test(NAME fvm_unit_tests COMMAND fvm_tests)
 
-# Install
-install(TARGETS fvm_solver DESTINATION bin)
+# Python bindings (optional): pybind11 extension module `pyfvm`.
+# Configure with -DFVM_BUILD_PYTHON=ON; the .pyd lands in <build>/python.
+option(FVM_BUILD_PYTHON "Build the pyfvm Python bindings (pybind11)" OFF)
+if(FVM_BUILD_PYTHON)
+    # The extension is version-locked to the interpreter it is built against
+    # (a cp312 module does not import in 3.14). Honour an explicit
+    # -DPython_EXECUTABLE=..., otherwise take the first python on PATH.
+    if(NOT DEFINED Python_EXECUTABLE)
+        find_program(Python_EXECUTABLE NAMES python3.14 python3 python)
+    endif()
+    set(PYBIND11_FINDPYTHON ON) # modern FindPython (honours Python_EXECUTABLE)
+    find_package(pybind11 CONFIG REQUIRED)
+    pybind11_add_module(pyfvm python/pyfvm.cpp)
+    target_link_libraries(pyfvm PRIVATE fvm_core)
+    set_target_properties(pyfvm PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python")
+    if(MSVC)
+        target_compile_options(pyfvm PRIVATE /bigobj)
+        target_compile_definitions(pyfvm PRIVATE NOMINMAX)
+    endif()
+    # Run the binding tests with the interpreter the module was built
+    # against (extension modules are version-locked).
+    add_test(NAME pyfvm_tests
+        COMMAND ${Python_EXECUTABLE} -m unittest discover
+                -s ${CMAKE_CURRENT_SOURCE_DIR}/python/tests)
+endif()
