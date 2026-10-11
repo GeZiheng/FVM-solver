@@ -82,6 +82,39 @@ class TestCoreBindings(unittest.TestCase):
         with self.assertRaises(Exception):
             bc.set(4, fvm.BCType.Dirichlet, 0.0)
 
+    def test_vector_field_size_and_set_constant(self):
+        mesh = fvm.CartesianMesh(4, 3, 0.0, 0.0, 1.0, 1.0)
+        v = fvm.VectorField(mesh, "velocity")
+        self.assertEqual(v.size(), mesh.cell_count())
+        v.set_constant(2.5)
+        self.assertTrue((v.u.to_numpy() == 2.5).all())
+        self.assertTrue((v.v.to_numpy() == 2.5).all())
+
+    def test_out_of_range_indices_raise(self):
+        nx, ny = 4, 3
+        mesh = fvm.CartesianMesh(nx, ny, 0.0, 0.0, 1.0, 1.0)
+        f = fvm.ScalarField(mesh, "T")
+        flux = fvm.FaceFluxField(mesh, "phi")
+        with self.assertRaises(IndexError):
+            f.value(nx, 0)
+        # Index is unsigned: negatives are rejected by pybind11's argument
+        # conversion (TypeError) before the binding-level range check.
+        with self.assertRaises(TypeError):
+            f.value(-1, 0)
+        with self.assertRaises(IndexError):
+            f.set(0, ny, 1.0)
+        with self.assertRaises(IndexError):
+            flux.x(nx + 1, 0)
+        with self.assertRaises(IndexError):
+            flux.y(0, ny + 1)
+        with self.assertRaises(IndexError):
+            mesh.cell_index(nx, 0)
+        with self.assertRaises(IndexError):
+            mesh.cell_center(mesh.cell_count())
+        # The highest valid face indices still work (x: i == nx, y: j == ny).
+        flux.x(nx, 0)
+        flux.y(0, ny)
+
 
 class TestTransportBinding(unittest.TestCase):
     def test_pure_diffusion_linear_profile_exact(self):
@@ -126,6 +159,39 @@ class TestDriverSmokes(unittest.TestCase):
         self.assertGreater(result.iterations, 0)
         self.assertTrue(np.isfinite(velocity.u.to_numpy()).all())
         self.assertTrue(np.isfinite(pressure.to_numpy()).all())
+
+
+class TestMeshMismatch(unittest.TestCase):
+    """Fields carry the mesh they were created on; passing one built on a
+    different mesh to a mesh-taking entry point must raise ValueError."""
+
+    def test_solve_transport_rejects_foreign_gamma(self):
+        mesh = fvm.CartesianMesh(4, 4, 0.0, 0.0, 1.0, 1.0)
+        other = fvm.CartesianMesh(4, 4, 0.0, 0.0, 1.0, 1.0)
+        velocity = fvm.VectorField(mesh, "velocity")
+        gamma = fvm.ScalarField(other, "gamma")  # same geometry, wrong mesh
+        flux = fvm.interpolate_cell_velocity_flux(mesh, velocity, 1.0)
+        bc = fvm.BoundaryField()
+        with self.assertRaises(ValueError):
+            fvm.solve_transport(mesh, flux, gamma,
+                                fvm.ConvectionScheme.Upwind, bc)
+
+    def test_solve_simple_rejects_foreign_velocity(self):
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = make_cavity_case(8)
+        other = fvm.CartesianMesh(8, 8, 0.0, 0.0, 1.0, 1.0)
+        foreign_velocity = fvm.VectorField(other, "velocity")
+        cfg = fvm.SimpleConfig()
+        with self.assertRaises(ValueError):
+            fvm.solve_simple(mesh, 1.0, 0.01, bc_u, bc_v, bc_p, cfg,
+                             foreign_velocity, pressure, flux)
+
+    def test_write_vti_rejects_foreign_field(self):
+        mesh = fvm.CartesianMesh(4, 4, 0.0, 0.0, 1.0, 1.0)
+        other = fvm.CartesianMesh(4, 4, 0.0, 0.0, 1.0, 1.0)
+        f = fvm.ScalarField(other, "T")
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                fvm.write_vti(os.path.join(tmp, "x.vti"), mesh, {"T": f}, {})
 
     def test_piso_smoke(self):
         mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = make_cavity_case(16)

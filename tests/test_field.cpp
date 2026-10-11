@@ -67,3 +67,19 @@ TEST_CASE("VectorField set zero")
         CHECK(v == doctest::Approx(0.0));
     }
 }
+
+TEST_CASE("VectorField size and set constant")
+{
+    CartesianMesh mesh(3, 2, 0.0, 0.0, 1.0, 1.0);
+    VectorField vel(mesh, "velocity");
+
+    CHECK(vel.size() == mesh.cellCount());
+
+    vel.setConstant(2.5);
+    for (Index i = 0; i < mesh.cellCount(); ++i)
+    {
+        auto [u, v] = vel(i);
+        CHECK(u == doctest::Approx(2.5));
+        CHECK(v == doctest::Approx(2.5));
+    }
+}

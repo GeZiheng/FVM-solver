@@ -10,6 +10,7 @@
 #include <pybind11/stl.h>
 
 #include <string>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -69,6 +70,28 @@ py::array_t<Scalar> vectorCopy(const Vector& v)
         v.data());
 }
 
+/// Binding-level guard: every field stores the mesh it was created on, but
+/// the free functions below take the mesh as a separate argument. A field
+/// from another mesh must be rejected before it reaches the C++ core (the
+/// core has no such check; Release builds would silently read out of
+/// bounds). std::invalid_argument maps to Python ValueError.
+template <typename FieldT>
+void requireSameMesh(const CartesianMesh& mesh, const FieldT& field, const char* what)
+{
+    if (&field.mesh() != &mesh)
+        throw std::invalid_argument(std::string("mesh mismatch: '") + what
+            + "' was created on a different mesh");
+}
+
+/// Binding-level bounds guard: Release builds carry no Eigen assertions, so
+/// an out-of-range index coming from Python must be checked here to raise
+/// IndexError instead of crashing the interpreter.
+void requireIndex(bool ok)
+{
+    if (!ok)
+        throw py::index_error("index out of range");
+}
+
 /// High-level steady scalar transport: assemble, solve with BiCGSTAB,
 /// return the solution as a numpy array (row-major cell order, j * nx + i).
 py::array_t<Scalar> solveTransport(const CartesianMesh& mesh,
@@ -80,6 +103,12 @@ py::array_t<Scalar> solveTransport(const CartesianMesh& mesh,
     const ScalarField* Sc,
     const ScalarField* Sp)
 {
+    requireSameMesh(mesh, flux, "flux");
+    requireSameMesh(mesh, gamma, "gamma");
+    if (Sc)
+        requireSameMesh(mesh, *Sc, "Sc");
+    if (Sp)
+        requireSameMesh(mesh, *Sp, "Sp");
     auto sys = numerical::assembleTransport(mesh, flux, gamma, scheme, bc, Sc, Sp);
     sys.A.finalize();
     auto solver = math::createEigenBiCGSTAB(solverConfig);
@@ -104,6 +133,13 @@ py::array_t<Scalar> solveTransientTransport(const CartesianMesh& mesh,
     const ScalarField* Sc,
     const ScalarField* Sp)
 {
+    requireSameMesh(mesh, flux, "flux");
+    requireSameMesh(mesh, gamma, "gamma");
+    requireSameMesh(mesh, phiOld, "phi_old");
+    if (Sc)
+        requireSameMesh(mesh, *Sc, "Sc");
+    if (Sp)
+        requireSameMesh(mesh, *Sp, "Sp");
     auto sys = numerical::assembleTransientTransport(
         mesh, flux, gamma, scheme, bc, phiOld, dt, timeScheme, Sc, Sp);
     sys.A.finalize();
@@ -131,6 +167,9 @@ SimpleResult runSimple(const CartesianMesh& mesh,
     ScalarField& pressure,
     FaceFluxField& flux)
 {
+    requireSameMesh(mesh, velocity, "velocity");
+    requireSameMesh(mesh, pressure, "pressure");
+    requireSameMesh(mesh, flux, "flux");
     py::gil_scoped_release release;
     return numerical::solveSimple(
         mesh, rho, mu, bcU, bcV, bcP, config, velocity, pressure, flux);
@@ -147,9 +186,45 @@ PisoResult runPiso(const CartesianMesh& mesh,
     ScalarField& pressure,
     FaceFluxField& flux)
 {
+    requireSameMesh(mesh, velocity, "velocity");
+    requireSameMesh(mesh, pressure, "pressure");
+    requireSameMesh(mesh, flux, "flux");
     py::gil_scoped_release release;
     return numerical::solvePiso(
         mesh, rho, mu, bcU, bcV, bcP, config, velocity, pressure, flux);
+}
+
+FaceFluxField interpolateCellVelocityFlux(const CartesianMesh& mesh,
+    const VectorField& velocity,
+    Scalar rho)
+{
+    requireSameMesh(mesh, velocity, "velocity");
+    return numerical::interpolateCellVelocityFlux(mesh, velocity, rho);
+}
+
+void computeMassFlux(const CartesianMesh& mesh,
+    const VectorField& velocity,
+    Scalar rho,
+    const BoundaryField& bcU,
+    const BoundaryField& bcV,
+    FaceFluxField& flux)
+{
+    requireSameMesh(mesh, velocity, "velocity");
+    requireSameMesh(mesh, flux, "flux");
+    numerical::computeMassFlux(mesh, velocity, rho, bcU, bcV, flux);
+}
+
+void initializeMassFlux(const CartesianMesh& mesh,
+    const VectorField& velocity,
+    Scalar rho,
+    const BoundaryField& bcU,
+    const BoundaryField& bcV,
+    const BoundaryField& bcP,
+    FaceFluxField& flux)
+{
+    requireSameMesh(mesh, velocity, "velocity");
+    requireSameMesh(mesh, flux, "flux");
+    numerical::initializeMassFlux(mesh, velocity, rho, bcU, bcV, bcP, flux);
 }
 
 /// VtkWriter::write with Python dicts {name: field}.
@@ -161,14 +236,18 @@ void writeVti(const std::string& filename,
     std::vector<std::pair<std::string, const ScalarField*>> scalars;
     for (const auto& item : scalarFields)
     {
-        scalars.emplace_back(py::cast<std::string>(item.first),
-            py::cast<const ScalarField*>(item.second));
+        auto name = py::cast<std::string>(item.first);
+        const ScalarField* field = py::cast<const ScalarField*>(item.second);
+        requireSameMesh(mesh, *field, name.c_str());
+        scalars.emplace_back(std::move(name), field);
     }
     std::vector<std::pair<std::string, const VectorField*>> vectors;
     for (const auto& item : vectorFields)
     {
-        vectors.emplace_back(py::cast<std::string>(item.first),
-            py::cast<const VectorField*>(item.second));
+        auto name = py::cast<std::string>(item.first);
+        const VectorField* field = py::cast<const VectorField*>(item.second);
+        requireSameMesh(mesh, *field, name.c_str());
+        vectors.emplace_back(std::move(name), field);
     }
     VtkWriter::write(filename, mesh, scalars, vectors);
 }
@@ -184,12 +263,26 @@ void bindCore(py::module_& m)
         .def("cell_count", &CartesianMesh::cellCount)
         .def("dx", &CartesianMesh::dx)
         .def("dy", &CartesianMesh::dy)
-        .def("cell_volume", &CartesianMesh::cellVolume, py::arg("cell"))
-        .def("cell_center",
-            py::overload_cast<Index>(&CartesianMesh::cellCenter, py::const_),
-            py::arg("cell"))
-        .def("cell_index", &CartesianMesh::cellIndex, py::arg("i"), py::arg("j"))
-        .def("cell_ij", &CartesianMesh::cellIJ, py::arg("cell"));
+        .def("cell_volume", [](const CartesianMesh& m, Index cell)
+            {
+                requireIndex(cell >= 0 && cell < m.cellCount());
+                return m.cellVolume(cell);
+            }, py::arg("cell"))
+        .def("cell_center", [](const CartesianMesh& m, Index cell)
+            {
+                requireIndex(cell >= 0 && cell < m.cellCount());
+                return m.cellCenter(cell);
+            }, py::arg("cell"))
+        .def("cell_index", [](const CartesianMesh& m, Index i, Index j)
+            {
+                requireIndex(i >= 0 && i < m.nx() && j >= 0 && j < m.ny());
+                return m.cellIndex(i, j);
+            }, py::arg("i"), py::arg("j"))
+        .def("cell_ij", [](const CartesianMesh& m, Index cell)
+            {
+                requireIndex(cell >= 0 && cell < m.cellCount());
+                return m.cellIJ(cell);
+            }, py::arg("cell"));
 
     // Fields hold a mesh reference: keep the mesh alive while the field lives.
     py::class_<ScalarField>(m, "ScalarField")
@@ -203,15 +296,25 @@ void bindCore(py::module_& m)
             { return vectorView(self, self.cast<ScalarField&>().data()); },
             "Writable 1-D numpy view of the cell data (cell index j * nx + i).")
         .def("value", [](const ScalarField& f, Index i, Index j)
-            { return f(i, j); }, py::arg("i"), py::arg("j"))
+            {
+                const auto& m = f.mesh();
+                requireIndex(i >= 0 && i < m.nx() && j >= 0 && j < m.ny());
+                return f(i, j);
+            }, py::arg("i"), py::arg("j"))
         .def("set", [](ScalarField& f, Index i, Index j, Scalar v)
-            { f(i, j) = v; }, py::arg("i"), py::arg("j"), py::arg("value"));
+            {
+                const auto& m = f.mesh();
+                requireIndex(i >= 0 && i < m.nx() && j >= 0 && j < m.ny());
+                f(i, j) = v;
+            }, py::arg("i"), py::arg("j"), py::arg("value"));
 
     py::class_<VectorField>(m, "VectorField")
         .def(py::init<const CartesianMesh&, const std::string&>(),
             py::arg("mesh"), py::arg("name") = "", py::keep_alive<1, 2>())
         .def("name", &VectorField::name)
+        .def("size", &VectorField::size)
         .def("set_zero", &VectorField::setZero)
+        .def("set_constant", &VectorField::setConstant, py::arg("value"))
         .def_property_readonly("u",
             static_cast<ScalarField& (VectorField::*)()>(&VectorField::u),
             py::return_value_policy::reference_internal)
@@ -227,16 +330,28 @@ void bindCore(py::module_& m)
         .def("y_face_count", &FaceFluxField::yFaceCount)
         .def("set_zero", &FaceFluxField::setZero)
         .def("x", [](const FaceFluxField& f, Index i, Index j)
-            { return f.x(i, j); }, py::arg("i"), py::arg("j"))
+            {
+                const auto& m = f.mesh();
+                requireIndex(i >= 0 && i <= m.nx() && j >= 0 && j < m.ny());
+                return f.x(i, j);
+            }, py::arg("i"), py::arg("j"))
         .def("y", [](const FaceFluxField& f, Index i, Index j)
-            { return f.y(i, j); }, py::arg("i"), py::arg("j"))
+            {
+                const auto& m = f.mesh();
+                requireIndex(i >= 0 && i < m.nx() && j >= 0 && j <= m.ny());
+                return f.y(i, j);
+            }, py::arg("i"), py::arg("j"))
         .def("to_numpy_x", [](const py::object& self)
             { return vectorView(self, self.cast<FaceFluxField&>().xData()); },
             "Writable 1-D numpy view of the x-face fluxes, index j * (nx + 1) + i.")
         .def("to_numpy_y", [](const py::object& self)
             { return vectorView(self, self.cast<FaceFluxField&>().yData()); },
             "Writable 1-D numpy view of the y-face fluxes, index j * nx + i.")
-        .def("cell_imbalance", &FaceFluxField::cellImbalance, py::arg("cell"));
+        .def("cell_imbalance", [](const FaceFluxField& f, Index cell)
+            {
+                requireIndex(cell >= 0 && cell < f.mesh().cellCount());
+                return f.cellImbalance(cell);
+            }, py::arg("cell"));
 }
 
 void bindNumerical(py::module_& m)
@@ -337,16 +452,15 @@ void bindNumerical(py::module_& m)
         "velocity/pressure/flux are in/out and carried between steps.");
 
     // -- Flux helpers ---------------------------------------------------------
-    m.def("interpolate_cell_velocity_flux",
-        &numerical::interpolateCellVelocityFlux,
+    m.def("interpolate_cell_velocity_flux", &interpolateCellVelocityFlux,
         py::arg("mesh"), py::arg("velocity"), py::arg("rho"),
         py::keep_alive<0, 1>(),
         "Face mass flux from a cell-centred velocity (no BCs; for transport "
         "with a prescribed velocity).");
-    m.def("compute_mass_flux", &numerical::computeMassFlux,
+    m.def("compute_mass_flux", &computeMassFlux,
         py::arg("mesh"), py::arg("velocity"), py::arg("rho"),
         py::arg("bc_u"), py::arg("bc_v"), py::arg("flux"));
-    m.def("initialize_mass_flux", &numerical::initializeMassFlux,
+    m.def("initialize_mass_flux", &initializeMassFlux,
         py::arg("mesh"), py::arg("velocity"), py::arg("rho"),
         py::arg("bc_u"), py::arg("bc_v"), py::arg("bc_p"), py::arg("flux"));
     m.def("check_flux_compatibility", &numerical::checkFluxCompatibility,

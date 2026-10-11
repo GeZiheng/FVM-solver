@@ -59,6 +59,7 @@ using Vector = Eigen::VectorXd;
 - `field.data()`：返回底层 `Vector&`，用于整体赋值或与线性求解器对接。
 - `setZero()` / `setConstant(value)`：整体初始化。
 - `VectorField::u()` / `v()`：返回分量标量场引用。
+- `VectorField::size()` / `setConstant(value)`：与 `ScalarField` 对应；`size()` 返回单元数，`setConstant(value)` 同时设置 `u`、`v` 两个分量为同一值。
 - `VectorField::operator()(cell)`：返回 `{u, v}` 值对（只读）。
 
 ## FaceFluxField：面通量场

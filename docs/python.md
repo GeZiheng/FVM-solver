@@ -7,7 +7,7 @@
 ```
 python/
   pyfvm.cpp              — 全部绑定（单文件；Python 侧命名 snake_case）
-  _path.py               — sys.path 引导：扫描 build/*/python 找到编译出的 pyfvm 扩展
+  _path.py               — sys.path 引导：按当前解释器标签扫描 build/*/python 定位 pyfvm 扩展
   examples/              — 算例脚本（见下）
   tests/test_pyfvm.py    — 绑定契约测试（unittest；ctest 条目 pyfvm_tests）
   overlay-ports/python3/ — 空 vcpkg overlay 端口（见"构建"）
@@ -30,7 +30,7 @@ ctest --test-dir build/release-py --output-on-failure   # fvm_unit_tests + pyfvm
 - **vcpkg feature**：`pybind11` 声明在 `vcpkg.json` 的 `"python"` feature 里；`-DFVM_BUILD_PYTHON=ON` 会在 `project()` 之前自动设置 `VCPKG_MANIFEST_FEATURES=python`，默认构建不拉取 pybind11。
 - **空 overlay 端口**：pybind11 端口声明依赖 vcpkg 的 `python3` 端口（会源码构建 CPython 3.12，但我们用不上）。`python/overlay-ports/python3` 是一个空端口，满足依赖图但不装任何东西；扩展模块始终对着**系统 Python** 编译。
 - **解释器选择**：扩展模块与 Python 版本绑定（cp314 的 `.pyd` 不能在 3.12 上 import）。configure 优先用 `-DPython_EXECUTABLE=...`，否则取 PATH 上第一个 `python3.14`/`python3`/`python`。pybind11 ≥ 3.0 才支持 Python 3.14（当前 vcpkg 端口 3.0.1）。
-- **产物**：`build/<dir>/python/pyfvm*.pyd`；`_path.py` 按 `build/*/python` 扫描定位，示例和测试直接 `import _path` 后即可 `import pyfvm`。
+- **产物**：`build/<dir>/python/pyfvm*.pyd`（Linux 为 `.so`）；`_path.py` 优先采用环境变量 `FVM_PYFVM_DIR`，该目录必须已含当前解释器标签的扩展，否则抛 `RuntimeError`；未设置时扫描 `build/*/python`，只接受当前解释器标签（Windows `cp3XX`、Linux `cpython-3XX`）的扩展，并在多个匹配目录间取其中文件 mtime 最新者。自动定位失败时抛 `RuntimeError`，错误信息列出解释器版本、标签模式和已扫描目录。示例和测试直接 `import _path` 后即可 `import pyfvm`。
 
 ## API 一览
 
@@ -39,7 +39,7 @@ ctest --test-dir build/release-py --output-on-failure   # fvm_unit_tests + pyfvm
 core：
 
 - `CartesianMesh(nx, ny, x_min, y_min, x_max, y_max)`：`nx()` / `ny()` / `cell_count()` / `dx()` / `dy()` / `cell_volume(c)` / `cell_center(c)` / `cell_index(i, j)` / `cell_ij(c)`。
-- `ScalarField(mesh, name="")`、`VectorField(mesh, name="")`（`.u` / `.v` 返回 `ScalarField`）、`FaceFluxField(mesh, name="")`。
+- `ScalarField(mesh, name="")`、`VectorField(mesh, name="")`（`.u` / `.v` 返回 `ScalarField`；`size()` 返回单元数，`set_constant(v)` 同时设置两个分量）、`FaceFluxField(mesh, name="")`。
 - `f.to_numpy()`：**零拷贝可写视图**，cell 顺序 `j*nx+i`，可直接 `reshape(ny, nx)`；`f.value(i, j)` / `f.set(i, j, v)` 按单元读写；`set_zero()` / `set_constant(v)`。
 - `flux.to_numpy_x()` / `flux.to_numpy_y()`：面通量视图（x 面索引 `j*(nx+1)+i`，y 面 `j*nx+i`）；`flux.x(i, j)` / `flux.y(i, j)` / `flux.cell_imbalance(c)`。
 
@@ -60,7 +60,9 @@ io：
 约定与陷阱：
 
 - **生命周期**：C++ 场类持有网格引用，绑定用 `keep_alive` 让场对象钉住网格，正常使用无需关心。
-- **GIL**：长求解（`solve_simple` / `solve_piso` / 两个 `solve_*transport`）在 C++ 段内手动释放 GIL、返回前重新持有。不要用 pybind11 的 `call_guard<gil_scoped_release>` 包返回 numpy 数组或绑定对象的函数——返回值转换也发生在 GIL 释放区里，会段错误（本项目实测踩过）。
+- **网格一致性**：`solve_transport`、`solve_transient_transport`、`solve_simple`、`solve_piso`、`write_vti`、`interpolate_cell_velocity_flux`、`compute_mass_flux`、`initialize_mass_flux` 会检查字段实参与 `mesh` 实参是否来自同一个网格对象；不一致时抛 `ValueError`，消息中给出字段名（`write_vti` 用字典键，`Sc` / `Sp` 仅在非 `None` 时检查）。
+- **索引范围**：`ScalarField.value/set` 与 `mesh.cell_index` 要求 `i`、`j` 分别在 `[0, nx)`、`[0, ny)`；x 面的 `flux.x` 要求 `i`、`j` 分别在 `[0, nx]`、`[0, ny)`；y 面的 `flux.y` 要求 `i`、`j` 分别在 `[0, nx)`、`[0, ny]`；`mesh.cell_volume/cell_center/cell_ij` 与 `flux.cell_imbalance` 要求线性单元索引在 `[0, cell_count)`。越界抛 `IndexError`；负数因 `Index` 是无符号类型，在 pybind11 参数转换阶段就抛 `TypeError`，不会进入上述范围检查。
+- **GIL 与并发写**：长求解（`solve_simple` / `solve_piso` / 两个 `solve_*transport`）在 C++ 段内手动释放 GIL、返回前重新持有。求解运行期间，其他 Python 线程通过 `to_numpy()` / `to_numpy_x()` / `to_numpy_y()` 写**任何**字段的零拷贝视图都是数据竞争（未定义行为）；单线程算例不受影响。不要用 pybind11 的 `call_guard<gil_scoped_release>` 包返回 numpy 数组或绑定对象的函数——返回值转换也发生在 GIL 释放区里，会段错误（本项目实测踩过）。
 - **异常**：C++ 的 `std::exception`（非法边界 side、`Sp > 0`、闭域通量不平衡等）自动映射为 Python 异常。
 
 ## 示例（python/examples/）
