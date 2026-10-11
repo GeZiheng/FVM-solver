@@ -14,6 +14,25 @@ Both agents load the project skills from `.agents/skills` (Codex: project skill 
 
 There is no OpenFOAM skill any more: the cross-check mechanics live in the `openfoam` MCP server (below) and the conclusions live in `docs/numerical.md`.
 
+## Codex Subagent Policy
+
+The project parent uses `glm-5.3` (configured in `.codex/config.toml`; the ZAI
+provider remains user-level).  Use the `glm-5.3-flash` custom agents in
+`.codex/agents/` only for bounded delegation:
+
+- `fvm-explorer` / `fvm-reviewer` / `fvm-test-triage` — parallel read-only
+  exploration, structural diff review, and log triage.
+- `fvm-implementer` / `fvm-docs` — serialized write tasks with disjoint file
+  scopes after the parent's plan is approved.
+
+The parent owns requirements analysis, decomposition, architecture, numerical
+design decisions, conflict resolution, final integration, and final review of
+solver-sensitive code (SIMPLE/PISO, pressure correction, Rhie–Chow, flux
+reconstruction, and boundary flux logic).  A flash child must escalate
+ambiguity, repeated test failures, numerical-risk findings, or cross-module
+changes instead of deciding them itself.  Keep child outputs compact and never
+let parallel children edit overlapping files.
+
 ## Architecture
 
 ```
