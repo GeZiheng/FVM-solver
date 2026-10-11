@@ -5,11 +5,10 @@
 #include <memory>
 #include <string>
 
-using fvm::core::Scalar;
-using fvm::core::Vector;
-
 namespace fvm::math
 {
+using fvm::core::Scalar;
+using fvm::core::Vector;
 
 struct SolverConfig
 {

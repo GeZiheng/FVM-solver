@@ -1,0 +1,6 @@
+{
+  "name": "python3",
+  "version": "3.12.13",
+  "description": "Empty overlay port. The pybind11 port declares a dependency on vcpkg's python3, but pyfvm is built against the system interpreter via CMake FindPython (see the FVM_BUILD_PYTHON block in CMakeLists.txt), so vcpkg's python3 is never used. This overlay satisfies the dependency graph without building CPython from source.",
+  "homepage": "https://github.com/pybind/pybind11"
+}

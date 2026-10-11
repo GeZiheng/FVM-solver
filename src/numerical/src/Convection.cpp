@@ -140,6 +140,33 @@ void checkFluxCompatibility(const FaceFluxField& flux, Scalar relTol)
     }
 }
 
+bool hasDirichletPressure(const BoundaryField& bcP)
+{
+    for (int side = 0; side < 4; ++side)
+    {
+        if (bcP.get(side).type == BCType::Dirichlet)
+            return true;
+    }
+    return false;
+}
+
+void initializeMassFlux(const CartesianMesh& mesh,
+    const VectorField& velocity,
+    Scalar rho,
+    const BoundaryField& bcU,
+    const BoundaryField& bcV,
+    const BoundaryField& bcP,
+    FaceFluxField& flux)
+{
+    computeMassFlux(mesh, velocity, rho, bcU, bcV, flux);
+
+    // Pure-Neumann p is only compatible when the boundary fluxes balance;
+    // catch unbalanced velocity BCs here instead of solving an inconsistent
+    // system.
+    if (!hasDirichletPressure(bcP))
+        checkFluxCompatibility(flux);
+}
+
 void assembleConvection(const CartesianMesh& mesh,
     const FaceFluxField& flux,
     ConvectionScheme scheme,

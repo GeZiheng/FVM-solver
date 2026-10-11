@@ -5,13 +5,12 @@
 #include "Mesh.h"
 #include "Types.h"
 
+namespace fvm::numerical
+{
 using fvm::core::CartesianMesh;
 using fvm::core::Index;
 using fvm::core::Scalar;
 using fvm::core::ScalarField;
-
-namespace fvm::numerical
-{
 
 /// Cell-center gradient of `phi`, component `dir`, by the Gauss theorem:
 ///   grad(phi)_P = (1 / vol_P) * sum_f phi_f * n_f,dir * S_f

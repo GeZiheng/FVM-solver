@@ -5,10 +5,9 @@
 
 #include "Types.h"
 
-using fvm::core::Scalar;
-
 namespace fvm::numerical
 {
+using fvm::core::Scalar;
 
 /**
  * @brief Boundary condition type.

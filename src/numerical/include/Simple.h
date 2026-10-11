@@ -10,14 +10,14 @@
 
 #include <vector>
 
+namespace fvm::numerical
+{
 using fvm::core::CartesianMesh;
 using fvm::core::FaceFluxField;
+using fvm::core::Index;
 using fvm::core::Scalar;
 using fvm::core::ScalarField;
 using fvm::core::VectorField;
-
-namespace fvm::numerical
-{
 
 /// Configuration for the SIMPLE algorithm.
 struct SimpleConfig

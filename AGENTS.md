@@ -1,8 +1,8 @@
 # AGENTS.md
 
 ## Project State
-- **Status**: phases 1–4-1 complete; all 50 test cases (3271 assertions) pass. Everything described below is implemented and verified.
-- **Capabilities**: 2D uniform-Cartesian FVM (core/io), Eigen-backed sparse solvers (math), steady SIMPLE and transient PISO for incompressible NS on a collocated grid with Rhie–Chow interpolation, and theta-scheme transient scalar transport. A persistent `FaceFluxField` (`phi`) is the only convection input of the assemblers.
+- **Status**: phases 1–4-1 complete; `pyfvm` Python bindings (Phase 4 item 2) done. C++ suite: 50 test cases (3271 assertions) pass; binding suite (`pyfvm_tests`) passes. Everything described below is implemented and verified.
+- **Capabilities**: 2D uniform-Cartesian FVM (core/io), Eigen-backed sparse solvers (math), steady SIMPLE and transient PISO for incompressible NS on a collocated grid with Rhie–Chow interpolation, and theta-scheme transient scalar transport. A persistent `FaceFluxField` (`phi`) is the only convection input of the assemblers. Cases are written as Python scripts through the optional `pyfvm` bindings (pybind11, numpy-interop); there is no C++ demo executable any more.
 - **Solver structure**: the iteration is split into reusable `predictMomentum` / `correctPressure` primitives (`Momentum.h/.cpp`, `Pressure.h/.cpp`); `Simple`/`Piso` are thin driver loops. Extend those primitives rather than duplicating the loops.
 - **PISO**: working; `tests/test_piso.cpp` is enabled. Two invariants dominated the implementation — the per-corrector `refreshUHat` and the absolute-pressure form; both are spelled out under **Key Design Decisions** below and reproduce the OpenFOAM single-step fingerprints. Cross-check numbers and the ruled-out list: `docs/numerical.md`; run comparisons with the `openfoam` MCP server.
 
@@ -13,6 +13,28 @@ Both agents load the project skills from `.agents/skills` (Codex: project skill 
 - **`refactor-code`** — every planned change to this project's code goes through its four phases (plan → edit → review → docs). Phase 1 must present a plan and wait for the user's confirmation before any code is touched.
 
 There is no OpenFOAM skill any more: the cross-check mechanics live in the `openfoam` MCP server (below) and the conclusions live in `docs/numerical.md`.
+
+## Codex Subagent Policy
+
+The project parent uses `glm-5.3` (configured in `.codex/config.toml`; the ZAI provider remains user-level).  The `glm-5.3-flash` custom agents in `.codex/agents/` are the **default executors** for bounded, low-reasoning work.  Once a task falls into a class below, delegate it automatically — no extra user approval is needed beyond the plan confirmation the workflow already requires:
+
+| Task class | Default agent | Mode |
+| --- | --- | --- |
+| Bounded code edits under an approved plan (refactor Phase 2) | `fvm-implementer` | serialized, disjoint write scopes |
+| Structural/style review of a bounded diff (Phase 3) | `fvm-reviewer` | may run in parallel |
+| Documentation updates for an approved change (Phase 4) | `fvm-docs` | serialized |
+| Build / ctest / binding / OpenFOAM log triage | `fvm-test-triage` | may run in parallel |
+| Read-only fact-finding answering one specific question | `fvm-explorer` | may run in parallel |
+
+Skip delegation and let the parent do the work directly when the round trip would cost more than the task itself: single-file or single-hunk fixes, questions answerable by reading one or two files, or tasks that would need repeated parent-child clarification.  Delegation pays off when it saves parent context (large material distilled into a summary) or moves mechanical multi-file edits onto the flash model.
+
+The parent owns requirements analysis, decomposition, architecture, numerical
+design decisions, conflict resolution, final integration, and final review of
+solver-sensitive code (SIMPLE/PISO, pressure correction, Rhie–Chow, flux
+reconstruction, and boundary flux logic).  A flash child must escalate
+ambiguity, repeated test failures, numerical-risk findings, or cross-module
+changes instead of deciding them itself.  Keep child outputs compact and never
+let parallel children edit overlapping files.
 
 ## Architecture
 
@@ -29,7 +51,7 @@ src/
     Diffusion.h          — -div(gamma grad phi) assembly
     Convection.h         — div(F phi) from FaceFluxField; ConvectionScheme{Upwind,Central};
                            flux constructors interpolateCellVelocityFlux / computeMassFlux;
-                           closed-domain checkFluxCompatibility
+                           initializeMassFlux (+ hasDirichletPressure), checkFluxCompatibility
     TransportEquation.h  — steady conv-diff-source assembly + assembleTransientTransport (theta)
     TimeScheme.h         — TimeScheme{Euler,CrankNicolson}, TimeTerm (header-only)
     Momentum.h           — MomentumAssembly, assembleMomentum, MomentumPrediction,
@@ -40,17 +62,20 @@ src/
                            (computeUHat -> uHat = H/a_P, d = V/a_P); Pressure.cpp holds the
                            absolute-pressure equation, reference-cell elimination and the
                            flux/U/p reconstruction.
-  app/main.cpp           — demos: steady convection-diffusion; lid-driven cavity Re=100 (cavity.vti)
-
 tests/                   — doctest: mesh, field, flux, linalg, diffusion, convection, transport,
                            transient (time order), simple (Poiseuille, cavity Re=100),
                            piso (impulsive Couette, transient Poiseuille)
-docs/                    — module docs (Chinese): core.md, math.md, io.md, numerical.md, app.md
+python/                  — pyfvm bindings (optional, -DFVM_BUILD_PYTHON=ON): pyfvm.cpp (pybind11
+                           layer, snake_case API), _path.py (sys.path bootstrap), examples/
+                           (case scripts: convection_diffusion.py, cavity.py, impulsive_couette.py),
+                           tests/test_pyfvm.py (binding-contract tests = ctest entry pyfvm_tests),
+                           overlay-ports/python3 (empty vcpkg port: link against system Python)
+docs/                    — module docs (Chinese): core.md, math.md, io.md, numerical.md, python.md
 ```
 
 ## Naming Conventions
 - **Strict sub-namespaces**: `fvm::core`, `fvm::math`, `fvm::io`, `fvm::numerical`; each module has its own `include/` + `src/`.
-- Cross-module dependencies use `using` declarations for brevity (e.g. `math` uses `fvm::core::Scalar`).
+- Cross-module dependencies use `using` declarations for brevity (e.g. `math` uses `fvm::core::Scalar`). Declare them **inside the module's own namespace**, never at global scope: a global-scope `using` injects the alias into every translation unit that includes the header, hides missing includes (each header must list the aliases it actually uses), and collides with Eigen/pybind11 internals (measured: 269 MSVC C4459 warnings, all traced back to these declarations). A using-declaration imports one name only — it does not nest the other namespace.
 - **Dependency rule**: `core` → nothing; `math` → core (+ Eigen); `io` → core; `numerical` → core + math. Inside `numerical`: `Momentum` → Diffusion/Convection/GridOperators/TransportEquation/TimeScheme; `Pressure` → Momentum/GridOperators; `Simple`/`Piso` → Momentum/Pressure/Convection (they own the linear solvers). Do not introduce cycles.
 - **Source files stay pure ASCII** (MSVC C4819); docs are Chinese, code comments English.
 
@@ -60,7 +85,7 @@ docs/                    — module docs (Chinese): core.md, math.md, io.md, num
 - **`VCPKG_ROOT`** — the vcpkg installation.
 - **`Path`** — must contain the directory holding `ninja.exe`.
 
-**IMPORTANT for agents:** use the `build-and-test` MCP tool (see **MCP Servers** below) instead of shelling out to `cmake`/`ctest`/`ninja`. It configures into `build/<config>-agent` and runs **outside** the agent sandbox, which is required because vcpkg writes under `$VCPKG_ROOT` (outside this repository). Options: `config` Release/Debug, `target` all/fvm_solver/fvm_tests, `run` none/tests/solver/both (defaults: Release, all, tests). As part of a code-modification workflow, proceed with the defaults; when the user asks for a build/test directly, confirm the options first.
+**IMPORTANT for agents:** use the `build-and-test` MCP tool (see **MCP Servers** below) instead of shelling out to `cmake`/`ctest`/`ninja`. It configures into `build/<config>-agent` and runs **outside** the agent sandbox, which is required because vcpkg writes under `$VCPKG_ROOT` (outside this repository). Options: `config` Release/Debug, `target` all/fvm_tests/pyfvm, `run` none/tests, `python` true/false (defaults: Release, all, tests, false). `python=true` builds the `pyfvm` bindings (`-DFVM_BUILD_PYTHON=ON`) into the separate `build/<config>-agent-py` directory, and ctest there additionally runs `pyfvm_tests` (the Python binding tests). As part of a code-modification workflow, proceed with the defaults; when the user asks for a build/test directly, confirm the options first. Running a Python case script needs no sandbox escape — just `python python/examples/<name>.py`.
 
 Manual commands (humans, or when the MCP tool is unavailable):
 
@@ -68,8 +93,18 @@ Manual commands (humans, or when the MCP tool is unavailable):
 cmake -B build -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
 cmake --build build --config Release
 ctest --test-dir build --output-on-failure
-./build/Release/fvm_solver        # demos
 ```
+
+Python bindings (optional; adds the `pyfvm` module and the `pyfvm_tests` ctest entry):
+
+```bash
+cmake -B build/release-py -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake -DCMAKE_BUILD_TYPE=Release -DFVM_BUILD_PYTHON=ON
+cmake --build build/release-py
+ctest --test-dir build/release-py --output-on-failure
+python python/examples/cavity.py     # case scripts
+```
+
+The extension is version-locked to the interpreter: pass `-DPython_EXECUTABLE=...` to override, otherwise the first `python3.14`/`python3`/`python` on `Path` is used. See `docs/python.md` for the vcpkg feature/overlay mechanics and the API.
 
 ## MCP Servers
 
@@ -77,7 +112,7 @@ Two project-scoped servers, both plain-stdlib Python speaking newline-delimited 
 
 ### build-and-test (`.agents/mcp/build_and_test_server.py`)
 
-One tool, `build_and_test(config, target, run)`: configure (`cmake -G Ninja`) + build + optionally run ctest and/or the demo. Always use it instead of shelling out to `cmake`/`ctest`/`ninja` — the opencode bash permission block denies those commands, and in Codex this instruction is the rule. Options, defaults (Release / all / tests) and when to confirm them with the user: see **Build Instructions** above.
+One tool, `build_and_test(config, target, run, python)`: configure (`cmake -G Ninja`) + build + optionally run ctest. Always use it instead of shelling out to `cmake`/`ctest`/`ninja` — the opencode bash permission block denies those commands, and in Codex this instruction is the rule. Options, defaults (Release / all / tests / false) and when to confirm them with the user: see **Build Instructions** above. It deliberately does **not** run arbitrary scripts: Python case scripts run fine inside the agent sandbox, and regression coverage for the bindings lives in `pyfvm_tests`.
 
 ### openfoam (`.agents/mcp/openfoam_server.py`)
 
@@ -102,23 +137,25 @@ In Codex every `openfoam` tool except `list_cases` is `approval_mode = "approve"
 - **Flux is first-class** (OpenFOAM `phi`): assemblers take a `FaceFluxField` (positive along +x/+y, boundary outward fluxes signed) instead of a velocity field; build it with `interpolateCellVelocityFlux` or `computeMassFlux`.
 - **Source terms follow Patankar**: `S(phi) = Sc + Sp*phi` per unit volume, `Sp <= 0` enforced by exception.
 - **`SolverConfig::tolerance` is a relative residual** `|Ax-b|/|b|`. The BiCGSTAB wrapper scales Eigen's absolute tolerance by `|b|` and checks convergence itself — do not rely on `solver.info()` for it.
-- **SIMPLE (collocated + Rhie-Chow)**: momentum reuses the convection/diffusion operators; the pressure-gradient source is the Gauss form `sum_f p_f n S_f` (so Dirichlet pressure values drive the flow). The relaxed diagonal is read from a finalized matrix copy; `d = V/a_P` feeds the Rhie-Chow faces (x-faces use the u-equation diagonal, y-faces the v-equation one). During assembly the persistent flux is overwritten with the pressure-free `phiHbyA = rho S uHat_f` and then corrected in place (`F_f = phiHbyA_f - C(p_N - p_P)`; Dirichlet-p boundaries `- Cb(p_b - p_P)`), exactly OpenFOAM's `phi = phiHbyA - pEqn.flux()`.
+- **SIMPLE (collocated + Rhie-Chow)**: momentum reuses the convection/diffusion operators; the pressure-gradient source is the Gauss form `sum_f p_f n S_f` (so Dirichlet pressure values drive the flow). The relaxed diagonal is read from a finalized matrix copy; `d = V/a_P` feeds the Rhie-Chow faces (x-faces use the u-equation diagonal, y-faces the v-equation one). During assembly the persistent flux is overwritten with the pressure-free `phiHbyA = rho S uHat_f` and then corrected in place (`F_f = phiHbyA_f - C(p_N - p_P)`; Dirichlet-p boundaries `- Cb(p_b - p_P)`), exactly OpenFOAM's `phi = phiHbyA - pEqn.flux()`. The per-face coefficients `C`/`Cb` are derived once during the assembly and stored per face; the correction reads them back instead of recomputing them, so the equation and its correction cannot drift apart.
 - **Pressure equation is assembled for the absolute pressure**: `A p = b` with `b = -sum_f outward(phiHbyA_f) + sum_Dirichlet C_b p_b`. `p' = p - p_old` solves the same system as the old incremental form (`b - A p_old = -m`); the absolute form avoids forming that cancelling difference and needs no mirror (`Dirichlet -> 0`) pressure BCs. Getting the RHS sign wrong creates positive feedback and blows up.
 - **Boundary face fluxes must be same-sourced as the interior**: the boundary `phiHbyA` uses the pressure-free `uHat` (or the Dirichlet velocity value) with no pressure term; the Dirichlet-p value enters the RHS as `C_b p_b` and the pressure term is applied to the flux afterwards. Using `uStar` (cell-centred pressure gradient) there is inconsistent with the equation and diverges.
 - **Pure-Neumann pressure uses reference-cell elimination**: drop cell 0 and pin it to its previous value (`p_0 = p_old(0)`, the old `p'_0 = 0`), moving the dropped column into its neighbours' RHS — this keeps the CG system well-conditioned SPD. Closed domains must satisfy `checkFluxCompatibility` at entry (adjustPhi-style, throws on unbalanced velocity BCs), and `correctPressure` rebalances `phiHbyA` on every corrector (pure-Neumann only, with the same adjustment reaching the RHS) so the system stays solvable. No-op for all-Dirichlet-velocity domains (e.g. the cavity).
 - **Time integration is an implicit theta scheme** (`TimeScheme` + `TimeTerm{rho, dt, scheme}`; `dt <= 0` means steady). The ddt term is assembled inside the shared momentum operator, so SIMPLE and PISO share it; `solveSimple` passes `TimeTerm{}` (bit-for-bit unchanged). `assembleTransientTransport` uses the same formula.
 - **Transient momentum requires `relaxation == 1`** (under-relaxation is a steady SIMPLE device), and the ddt diagonal `rho V/dt` is part of `a_P`, so `d = V/a_P` is transient-consistent (OpenFOAM `rAU = 1/UEqn.A()`).
 - **`correctPressure` rebuilds the flux and the velocity from the *unrelaxed* solved pressure**: `u = uHat - d grad(p_solved)` using the physical p BCs. For SIMPLE this equals the old `u* - d grad(p')` (since `uHat = u* + d grad(p_old)`), so the stored pressure may be relaxed (`p += relaxationP*(p_solved - p_old)`) while the velocity takes the full correction; for PISO `relaxationP == 1`, so the reconstruction accumulates across correctors. Note OpenFOAM's steady path instead calls `p.relax()` *before* `U = HbyA - rAU*grad(p)` (its velocity inherits the relaxation, its flux does not); we keep the Patankar variant. There is no `cumulativeVelocityCorrection` flag any more: absolute pressure plus the unrelaxed reconstruction covers both drivers, and no ordering constraint between the pressure update and the velocity reconstruction remains (`p_solved` is an immutable local field).
-- **SIMPLE/PISO reuse the same predictor/corrector** (`solveSimple` = steady loop; `solvePiso` = one predictor + `nCorrectors` correctors, no under-relaxation). Do not duplicate the corrector logic. **PISO must refresh the Rhie-Chow data between correctors**: `refreshUHat(pred, velocity)` before every corrector after the first. Skipping it makes the loop reach its own fixed point after one sweep (algebraically `nCorrectors = 1`) and the run diverges — as OpenFOAM does with a single corrector.
+- **SIMPLE/PISO reuse the same predictor/corrector** (`solveSimple` = steady loop; `solvePiso` = one predictor + `nCorrectors` correctors, no under-relaxation). Do not duplicate the corrector logic. **PISO must refresh the Rhie-Chow data between correctors**: `refreshUHat(pred, velocity)` before every corrector after the first. Skipping it makes the loop reach its own fixed point after one sweep (algebraically `nCorrectors = 1`) and the run diverges — as OpenFOAM does with a single corrector. `solvePiso` therefore rejects `nCorrectors < 2`; the OpenFOAM-side cross-check still exercises `nCorrectors = 1` against the reference solver, which is a different code path.
 
 ## Dependencies
 - `eigen3` — sparse linear algebra
 - `doctest` — unit testing (header-only)
+- `pybind11` — Python bindings (optional; only via the vcpkg `python` manifest feature when `FVM_BUILD_PYTHON=ON`)
 
 ## Next Phase (Phase 4)
 Agreed roadmap, in order:
 1. ✅ **Unsteady terms + PISO** — done: transient theta scheme (time order verified), transient transport, the shared `Momentum`/`Pressure`/`GridOperators` primitives and `solvePiso`; `tests/test_piso.cpp` enabled. Cross-check numbers and the ruled-out list: `docs/numerical.md`.
-2. **`pyfvm` Python bindings** (pybind11 via vcpkg, optional target) — case setup and post-processing from Python/numpy, replacing any JSON-config idea; the `fvm_solver` exe stays a smoke demo. PISO is complete, so the API-stability gate is satisfied; review the solver API once before starting.
+2. ✅ **`pyfvm` Python bindings** — done: pybind11 (vcpkg `python` feature, `FVM_BUILD_PYTHON=ON`, optional), snake_case API over mesh/fields/BC/SIMPLE/PISO/transport/vti with zero-copy numpy views; case scripts in `python/examples/`; binding-contract tests in `python/tests/` (ctest entry `pyfvm_tests`); the C++ `fvm_solver` demo exe was removed — cases are Python scripts now. Details: `docs/python.md`.
 3. **Arbitrary mesh input** (Gmsh `.msh` first) — the main motivation for the Python front-end; may come with non-orthogonal/skew mesh support.
+4. **Application tests for the example cases** — run `python/examples/` scripts as a separate test tier (distinct from the unit tests), e.g. as labelled ctest entries. Agreed in principle, not scheduled.
 
 Deferred/rejected: per-case executables under `examples/` (cumbersome), JSON case config (redundant with Python scripting), per-module CMakeLists/tests/docs split (revisit only if a module is reused externally or build times degrade). AMGCL/Hypre backends remain candidates for larger meshes.

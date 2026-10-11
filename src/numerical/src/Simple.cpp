@@ -30,22 +30,10 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
 
     const Index nCells = mesh.cellCount();
 
-    // Initialize the persistent flux field from the velocity field and
-    // its BCs (OpenFOAM createPhi).
-    computeMassFlux(mesh, velocity, rho, bcU, bcV, flux);
-
-    // With pure Neumann pressure BCs the pressure-correction equation is
-    // only compatible when the boundary fluxes sum to zero (OpenFOAM
-    // adjustPhi); catch unbalanced velocity BCs here instead of solving
-    // an inconsistent system.
-    bool hasDirichletP = false;
-    for (int side = 0; side < 4; ++side)
-    {
-        if (bcP.get(side).type == BCType::Dirichlet)
-            hasDirichletP = true;
-    }
-    if (!hasDirichletP)
-        checkFluxCompatibility(flux);
+    // Initialize the persistent flux field from the velocity field and its
+    // BCs (OpenFOAM createPhi) and fail fast on a closed domain whose
+    // boundary fluxes do not balance (OpenFOAM adjustPhi).
+    initializeMassFlux(mesh, velocity, rho, bcU, bcV, bcP, flux);
 
     auto momSolver = createEigenBiCGSTAB(config.solverConfig);
     auto pSolver = createEigenCG(config.solverConfig);

@@ -11,21 +11,22 @@
 
 #include <vector>
 
+namespace fvm::numerical
+{
 using fvm::core::CartesianMesh;
 using fvm::core::FaceFluxField;
+using fvm::core::Index;
 using fvm::core::Scalar;
 using fvm::core::ScalarField;
 using fvm::core::VectorField;
-
-namespace fvm::numerical
-{
 
 /// Configuration for the PISO transient solver.
 struct PisoConfig
 {
     Scalar dt = 0.01;    ///< Time-step size (> 0).
     int nSteps = 100;    ///< Number of time steps to advance.
-    int nCorrectors = 2; ///< Pressure correctors per step (>= 2 for stability).
+    int nCorrectors = 2; ///< Pressure correctors per step; values below 2 are
+                         ///< rejected (a single corrector stalls and diverges).
     TimeScheme timeScheme = TimeScheme::Euler; ///< ddt scheme.
     ConvectionScheme scheme = ConvectionScheme::Upwind;
     fvm::math::SolverConfig solverConfig = {};

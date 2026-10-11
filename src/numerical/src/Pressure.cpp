@@ -1,5 +1,6 @@
-#include "Pressure.h"
+#include "Convection.h"
 #include "GridOperators.h"
+#include "Pressure.h"
 
 #include <cmath>
 #include <stdexcept>
@@ -54,13 +55,7 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
     // eliminate reference cell 0 and keep its value fixed (its continuity
     // equation is redundant). Any Dirichlet p side makes the system definite
     // -> keep all cells.
-    bool hasDirichletP = false;
-    for (int side = 0; side < 4; ++side)
-    {
-        if (bcP.get(side).type == BCType::Dirichlet)
-            hasDirichletP = true;
-    }
-    const bool pinReference = !hasDirichletP;
+    const bool pinReference = !hasDirichletPressure(bcP);
     const Index nP = pinReference ? nCells - 1 : nCells;
     const auto rowOf = [pinReference](Index cell) -> Index
     {
@@ -91,6 +86,15 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
     massImbalance.setZero();
     rhsExtra.setZero();
 
+    // Pressure coefficient of every face, filled in during the assembly below
+    // and reused by the flux correction.  Keeping the single derivation is what
+    // makes the equation and its correction provably consistent; a face with no
+    // pressure term (Neumann p) keeps 0.
+    Vector Cx(flux.xFaceCount());
+    Vector Cy(flux.yFaceCount());
+    Cx.setZero();
+    Cy.setZero();
+
     // Value of the eliminated reference cell (kept at its previous level).
     const Scalar pRefValue = pressure(0);
 
@@ -117,11 +121,18 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
                 const Scalar F = rho * Sf * uHatF; // phiHbyA: no pressure
                 const Scalar C = rho * dF * Sf / delta;
 
-                // Store phiHbyA (positive P -> N, stored convention).
+                // Store phiHbyA (positive P -> N, stored convention) and the
+                // matching pressure coefficient.
                 if (face == BoundaryField::East)
+                {
                     flux.x(iP + 1, jP) = F;
+                    Cx(flux.xIndex(iP + 1, jP)) = C;
+                }
                 else
+                {
                     flux.y(iP, jP + 1) = F;
+                    Cy(flux.yIndex(iP, jP + 1)) = C;
+                }
 
                 massImbalance(P) += F;
                 massImbalance(N) -= F;
@@ -158,27 +169,37 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
                 const Scalar Fb = rho * ub * Sf;
                 massImbalance(P) += Fb;
 
-                // Outward flux (west/south are stored along +x/+y -> sign).
+                // Dirichlet-p: C_b scales (p_b - p_P) in the corrected flux.
+                // Derived once here; the correction after the solve reuses it.
+                const Scalar Cb = (pCond.type == BCType::Dirichlet)
+                                      ? rho * dC(P) * Sf
+                                            / mesh.cellToFaceDistance(face)
+                                      : 0.0;
+
+                // Outward flux (west/south are stored along +x/+y -> sign),
+                // together with the matching pressure coefficient.
                 switch (face)
                 {
                     case BoundaryField::East:
                         flux.x(iP + 1, jP) = Fb;
+                        Cx(flux.xIndex(iP + 1, jP)) = Cb;
                         break;
                     case BoundaryField::West:
                         flux.x(iP, jP) = -Fb;
+                        Cx(flux.xIndex(iP, jP)) = Cb;
                         break;
                     case BoundaryField::North:
                         flux.y(iP, jP + 1) = Fb;
+                        Cy(flux.yIndex(iP, jP + 1)) = Cb;
                         break;
                     default: // South
                         flux.y(iP, jP) = -Fb;
+                        Cy(flux.yIndex(iP, jP)) = Cb;
                         break;
                 }
 
                 if (pCond.type == BCType::Dirichlet)
                 {
-                    const Scalar Cb
-                        = rho * dC(P) * Sf / mesh.cellToFaceDistance(face);
                     if (!isReference(P))
                         pSys.A.insert(rowOf(P), rowOf(P), Cb);
                     rhsExtra(P) += Cb * pCond.value;
@@ -308,16 +329,13 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
 
     // ---- Corrections -------------------------------------------------
     // 1. Conservative flux correction (OpenFOAM pEqn.flux):
-    //   F_f = phiHbyA_f - C (p_N - p_P) on interior faces, and
-    //   F_b = phiHbyA_b - Cb (p_b - p_P) on Dirichlet-p faces (stored sign on
+    //   F_f = phiHbyA_f - C_f (p_N - p_P) on interior faces, and
+    //   F_b = phiHbyA_b - C_b (p_b - p_P) on Dirichlet-p faces (stored sign on
     //   west/south is flipped).  Each cell's net outflow then equals the linear
-    //   solver's residual.
+    //   solver's residual.  The coefficients are the ones stored by the
+    //   assembly above, never recomputed here.
     const Index nx = mesh.nx();
     const Index ny = mesh.ny();
-    const Scalar Sx = mesh.faceArea(BoundaryField::East);
-    const Scalar Sy = mesh.faceArea(BoundaryField::North);
-    const Scalar hx = mesh.cellToFaceDistance(BoundaryField::East);
-    const Scalar hy = mesh.cellToFaceDistance(BoundaryField::North);
 
     for (Index j = 0; j < ny; ++j)
     {
@@ -325,9 +343,23 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
         {
             const Index P = mesh.cellIndex(i - 1, j);
             const Index N = mesh.cellIndex(i, j);
-            const Scalar dF = 0.5 * (dU(P) + dU(N));
-            const Scalar C = rho * dF * Sx / mesh.dx();
-            flux.x(i, j) -= C * (pNew(N) - pNew(P));
+            flux.x(i, j) -= Cx(flux.xIndex(i, j)) * (pNew(N) - pNew(P));
+        }
+
+        // Boundary x-faces with a Dirichlet p.  A west face is stored along
+        // -x while (p_b - p_P) is already the outward sense, so its correction
+        // is added rather than subtracted.
+        if (bcP.get(BoundaryField::West).type == BCType::Dirichlet)
+        {
+            const Scalar pb = bcP.get(BoundaryField::West).value;
+            const Index P = mesh.cellIndex(0, j);
+            flux.x(0, j) += Cx(flux.xIndex(0, j)) * (pb - pNew(P));
+        }
+        if (bcP.get(BoundaryField::East).type == BCType::Dirichlet)
+        {
+            const Scalar pb = bcP.get(BoundaryField::East).value;
+            const Index P = mesh.cellIndex(nx - 1, j);
+            flux.x(nx, j) -= Cx(flux.xIndex(nx, j)) * (pb - pNew(P));
         }
     }
     for (Index j = 1; j < ny; ++j)
@@ -336,39 +368,18 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
         {
             const Index P = mesh.cellIndex(i, j - 1);
             const Index N = mesh.cellIndex(i, j);
-            const Scalar dF = 0.5 * (dV(P) + dV(N));
-            const Scalar C = rho * dF * Sy / mesh.dy();
-            flux.y(i, j) -= C * (pNew(N) - pNew(P));
+            flux.y(i, j) -= Cy(flux.yIndex(i, j)) * (pNew(N) - pNew(P));
         }
     }
-    if (bcP.get(BoundaryField::West).type == BCType::Dirichlet)
-    {
-        const Scalar pb = bcP.get(BoundaryField::West).value;
-        for (Index j = 0; j < ny; ++j)
-        {
-            const Index P = mesh.cellIndex(0, j);
-            const Scalar Cb = rho * dU(P) * Sx / hx;
-            flux.x(0, j) += Cb * (pb - pNew(P)); // outward = -x(0, j)
-        }
-    }
-    if (bcP.get(BoundaryField::East).type == BCType::Dirichlet)
-    {
-        const Scalar pb = bcP.get(BoundaryField::East).value;
-        for (Index j = 0; j < ny; ++j)
-        {
-            const Index P = mesh.cellIndex(nx - 1, j);
-            const Scalar Cb = rho * dU(P) * Sx / hx;
-            flux.x(nx, j) -= Cb * (pb - pNew(P)); // outward = +x(nx, j)
-        }
-    }
+
+    // Boundary y-faces with a Dirichlet p (same inward-sign treatment).
     if (bcP.get(BoundaryField::South).type == BCType::Dirichlet)
     {
         const Scalar pb = bcP.get(BoundaryField::South).value;
         for (Index i = 0; i < nx; ++i)
         {
             const Index P = mesh.cellIndex(i, 0);
-            const Scalar Cb = rho * dV(P) * Sy / hy;
-            flux.y(i, 0) += Cb * (pb - pNew(P)); // outward = -y(i, 0)
+            flux.y(i, 0) += Cy(flux.yIndex(i, 0)) * (pb - pNew(P));
         }
     }
     if (bcP.get(BoundaryField::North).type == BCType::Dirichlet)
@@ -377,8 +388,7 @@ CorrectorResult correctPressure(const CartesianMesh& mesh,
         for (Index i = 0; i < nx; ++i)
         {
             const Index P = mesh.cellIndex(i, ny - 1);
-            const Scalar Cb = rho * dV(P) * Sy / hy;
-            flux.y(i, ny) -= Cb * (pb - pNew(P)); // outward = +y(i, ny)
+            flux.y(i, ny) -= Cy(flux.yIndex(i, ny)) * (pb - pNew(P));
         }
     }
 

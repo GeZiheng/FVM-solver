@@ -17,6 +17,17 @@
 # servers with the project as cwd), so this file is portable across machines as
 # long as `python` is on PATH.
 
+# Parent/main-agent model for this repository.  The ZAI provider and its
+# credentials stay in the user-level ~/.codex/config.toml because project
+# config may not change provider credentials or provider definitions.
+#
+# Project-scoped custom subagents live in .codex/agents/*.toml and explicitly
+# select glm-5.3-flash for low-cost delegation.  The flash model catalog has
+# no selectable reasoning-effort levels, so those agent files intentionally
+# leave model_reasoning_effort unset.
+model = "glm-5.3"
+model_reasoning_effort = "high"
+
 [mcp_servers.build-and-test]
 command = "python"
 args = ['.agents/mcp/build_and_test_server.py']

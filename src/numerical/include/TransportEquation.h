@@ -9,6 +9,8 @@
 #include "TimeScheme.h"
 #include "Types.h"
 
+namespace fvm::numerical
+{
 using fvm::core::CartesianMesh;
 using fvm::core::Index;
 using fvm::core::Scalar;
@@ -16,9 +18,6 @@ using fvm::core::ScalarField;
 using fvm::core::Vector;
 using fvm::core::VectorField;
 using fvm::math::SparseMatrix;
-
-namespace fvm::numerical
-{
 
 /// Assembled linear system A*phi = b (unfinalized matrix).
 struct EquationSystem

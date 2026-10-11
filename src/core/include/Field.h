@@ -131,6 +131,17 @@ public:
         v_.setZero();
     }
 
+    Index size() const
+    {
+        return u_.size();
+    }
+
+    void setConstant(Scalar value)
+    {
+        u_.setConstant(value);
+        v_.setConstant(value);
+    }
+
 private:
     const CartesianMesh& mesh_;
     std::string name_;

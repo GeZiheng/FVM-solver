@@ -29,26 +29,20 @@ PisoResult solvePiso(const CartesianMesh& mesh,
     {
         throw std::invalid_argument("solvePiso: nSteps must be positive");
     }
-    if (config.nCorrectors <= 0)
+    if (config.nCorrectors < 2)
     {
-        throw std::invalid_argument("solvePiso: nCorrectors must be positive");
+        throw std::invalid_argument(
+            "solvePiso: nCorrectors must be >= 2; with a single corrector the "
+            "PISO loop reaches its own fixed point after one sweep and "
+            "diverges (see docs/numerical.md)");
     }
 
     const Index nCells = mesh.cellCount();
 
     // Initialize the persistent flux from the velocity field and its BCs
-    // (OpenFOAM createPhi). Pure-Neumann pressure is only compatible when
-    // the boundary fluxes balance (OpenFOAM adjustPhi).
-    computeMassFlux(mesh, velocity, rho, bcU, bcV, flux);
-
-    bool hasDirichletP = false;
-    for (int side = 0; side < 4; ++side)
-    {
-        if (bcP.get(side).type == BCType::Dirichlet)
-            hasDirichletP = true;
-    }
-    if (!hasDirichletP)
-        checkFluxCompatibility(flux);
+    // (OpenFOAM createPhi), failing fast on a closed domain whose boundary
+    // fluxes do not balance (OpenFOAM adjustPhi).
+    initializeMassFlux(mesh, velocity, rho, bcU, bcV, bcP, flux);
 
     auto momSolver = fvm::math::createEigenBiCGSTAB(config.solverConfig);
     auto pSolver = fvm::math::createEigenCG(config.solverConfig);

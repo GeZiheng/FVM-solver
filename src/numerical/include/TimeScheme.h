@@ -2,10 +2,9 @@
 
 #include "Types.h"
 
-using fvm::core::Scalar;
-
 namespace fvm::numerical
 {
+using fvm::core::Scalar;
 
 /**
  * @brief Implicit time-integration scheme for the theta family.
