@@ -12,3 +12,6 @@ vcpkg_installed/
 
 # python bytecode
 __pycache__/
+
+# solver output written by python/examples/ scripts to the CWD
+*.vti

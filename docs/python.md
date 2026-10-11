@@ -67,7 +67,7 @@ io：
 
 ## 示例（python/examples/）
 
-三个算例即原 C++ demo 与 PISO 测试的 Python 版，直接 `python python/examples/<name>.py` 运行，vti 写到当前目录：
+三个算例即原 C++ demo 与 PISO 测试的 Python 版，直接 `python python/examples/<name>.py` 运行，vti 写到 `python/examples/output/<算例名>/`，与当前工作目录无关：
 
 - **convection_diffusion.py**：单位方域稳态对流-扩散。无散度回流速度场（流函数 ψ = sin(πx)·sin(πy) 派生），γ = 0.01（Pe ~ 100），西墙 T=1、东墙 T=0、南北绝热。演示 `solve_transport` 与 numpy 填场。
 - **cavity.py**：顶盖驱动方腔流 Re=100（64×64，SIMPLE，relaxation_u=0.7 / relaxation_p=0.3），约 1000 次外迭代收敛；输出 `cavity.vti` 可在 ParaView 看主涡与角隅二次涡。

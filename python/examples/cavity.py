@@ -6,6 +6,7 @@ Run:  python python/examples/cavity.py
 
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import _path  # noqa: F401,E402
@@ -52,9 +53,12 @@ def main():
     speed = np.hypot(velocity.u.to_numpy(), velocity.v.to_numpy())
     print(f"max speed: {speed.max():.4f}")
 
-    fvm.write_vti("cavity.vti", mesh,
+    output_dir = Path(__file__).resolve().parent / "output" / "cavity"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "cavity.vti"
+    fvm.write_vti(str(output_path), mesh,
                   {"pressure": pressure}, {"velocity": velocity})
-    print("Wrote cavity.vti")
+    print(f"Wrote {output_path}")
 
 
 if __name__ == "__main__":

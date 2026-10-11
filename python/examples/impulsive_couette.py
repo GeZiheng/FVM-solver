@@ -9,6 +9,7 @@ Run:  python python/examples/impulsive_couette.py
 
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import _path  # noqa: F401,E402
@@ -67,9 +68,12 @@ def main():
           f"max |u - u_exact| = {max_err:.4f}")
     print(f"final continuity residual: {result.history[-1].continuity:.3e}")
 
-    fvm.write_vti("couette.vti", mesh,
+    output_dir = Path(__file__).resolve().parent / "output" / "impulsive_couette"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "couette.vti"
+    fvm.write_vti(str(output_path), mesh,
                   {"pressure": pressure}, {"velocity": velocity})
-    print("Wrote couette.vti")
+    print(f"Wrote {output_path}")
 
 
 if __name__ == "__main__":
