@@ -16,14 +16,17 @@ There is no OpenFOAM skill any more: the cross-check mechanics live in the `open
 
 ## Codex Subagent Policy
 
-The project parent uses `glm-5.3` (configured in `.codex/config.toml`; the ZAI
-provider remains user-level).  Use the `glm-5.3-flash` custom agents in
-`.codex/agents/` only for bounded delegation:
+The project parent uses `glm-5.3` (configured in `.codex/config.toml`; the ZAI provider remains user-level).  The `glm-5.3-flash` custom agents in `.codex/agents/` are the **default executors** for bounded, low-reasoning work.  Once a task falls into a class below, delegate it automatically — no extra user approval is needed beyond the plan confirmation the workflow already requires:
 
-- `fvm-explorer` / `fvm-reviewer` / `fvm-test-triage` — parallel read-only
-  exploration, structural diff review, and log triage.
-- `fvm-implementer` / `fvm-docs` — serialized write tasks with disjoint file
-  scopes after the parent's plan is approved.
+| Task class | Default agent | Mode |
+| --- | --- | --- |
+| Bounded code edits under an approved plan (refactor Phase 2) | `fvm-implementer` | serialized, disjoint write scopes |
+| Structural/style review of a bounded diff (Phase 3) | `fvm-reviewer` | may run in parallel |
+| Documentation updates for an approved change (Phase 4) | `fvm-docs` | serialized |
+| Build / ctest / binding / OpenFOAM log triage | `fvm-test-triage` | may run in parallel |
+| Read-only fact-finding answering one specific question | `fvm-explorer` | may run in parallel |
+
+Skip delegation and let the parent do the work directly when the round trip would cost more than the task itself: single-file or single-hunk fixes, questions answerable by reading one or two files, or tasks that would need repeated parent-child clarification.  Delegation pays off when it saves parent context (large material distilled into a summary) or moves mechanical multi-file edits onto the flash model.
 
 The parent owns requirements analysis, decomposition, architecture, numerical
 design decisions, conflict resolution, final integration, and final review of
