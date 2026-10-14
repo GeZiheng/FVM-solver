@@ -36,6 +36,14 @@ ambiguity, repeated test failures, numerical-risk findings, or cross-module
 changes instead of deciding them itself.  Keep child outputs compact and never
 let parallel children edit overlapping files.
 
+### Token discipline (the parent context is the scarce resource)
+
+- Run one refactor phase (or one bounded group of steps) per session; hand off state through `AGENTS.md` / `docs/`, never through conversation history.
+- Spawn flash sub-agents with a fresh context and a self-contained brief; never combine `fork_context` with `agent_type` (forked agents inherit the parent model and its whole context).
+- Sub-agent reports must stay compact (a few hundred words); long material is written to a scratch file (e.g. `.agents/notes/<topic>.md`) and the report returns only the summary plus the path.
+- Prefer an `fvm-explorer` distillation over the parent reading whole files; when the parent must read, read headers, signatures or narrow line windows, and run `git diff --stat` before any full diff.
+- `build_and_test` reports success compactly by default (`quiet=true`); pass `quiet=false` only when triaging a failure needs the full transcript.
+
 ## Architecture
 
 ```
@@ -92,7 +100,7 @@ docs/                    — module docs (Chinese): core.md, math.md, io.md, num
 - **`VCPKG_ROOT`** — the vcpkg installation.
 - **`Path`** — must contain the directory holding `ninja.exe`.
 
-**IMPORTANT for agents:** use the `build-and-test` MCP tool (see **MCP Servers** below) instead of shelling out to `cmake`/`ctest`/`ninja`. It configures into `build/<config>-agent` and runs **outside** the agent sandbox, which is required because vcpkg writes under `$VCPKG_ROOT` (outside this repository). Options: `config` Release/Debug, `target` all/fvm_tests/pyfvm, `run` none/tests, `python` true/false (defaults: Release, all, tests, false). `python=true` builds the `pyfvm` bindings (`-DFVM_BUILD_PYTHON=ON`) into the separate `build/<config>-agent-py` directory, and ctest there additionally runs `pyfvm_tests` (the Python binding tests). As part of a code-modification workflow, proceed with the defaults; when the user asks for a build/test directly, confirm the options first. Running a Python case script needs no sandbox escape — just `python python/examples/<name>.py`.
+**IMPORTANT for agents:** use the `build-and-test` MCP tool (see **MCP Servers** below) instead of shelling out to `cmake`/`ctest`/`ninja`. It configures into `build/<config>-agent` and runs **outside** the agent sandbox, which is required because vcpkg writes under `$VCPKG_ROOT` (outside this repository). Options: `config` Release/Debug, `target` all/fvm_tests/pyfvm, `run` none/tests, `python` true/false, `quiet` true/false (defaults: Release, all, tests, false, true). `python=true` builds the `pyfvm` bindings (`-DFVM_BUILD_PYTHON=ON`) into the separate `build/<config>-agent-py` directory, and ctest there additionally runs `pyfvm_tests` (the Python binding tests). Success returns a compact summary (`quiet=true`, the default); failures always include the full diagnostic output. As part of a code-modification workflow, proceed with the defaults; when the user asks for a build/test directly, confirm the options first. Running a Python case script needs no sandbox escape — just `python python/examples/<name>.py`.
 
 Manual commands (humans, or when the MCP tool is unavailable):
 
@@ -119,7 +127,7 @@ Two project-scoped servers, both plain-stdlib Python speaking newline-delimited 
 
 ### build-and-test (`.agents/mcp/build_and_test_server.py`)
 
-One tool, `build_and_test(config, target, run, python)`: configure (`cmake -G Ninja`) + build + optionally run ctest. Always use it instead of shelling out to `cmake`/`ctest`/`ninja` — the opencode bash permission block denies those commands, and in Codex this instruction is the rule. Options, defaults (Release / all / tests / false) and when to confirm them with the user: see **Build Instructions** above. It deliberately does **not** run arbitrary scripts: Python case scripts run fine inside the agent sandbox, and regression coverage for the bindings lives in `pyfvm_tests`.
+One tool, `build_and_test(config, target, run, python, quiet)`: configure (`cmake -G Ninja`) + build + optionally run ctest. Always use it instead of shelling out to `cmake`/`ctest`/`ninja` — the opencode bash permission block denies those commands, and in Codex this instruction is the rule. Options, defaults (Release / all / tests / false / quiet=true) and when to confirm them with the user: see **Build Instructions** above. `quiet=true` (default) keeps success reports to a two-line summary to protect the caller's context; failures always return the full transcript. It deliberately does **not** run arbitrary scripts: Python case scripts run fine inside the agent sandbox, and regression coverage for the bindings lives in `pyfvm_tests`.
 
 ### openfoam (`.agents/mcp/openfoam_server.py`)
 

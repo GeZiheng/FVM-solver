@@ -20,12 +20,13 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
 MAX_OUTPUT_CHARS = 8000
 SERVER_NAME = "build-and-test"
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = "1.2.0"
 # Used only when the client does not request a version; otherwise the
 # requested version is echoed back so the client keeps the negotiation.
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
@@ -56,7 +57,10 @@ TOOL_DESCRIPTION = (
     "(config, target, run, python) with the user first unless they already "
     "stated them. "
     "When building as part of a code modification workflow, proceed with the "
-    "defaults (config=Release, target=all, run=tests, python=false)."
+    "defaults (config=Release, target=all, run=tests, python=false). "
+    "Success reports are compact by default (quiet=true, a one-line summary); "
+    "pass quiet=false for the full configure/build/test transcript. "
+    "Failures always return the full diagnostic output."
 )
 
 TOOL_SCHEMA = {
@@ -93,6 +97,15 @@ TOOL_SCHEMA = {
                 "Build with -DFVM_BUILD_PYTHON=ON (pybind11 bindings) into "
                 "build/<config>-agent-py, separate from the default build. "
                 "ctest then also runs the Python binding tests."
+            ),
+        },
+        "quiet": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Compact success report (default true): build/test summary "
+                "only. Failures always include the full output. Pass "
+                "quiet=false to keep the full transcript on success."
             ),
         },
     },
@@ -338,6 +351,7 @@ def build_and_test(
     target: str = "all",
     run: str = "tests",
     python: bool = False,
+    quiet: bool = True,
 ) -> tuple[str, bool]:
     """Configure, build and optionally run the project.
 
@@ -358,6 +372,7 @@ def build_and_test(
     build_dir = REPO_ROOT / "build" / f"{config}-agent{'-py' if python else ''}"
     sections = [f"project: {REPO_ROOT}", f"build dir: {build_dir}"]
     failed = False
+    test_summary: str | None = None
 
     # --- Build environment ---
     # Agents launch us with a filtered environment, so activate MSVC here
@@ -460,6 +475,21 @@ def build_and_test(
                 sections.append(f"\nTESTS FAILED (exit code {code})")
             else:
                 sections.append("\nALL TESTS PASSED")
+                match = re.search(
+                    r"\d+% tests passed, \d+ tests? failed out of \d+", output
+                )
+                test_summary = (
+                    match.group(0) if match else "all tests passed"
+                )
+
+    if not failed and quiet:
+        summary = [
+            f"BUILD OK: {config}, target={target}, "
+            f"python={python} ({build_dir.name})",
+            f"TESTS: {test_summary or 'not run'}",
+            "RESULT: SUCCESS (quiet=true; full transcript with quiet=false)",
+        ]
+        return "\n".join(summary), True
 
     sections.append("\n" + ("RESULT: FAILED" if failed else "RESULT: SUCCESS"))
     return "\n".join(sections), not failed
@@ -532,6 +562,7 @@ def _handle(message: dict) -> None:
                 target=arguments.get("target") or "all",
                 run=arguments.get("run") or "tests",
                 python=bool(arguments.get("python")),
+                quiet=bool(arguments.get("quiet", True)),
             )
         except Exception as exc:  # never take the server down
             text, ok = f"build_and_test crashed: {exc!r}", False
