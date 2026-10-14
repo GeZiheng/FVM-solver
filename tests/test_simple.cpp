@@ -1,6 +1,7 @@
 #include "Field.h"
+#include "GridOperators.h"
 #include "LinearSolver.h"
-#include "Mesh.h"
+#include "CartesianMesh.h"
 #include "Momentum.h"
 #include "Simple.h"
 #include "TransportEquation.h"
@@ -46,7 +47,7 @@ TEST_CASE(
     ScalarField muField(mesh, "mu");
     muField.setConstant(mu);
 
-    BoundaryField bc;
+    BoundaryField bc(mesh);
     bc.set(BoundaryField::West, BCType::Dirichlet, 1.0);
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
@@ -66,7 +67,7 @@ TEST_CASE(
         bc,
         0,
         pressure,
-        BoundaryField{},
+        BoundaryField(mesh),
         1.0);
     mom.system.A.finalize();
 
@@ -91,7 +92,7 @@ TEST_CASE("Simple: under-relaxation preserves the residual at u_old")
     ScalarField muField(mesh, "mu");
     muField.setConstant(mu);
 
-    BoundaryField bc;
+    BoundaryField bc(mesh);
     bc.set(BoundaryField::West, BCType::Dirichlet, 1.0);
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
@@ -112,7 +113,7 @@ TEST_CASE("Simple: under-relaxation preserves the residual at u_old")
         bc,
         0,
         pressure,
-        BoundaryField{},
+        BoundaryField(mesh),
         alpha);
     mom.system.A.finalize();
 
@@ -138,7 +139,7 @@ TEST_CASE("Simple: under-relaxation preserves the residual at u_old")
         bc,
         0,
         pressure,
-        BoundaryField{},
+        BoundaryField(mesh),
         1.0);
     for (Index c = 0; c < mesh.cellCount(); ++c)
     {
@@ -180,7 +181,7 @@ TEST_CASE("Simple: under-relaxation preserves the residual at u_old")
         bc,
         0,
         pressure,
-        BoundaryField{},
+        BoundaryField(mesh),
         alpha);
     momFp.system.A.finalize();
     const Vector solFp = directSolver->solve(momFp.system.A, momFp.system.b);
@@ -208,8 +209,8 @@ TEST_CASE("Simple: pressure gradient enters only the full right-hand side")
         pressure(c) = x;
     }
 
-    BoundaryField bc; // zero-flux walls (keeps system simple)
-    BoundaryField bcP;
+    BoundaryField bc(mesh); // zero-flux walls (keeps system simple)
+    BoundaryField bcP(mesh);
     bcP.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bcP.set(BoundaryField::East, BCType::Dirichlet, 1.0);
     const Scalar vol = mesh.cellVolume(0);
@@ -262,15 +263,15 @@ TEST_CASE(
     const Scalar rho = 1.0;
     const Scalar mu = 1.0;
 
-    BoundaryField bcU; // west/east: zero-gradient (default Neumann 0)
+    BoundaryField bcU(mesh); // west/east: zero-gradient (default Neumann 0)
     bcU.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcV;
+    BoundaryField bcV(mesh);
     bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcP; // north/south: zero-gradient (default)
+    BoundaryField bcP(mesh); // north/south: zero-gradient (default)
     bcP.set(BoundaryField::West, BCType::Dirichlet, 1.0);
     bcP.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
@@ -333,7 +334,7 @@ TEST_CASE(
     Scalar outletFlux = 0.0;
     for (Index j = 0; j < mesh.ny(); ++j)
     {
-        outletFlux += flux.x(mesh.nx(), j);
+        outletFlux += flux[mesh.xFace(mesh.nx(), j)];
     }
     CHECK(outletFlux == doctest::Approx(rho / 12.0).epsilon(0.05));
 }
@@ -346,19 +347,19 @@ TEST_CASE("Simple: lid-driven cavity at Re=100 converges with recirculation")
     const Scalar uLid = 1.0;
     const Scalar mu = 0.01; // Re = rho U L / mu = 100
 
-    BoundaryField bcU; // walls default Neumann -> set all to no-slip
+    BoundaryField bcU(mesh); // walls default Neumann -> set all to no-slip
     bcU.set(BoundaryField::North, BCType::Dirichlet, uLid);
     bcU.set(BoundaryField::East, BCType::Dirichlet, 0.0);
     bcU.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcV;
+    BoundaryField bcV(mesh);
     bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::East, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcP; // zero-gradient everywhere (default)
+    BoundaryField bcP(mesh); // zero-gradient everywhere (default)
 
     VectorField velocity(mesh, "u");
     ScalarField pressure(mesh, "p");
@@ -397,10 +398,10 @@ TEST_CASE("Simple: lid-driven cavity at Re=100 converges with recirculation")
     // u > 0 near the lid, u < 0 near the bottom (vertical centerline);
     // v > 0 near the left wall, v < 0 near the right wall (horizontal
     // centerline).
-    CHECK(velocity.u()(n / 2, n - 2) > 0.0);
-    CHECK(velocity.u()(n / 2, 1) < 0.0);
-    CHECK(velocity.v()(2, n / 2) > 0.0);
-    CHECK(velocity.v()(n - 3, n / 2) < 0.0);
+    CHECK(velocity.u()(mesh.cellIndex(n / 2, n - 2)) > 0.0);
+    CHECK(velocity.u()(mesh.cellIndex(n / 2, 1)) < 0.0);
+    CHECK(velocity.v()(mesh.cellIndex(2, n / 2)) > 0.0);
+    CHECK(velocity.v()(mesh.cellIndex(n - 3, n / 2)) < 0.0);
 
     // The corrected flux field is conservative up to the pressure
     // solver's accuracy (relative tolerance 1e-9).
@@ -424,19 +425,19 @@ TEST_CASE("Simple: unbalanced closed-domain velocity BCs throw")
     const Scalar rho = 1.0;
     const Scalar mu = 0.01;
 
-    BoundaryField bcU;
+    BoundaryField bcU(mesh);
     bcU.set(BoundaryField::West, BCType::Dirichlet, 1.0); // inlet
     bcU.set(BoundaryField::East, BCType::Dirichlet, 0.0); // wall
     bcU.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcV;
+    BoundaryField bcV(mesh);
     bcV.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::East, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcP; // zero-gradient everywhere (default)
+    BoundaryField bcP(mesh); // zero-gradient everywhere (default)
 
     VectorField velocity(mesh, "u");
     ScalarField pressure(mesh, "p");

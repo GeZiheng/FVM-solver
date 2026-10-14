@@ -1,6 +1,6 @@
 #include "Field.h"
 #include "FluxField.h"
-#include "Mesh.h"
+#include "CartesianMesh.h"
 #include "Piso.h"
 #include <cmath>
 #include <doctest/doctest.h>
@@ -41,17 +41,17 @@ TEST_CASE("PISO: impulsive Couette start matches the exact series")
     const Scalar mu = 0.1; // nu = mu / rho = 0.1
     const Scalar nu = mu / rho;
 
-    BoundaryField bcU; // top lid drives; west/east zero-gradient (default)
+    BoundaryField bcU(mesh); // top lid drives; west/east zero-gradient (default)
     bcU.set(BoundaryField::North, BCType::Dirichlet, 1.0);
     bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcV; // no penetration on all sides
+    BoundaryField bcV(mesh); // no penetration on all sides
     bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcP; // zero-gradient everywhere (closed domain)
+    BoundaryField bcP(mesh); // zero-gradient everywhere (closed domain)
 
     VectorField velocity(mesh, "u");
     ScalarField pressure(mesh, "p");
@@ -104,7 +104,7 @@ TEST_CASE("PISO: impulsive Couette start matches the exact series")
     // The profile is bracketed by the wall speeds.
     for (Index j = 0; j < n; ++j)
     {
-        const Scalar u = velocity.u()(0, j);
+        const Scalar u = velocity.u()(mesh.cellIndex(0, j));
         CHECK(u >= -1e-6);
         CHECK(u <= 1.0 + 1e-6);
     }
@@ -119,15 +119,15 @@ TEST_CASE("PISO: transient pressure-driven channel reaches Poiseuille flow")
     const Scalar rho = 1.0;
     const Scalar mu = 1.0;
 
-    BoundaryField bcU; // west/east zero-gradient (default)
+    BoundaryField bcU(mesh); // west/east zero-gradient (default)
     bcU.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcV;
+    BoundaryField bcV(mesh);
     bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcP;
+    BoundaryField bcP(mesh);
     bcP.set(BoundaryField::West, BCType::Dirichlet, 1.0);
     bcP.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 

@@ -7,8 +7,8 @@
 
 namespace fvm::numerical
 {
-using fvm::core::CartesianMesh;
 using fvm::core::Index;
+using fvm::core::Mesh;
 using fvm::core::Scalar;
 using fvm::core::ScalarField;
 
@@ -20,7 +20,7 @@ using fvm::core::ScalarField;
 /// Shared operator: used by the momentum pressure-gradient source and by the
 /// pressure-correction velocity reconstruction.  Put future operators
 /// (divergence, ...) here too so other solvers can reuse them.
-Scalar cellGradient(const CartesianMesh& mesh,
+Scalar cellGradient(const Mesh& mesh,
     const ScalarField& phi,
     const BoundaryField& bc,
     Index P,

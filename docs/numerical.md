@@ -1,28 +1,45 @@
 # numerical 模块说明
 
-`fvm::numerical` 命名空间，实现标量输运方程的有限体积离散，将对流、扩散、源项和边界条件装配为线性系统 $A\phi = b$；并在此之上实现不可压缩 Navier-Stokes 方程：稳态用 SIMPLE，瞬态用 θ 时间格式 + PISO。这是求解器的数值核心。
+`fvm::numerical` 命名空间，实现标量输运方程的有限体积离散，将对流、扩散、源项和边界条件装配为线性系统 $A\phi = b$；并在此之上实现不可压缩 Navier-Stokes 方程：稳态用 SIMPLE，瞬态用 θ 时间格式 + PISO。这是求解器的数值核心。所有算子与 SIMPLE/PISO 核心均接收 `const Mesh&`，结构网格与非结构网格走同一条代码路径。
 
 控制方程（标量输运；动量方程见 [Momentum](#momentum动量方程装配与预测子)）：
 
 $$\nabla \cdot (\rho\, \mathbf{u}\, \phi) = \nabla \cdot (\gamma \nabla \phi) + S(\phi), \qquad S(\phi) = S_c + S_p\, \phi \quad \text{（单位体积源项）}$$
 
-对单元 $P$ 做有限体积积分后得到离散形式（$\sum_f$ 遍历 $P$ 的四个面）：
+对单元 $P$ 做有限体积积分后得到离散形式（$\sum_f$ 遍历 $P$ 的相邻面）：
 
 $$\underbrace{\sum_f F_f\, \phi_f}_{\text{对流通量}} = \underbrace{\sum_f D_f\, (\phi_N - \phi_P)}_{\text{扩散通量}} + \underbrace{(S_c + S_p\, \phi_P)\, V_P}_{\text{源项}}$$
+
+## 网格抽象与几何系数
+
+- **红线**：`src/numerical` 不得包含 `CartesianMesh.h`；数值代码只见 `const Mesh&`。装配循环为"所有全局内部面一次 + 按 patch 遍历所有边界面一次"，不再逐单元访问东/北/西/南。
+- **方向约定**：$\mathbf S_f$ 相对 owner 外向；内部 $\phi_f>0$ 表示 owner → neighbour，边界 $\phi_b$ 为 owner 外向通量。内部面矩阵贡献由 `faceOwner/faceNeighbour` 给出，不需要坐标方向假设。
+- **派生几何**由 `MeshGeomCache` 提供（定义见 [core.md](core.md)）。离散中实际使用的系数及其在笛卡尔网格上的退化形式：
+
+| 系数 | 通用公式 | 均匀笛卡尔退化 |
+|------|----------|----------------|
+| 内部扩散 $\alpha_f$ | $(\mathbf S_f\cdot\mathbf d)/(\mathbf d\cdot\mathbf d)$，$\mathbf d=x_N-x_P$ | $S_f/d_{PN}$ |
+| 边界扩散 $\beta_f$ | $(\mathbf S_f\cdot\mathbf S_f)/(\mathbf S_f\cdot\boldsymbol\delta)$，$\boldsymbol\delta=x_f-x_P$ | $S_f/d_{Pb}$ |
+| 插值权重 $g_f$ | $\lVert x_f-x_N\rVert/\lVert x_P-x_N\rVert$ | $1/2$ |
+| 边界质量通量 | $F_b=\rho\,(u_b\mathbf S_x+v_b\mathbf S_y)$ | 与旧的分量/面规则一致 |
+
+边界速度 $u_b/v_b$ 取该 patch 的 Dirichlet 值；未给定时取 owner 值（零梯度）。非正交分解中的 $\mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f$ 当前只作为几何诊断/后续修正基础，尚未进入扩散矩阵（见文末 4.3b/4.3c 计划）。
 
 ## BoundaryCondition：边界条件
 
 - `BCType { Dirichlet, Neumann }`：Dirichlet 给定边界面值 $\phi_b$；Neumann 给定外法向导数 $g = \mathrm{d}\phi / \mathrm{d}n$。
-- `BoundaryField` 持有矩形域**四条边**的边界条件（`std::array<BoundaryCondition, 4>`），边索引与网格面索引约定一致：`East=0, North=1, West=2, South=3`。默认四边均为零通量 Neumann（$g = 0$）。
-- 设计要点：边界条件按"边"而非按"单元"存储——同一物理边上所有边界面共享一个条件，与均匀矩形域的设定匹配；`set/get` 对越界 side 抛异常。
+- `BoundaryField(mesh)` 按 mesh 的 patch 存储边界条件，默认全部为零通量 Neumann（$g=0$）。
+- `BoundaryField::East/North/West/South` 常量仅对 `CartesianMesh` 的 patch 顺序有效（$0/1/2/3$）；非结构网格以 `patchName/patchFaces` 为准。
+- `set/get` 对越界 patch 抛异常；同一 patch 上所有边界面共享一个条件。
 
 ## GridOperators：公共离散算子
 
 存放跨方程复用的离散算子。目前提供单元中心 Gauss 梯度（`cellGradient`），被动量方程的压力梯度源与压力修正的速度重建共同使用：
 
-$$(\nabla \phi)_{P,d} = \frac{1}{V_P} \sum_f \phi_f\, n_{f,d}\, S_f$$
+$$(\nabla \phi)_{P,d} = \frac{1}{V_P} \sum_f \sigma_{Pf}\,\phi_f\, S_{f,d},\qquad
+\sigma_{Pf}=\begin{cases}+1,&P=\mathrm{owner}(f)\\-1,&P=\mathrm{neighbour}(f)\end{cases}$$
 
-内部面 $\phi_f$ 取算术平均（均匀网格上退化为中心差分）；边界面 Dirichlet 取给定值、Neumann 取 $\phi_P$（零法向梯度）。
+内部面 $\phi_f$ 取线性插值 $g_f\phi_P+(1-g_f)\phi_N$（均匀网格为算术平均/中心差分）；边界面 Dirichlet 取给定值、Neumann 取 $\phi_P$（零法向梯度）。求和直接使用 $\mathbf S_f$，按 owner/neighbour 关系统一符号。
 
 设计意图：把这类"任何 solver 都可能要用的网格算子"集中为公共接口（`include/`），后续如 `divergence` 等直接加入即可被其他 solver 复用。
 
@@ -30,26 +47,28 @@ $$(\nabla \phi)_{P,d} = \frac{1}{V_P} \sum_f \phi_f\, n_{f,d}\, S_f$$
 
 装配算子 $-\nabla \cdot (\gamma \nabla \phi)$。
 
-### 内部面：中心差分
+### 内部面：正交扩散系数
 
-面扩散系数取两侧单元值的**算术平均** $\gamma_f = (\gamma_P + \gamma_N) / 2$，梯度用中心差分 $(\phi_N - \phi_P) / d_{PN}$，扩散传导率：
+面扩散系数取两侧单元值的**算术平均** $\gamma_f = (\gamma_P + \gamma_N) / 2$，传导率使用几何系数：
 
-$$D_f = \frac{\gamma_f\, S_f}{d_{PN}}$$
+$$D_f = \gamma_f\,\alpha_f,\qquad \alpha_f=\frac{\mathbf S_f\cdot\mathbf d}{\mathbf d\cdot\mathbf d}$$
 
-对每个内部面，向矩阵插入对称的四项：
+在均匀笛卡尔网格上 $\alpha_f=S_f/d_{PN}$，公式精确退化为旧中心差分。对每个内部面，向矩阵插入对称四项：
 
 ```
 A(P,P) += D_f      A(P,N) −= D_f
 A(N,N) += D_f      A(N,P) −= D_f
 ```
 
-由于只取东、北两个方向处理内部面（见下文"装配循环结构"），每对相邻单元恰好贡献一次。该格式为二阶精度 $O(h^2)$，且矩阵对称。
+内部面按全局编号只遍历一次，每对相邻单元恰好贡献一次。正交部分保持矩阵对称；显式非正交交叉扩散修正推迟到 4.3c。
 
 ### 边界面
 
-- **Dirichlet**（$\phi = \phi_b$）：用单元中心到面中心的半距 $d_{Pb}$ 构造边界传导率
+- **Dirichlet**（$\phi = \phi_b$）：用单元中心到面中心的向量 $\boldsymbol\delta=x_f-x_P$ 构造边界传导率（笛卡尔网格上即半距 $d_{Pb}$）
 
-  $$D_b = \frac{\gamma_P\, S_f}{d_{Pb}}$$
+  $$D_b = \gamma_P\,\beta_f,\qquad \beta_f=\frac{\mathbf S_f\cdot\mathbf S_f}{\mathbf S_f\cdot\boldsymbol\delta},\quad \boldsymbol\delta=x_f-x_P$$
+
+  均匀笛卡尔网格上 $\beta_f=S_f/d_{Pb}$。
 
   ```
   A(P,P) += D_b,   b(P) += D_b·φ_b
@@ -63,7 +82,7 @@ A(N,N) += D_f      A(N,P) −= D_f
 
 ### 矩阵性质
 
-仅有 Dirichlet/Neumann 边界时矩阵对称半正定；存在至少一条 Dirichlet 边时为对称正定（SPD），可用 CG 求解。
+仅有 Dirichlet/Neumann 边界时正交扩散矩阵对称半正定；存在至少一个 Dirichlet patch 时为对称正定（SPD），可用 CG 求解。
 
 ## Convection：通量构造与对流项装配
 
@@ -71,21 +90,21 @@ A(N,N) += D_f      A(N,P) −= D_f
 
 ### 通量构造函数
 
-若干自由函数把单元中心速度场转为面通量场（$F_f = \rho\, (\mathbf{u}_f \cdot \mathbf{n})\, S_f$）：
+若干自由函数把单元中心速度场转为面通量场（$F_f = \rho\, \mathbf{u}_f\cdot\mathbf S_f$）：
 
 | 函数 | 内部面 | 边界面 | 适用场景 |
 |------|--------|--------|----------|
-| `interpolateCellVelocityFlux(mesh, velocity, rho)` | $\mathbf{u}_f$ 算术平均 | 相邻单元中心速度 | "给定速度场"的独立输运问题（无速度 BC 可用） |
-| `computeMassFlux(mesh, velocity, rho, bcU, bcV, flux)` | $\mathbf{u}_f$ 算术平均 | 对应分量的 Dirichlet BC 值，无则取单元速度（零梯度） | 有速度边界条件时的底层填充函数（对应 OpenFOAM 的 `createPhi.H`）；**原地填充**（`FaceFluxField` 不可赋值） |
+| `interpolateCellVelocityFlux(mesh, velocity, rho)` | $\mathbf{u}_f=g_f\mathbf{u}_P+(1-g_f)\mathbf{u}_N$ | owner 单元中心速度 | "给定速度场"的独立输运问题（无速度 BC 可用） |
+| `computeMassFlux(mesh, velocity, rho, bcU, bcV, flux)` | 同上 | patch Dirichlet 的 $u_b/v_b$，未给定时取单元速度（零梯度），再投影到 $\mathbf S_b$ | 有速度边界条件时的底层填充函数（对应 OpenFOAM 的 `createPhi.H`）；**原地填充**（`FaceFluxField` 不可赋值） |
 | `initializeMassFlux(mesh, velocity, rho, bcU, bcV, bcP, flux)` | — | — | `solveSimple`/`solvePiso` 的共享入口：先 `computeMassFlux`，纯 Neumann 压力时再 `checkFluxCompatibility`——把"建通量 + 封闭域相容性检查"合成一步 |
-| `hasDirichletPressure(bcP)` | — | — | 判定压力方程是否已正定（任一边为 Dirichlet 压力即无需参考单元）；被 `initializeMassFlux` 与 `correctPressure` 共用 |
+| `hasDirichletPressure(bcP)` | — | — | 判定压力方程是否已正定（任一 patch 为 Dirichlet 压力即无需参考单元）；被 `initializeMassFlux` 与 `correctPressure` 共用 |
 | `checkFluxCompatibility(flux, relTol)` | — | 检查边界净流出量是否为零（相对容差 `relTol * Σ\|F_b\|`，默认 1e-10），不满足则抛 `std::runtime_error` | 纯 Neumann 压力（封闭域）问题的相容性检查（对应 OpenFOAM 的 `adjustPhi`）；`initializeMassFlux` 按需调用，也可由调用方直接用于自检 |
 
-返回值/填充结果均为正方向为正的存储约定；`assembleConvection` 读边界面时经 `outwardFlux` 还原外法向出流通量 $F_b$。
+返回值/填充结果遵守 `FaceFluxField` 约定：内部面 owner → neighbour 为正，边界面 owner 外向为正。`assembleConvection` 的边界面通量即存储的 $F_b$。
 
 ### 面值的两种插值格式
 
-`ConvectionScheme` 枚举选择面上面值 $\phi_f$ 的取法（$F_f$ 直接读自通量场，东/北面即 $P \to N$ 方向）：
+`ConvectionScheme` 枚举选择面上面值 $\phi_f$ 的取法（$F_f$ 直接读自通量场，内部面正方向即 $P \to N$）：
 
 **Upwind（一阶迎风）**——面值取上游单元的值：
 
@@ -96,11 +115,11 @@ F_f < 0（流向 N→P）：φ_f = φ_N  →  A(N,N) −= F_f,  A(P,N) += F_f
 
 特点：无条件有界、保持对角占优，精度 $O(h)$。是默认的稳健选择。
 
-**Central（二阶中心）**——面值取算术平均 $\phi_f = (\phi_P + \phi_N)/2$，记 $h = F_f/2$：
+**Central（二阶中心）**——面值取线性插值 $\phi_f = g_f\phi_P+(1-g_f)\phi_N$（均匀网格为算术平均），记 $h_P=F_f g_f$、$h_N=F_f(1-g_f)$：
 
 ```
-A(P,P) += h    A(P,N) += h
-A(N,P) −= h    A(N,N) −= h
+A(P,P) += h_P  A(P,N) += h_N
+A(N,P) −= h_P  A(N,N) −= h_N
 ```
 
 特点：精度 $O(h^2)$，但在网格 Peclet 数较大时可能产生非物理振荡（无有界性保证）。
@@ -196,9 +215,9 @@ $$\nabla \cdot (\rho\, \mathbf{u}\, \mathbf{u}) = -\nabla p + \nabla \cdot (\mu 
 
 **压力梯度源**——用 [GridOperators](#gridoperators公共离散算子) 的 Gauss 形式（而非纯中心差分），使 Dirichlet 压力边界值参与梯度计算（压力驱动流的必要条件）：
 
-$$b_P \mathrel{-}= \sum_f p_f\, n_{f,d}\, S_f$$
+$$b_P \mathrel{-}= \sum_f p_f\, S_{f,d}$$
 
-内部面 $p_f$ 取算术平均（退化为中心差分）；边界面 Dirichlet 取给定值、Neumann 取 $p_P$。
+内部面 $p_f=g_f p_P+(1-g_f)p_N$；边界面 Dirichlet 取给定值、Neumann 取 $p_P$。速度重建使用同一个广义 Gauss 梯度；对 neighbour 侧的面按 $\mathbf S_f$ 的 owner 外向约定翻转符号。
 
 **稳态分支（`time.active() == false`）——Patankar 亚松弛**（$\alpha$ = `relaxation`）：
 
@@ -231,17 +250,26 @@ $$\hat{u}_P = \frac{b^{np}_P - \sum_{N \ne P} A_{PN}\, u^*_N}{a_P}, \qquad d_P =
 
 ### Rhie–Chow 面通量与预测通量
 
-压力方程使用的面通量（x 向面用 u 方程的 $a_P$，y 向面用 v 方程的；$C_f = \rho \bar{d}_f S_f / \delta_{PN}$）：
+压力方程使用的面通量为：
 
-$$F_f = \rho\, S_f\, \overline{\hat{u}}_f \cdot \mathbf{n} \; - \; C_f\,(p_N - p_P)$$
+$$F_f = \rho\,\overline{\hat{u}}_f\cdot\mathbf S_f \; - \; C_f\,(p_N - p_P)$$
 
-边界面与内部面**同源**（$d_{Pb}$ 为单元中心到面的距离，$\mathbf{n}$ 为外法向，$C_b = \rho\, d_P S_f / d_{Pb}$）：
+其中 $\overline{\hat u}_f$、$\overline d^U_f$、$\overline d^V_f$ 均按 $g_f$ 插值，$\mathbf d=x_N-x_P=(d_x,d_y)$，
 
-$$F_b = \rho\, S_f\, (\hat{u}\cdot\mathbf{n})_b - C_b\,(p_b - p_P) \ \text{（Dirichlet 压力边）}, \qquad F_b = \rho\, S_f\, (\hat{u}\cdot\mathbf{n})_b \ \text{（Neumann 压力边）}$$
+$$C_f=\rho\,\frac{\overline d^U_f d_x S_{f,x}+\overline d^V_f d_y S_{f,y}}{\mathbf d\cdot\mathbf d}.$$
 
-Neumann 压力边法向梯度为零，故不加压力项。速度分量 $(\hat{u}\cdot\mathbf{n})_b$ 在 Dirichlet 速度边取给定值，否则取 $\hat{u}_P$（零梯度），保证壁面无穿透。
+均匀笛卡尔网格上它退化为 $\rho\,\bar d_f S_f/\delta_{PN}$（x 面用 u 方程对角，y 面用 v 方程对角）。
 
-装配时先把**无压力部分** $F^{\hat u}_f \equiv \rho S_f\, \overline{\hat{u}}_f\cdot\mathbf{n}$（OpenFOAM 的 `phiHbyA = fvc::flux(HbyA)`）逐面写入持久通量场，压力项整体由方程未知量 $p$ 承担。这份 $F^{\hat u}$ 同时是右端来源、封闭域 `adjustPhi` 的操作对象、以及求解后通量重建的基准——OpenFOAM 里它是局部量 `phiHbyA`，本项目因 `FaceFluxField` 不可赋值而复用持久通量场作缓冲，最后就地修正成守恒通量。
+边界面与内部面**同源**，$\boldsymbol\delta=x_f-x_P$：
+
+$$C_b=\rho\,\frac{d_P^U\delta_x S_{f,x}+d_P^V\delta_y S_{f,y}}{\boldsymbol\delta\cdot\boldsymbol\delta},\qquad
+F_b = \rho\,(\hat{u}\cdot\mathbf S_f)_b - C_b\,(p_b - p_P)$$
+
+Dirichlet 压力 patch 使用上式；Neumann 压力 patch 不加压力项。笛卡尔网格上 $C_b$ 退化为 $\rho d_P S_f/d_{Pb}$。
+
+速度分量 $(\hat u\cdot\mathbf S_f)_b$ 在 Dirichlet 速度边取给定值，否则取 $\hat{u}_P$（零梯度），保证壁面无穿透。
+
+装配时先把**无压力部分** $F^{\hat u}_f \equiv \rho\,\overline{\hat u}_f\cdot\mathbf S_f$（OpenFOAM 的 `phiHbyA = fvc::flux(HbyA)`）逐面写入持久通量场，压力项整体由方程未知量 $p$ 承担。这份 $F^{\hat u}$ 同时是右端来源、封闭域 `adjustPhi` 的操作对象、以及求解后通量重建的基准——OpenFOAM 里它是局部量 `phiHbyA`，本项目因 `FaceFluxField` 不可赋值而复用持久通量场作缓冲，最后就地修正成守恒通量。
 
 > **不能**用 $u^*_P$ 代替 $\hat{u}_P$：$u^*$ 含旧压力的*单元中心*梯度，而这里要的是**面法向** RC 通量；边界通量必须与内部面同源（Dirichlet 速度边取给定值，否则取 $\hat u_P$）。旧版曾因边界面误用 $u^*$ 而与右端不自洽，每次修正重复计入整段边界压降，修正子迭代因此发散。
 
@@ -249,37 +277,37 @@ Neumann 压力边法向梯度为零，故不加压力项。速度分量 $(\hat{u
 
 把 $F_f = F^{\hat u}_f - C_f (p_N - p_P)$ 代入单元连续性 $\sum_f F_f = 0$，得到关于**新压力**（绝对压力）的方程
 
-$$A\, p = b, \qquad b_P = -\sum_f \text{outward}\big(F^{\hat u}_f\big) \; + \sum_{\text{Dirichlet 压力边}} C_b\, p_b$$
+$$A\, p = b, \qquad b_P = -\sum_f \text{outward}\big(F^{\hat u}_f\big) \; + \sum_{\text{Dirichlet 压力 patch}} C_b\, p_b$$
 
 > **符号约定**：右端第一项是预测通量净流出的**负值**。若符号写反，压力方程会形成正反馈，速度场迅速发散。
 
 装配规则：
 
 - 内部面：`A(P,P) += C_f, A(N,N) += C_f, A(P,N) -= C_f, A(N,P) -= C_f`（SPD Laplace 型）；
-- Dirichlet 压力边：`A(P,P) += C_b`，边界值 $p_b$ **直接进右端**（`b(P) += C_b·p_b`）——不再需要 $p'$ 的镜像边界条件；
-- Neumann 压力边：无矩阵贡献，只有 $F^{\hat u}_b$ 进入右端。
+- Dirichlet 压力 patch：`A(P,P) += C_b`，边界值 $p_b$ **直接进右端**（`b(P) += C_b·p_b`）——不再需要 $p'$ 的镜像边界条件；
+- Neumann 压力 patch：无矩阵贡献，只有 $F^{\hat u}_b$ 进入右端。
 
 **与增量形式（$p'$）的等价性**：把 $p$ 写作 $p_{\text{old}} + p'$，则 $A p' = b - A p_{\text{old}} = -m$，其中 $m_P$ 正是旧形式的预测净流出量（$-m + A p_{\text{old}} \equiv b$ 是恒等式）。两种写法组装同一个矩阵、解出同一个修正量；绝对形式的收益是右端直接就是 `div(phiHbyA)`，不必形成"旧压力梯度 − 矩阵系数"的相消差，右端的量级（因此 CG 相对残差容差的含义）也由此明确。
 
-**奇异性处理——参考单元消元**：四条边全为 Neumann 时矩阵奇异（零空间为常向量）。此时消去 0 号单元并把它钉在**旧值** $p_0 = p_{\text{old},0}$（等价于旧形式的 $p'_0 = 0$，压力水平不漂移），被消掉的第 0 列对邻居行的贡献移到右端（2D 最多两个邻居），得到 $n-1$ 阶 SPD 系统；存在 Dirichlet 压力边时系统本已正定，保留全部单元（由 `hasDirichletPressure` 判定）。压力方程用 CG 求解，动量方程用 BiCGSTAB（对流使矩阵非对称）。
+**奇异性处理——参考单元消元**：所有压力 patch 均为 Neumann 时矩阵奇异（零空间为常向量）。此时消去 0 号单元并把它钉在**旧值** $p_0 = p_{\text{old},0}$（等价于旧形式的 $p'_0 = 0$，压力水平不漂移），被消掉的第 0 列对邻居行的贡献移到右端，得到 $n-1$ 阶 SPD 系统；存在 Dirichlet 压力 patch 时系统本已正定，保留全部单元（由 `hasDirichletPressure` 判定）。压力方程用 CG 求解，动量方程用 BiCGSTAB（对流使矩阵非对称）。
 
-**封闭域相容性（OpenFOAM adjustPhi）**：纯 Neumann 压力时压力项改变不了边界净流出量——内部面两两抵消，Neumann 边界又无压力项——因此 $F^{\hat u}$ 的边界净通量必须为零。不满足时方程不相容，参考单元消元会静默违反被消元单元（0 号）的连续性并累积误差。装配时先把残余净通量按"法向速度非 Dirichlet"的边界面积均摊回这些边界面，**同一调整同步进入右端**；存在 Dirichlet 压力边（开放域）时不做调整。入口处的 `checkFluxCompatibility` 保留为防御性检查。
+**封闭域相容性（OpenFOAM adjustPhi）**：纯 Neumann 压力时压力项改变不了边界净流出量——内部面两两抵消，Neumann 边界又无压力项——因此 $F^{\hat u}$ 的边界净通量必须为零。不满足时方程不相容，参考单元消元会静默违反被消元单元（0 号）的连续性并累积误差。装配时先把残余净通量按"单位面积修正量相同"摊到"法向速度未给定"的边界面：判断主导分量 $|S_x|\ge|S_y|$ 时看 u，否则看 v；该分量无 Dirichlet 约束的面才可调整。**同一调整同步进入右端**；存在 Dirichlet 压力 patch（开放域）时不做调整。入口处的 `checkFluxCompatibility` 保留为防御性检查。
 
 ### 修正与收敛判据
 
 **通量重建**（对应 OpenFOAM `phi = phiHbyA - pEqn.flux()`）：在已写入的 $F^{\hat u}$ 上就地减去压力项
 
-$$F_f \leftarrow F^{\hat u}_f - C_f\,(p_N - p_P) \quad \text{（内部面）}, \qquad F_b \leftarrow F^{\hat u}_b - C_b\,(p_b - p_P) \quad \text{（Dirichlet 压力边，外法向）}$$
+$$F_f \leftarrow F^{\hat u}_f - C_f\,(p_N - p_P) \quad \text{（内部面）}, \qquad F_b \leftarrow F^{\hat u}_b - C_b\,(p_b - p_P) \quad \text{（Dirichlet 压力 patch，外法向）}$$
 
-Neumann 压力边的边界通量保持 $F^{\hat u}_b$。由于右端与重建用的是**同一份**（封闭域下还经过 `adjustPhi` 调整的）$F^{\hat u}$，$A p = b$ 精确等价于"修正后每单元净流出量为零"，该步之后通量场在**压力求解器精度内严格离散守恒**；下一轮/下一步动量装配直接使用该通量。
+Neumann 压力 patch 的边界通量保持 $F^{\hat u}_b$。由于右端与重建用的是**同一份**（封闭域下还经过 `adjustPhi` 调整的）$F^{\hat u}$，$A p = b$ 精确等价于"修正后每单元净流出量为零"，该步之后通量场在**压力求解器精度内严格离散守恒**；下一轮/下一步动量装配直接使用该通量。
 
-**系数 $C_f$ / $C_b$ 只在一处产生**：装配阶段把它们按面存入数组，重建阶段直接读取，不再用 `dx`/`dy` 重算一遍。方程与它的修正在结构上因此不可能因两处重复的公式而失配（早期版本正是装配与重建各算一遍，均匀网格上恰好相等，一旦网格或离散改写就会静默偏离）。
+**系数 $C_f$ / $C_b$ 只在一处产生**：装配阶段把它们按全局面存入一个数组，重建阶段直接读取。方程与它的修正在结构上因此不可能因两处重复的公式而失配（早期版本正是装配与重建各算一遍，均匀网格上恰好相等，一旦网格或离散改写就会静默偏离）。
 
 **压力与速度重建**：压力场按松弛更新 $p \leftarrow p + \alpha_p\,(p_{\text{sol}} - p_{\text{old}})$，而速度和面通量用**未松弛**的解 $p_{\text{sol}}$ 重建：
 
 $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P\, (\nabla p_{\text{sol}})_P$$
 
-梯度用 Gauss 形式，Dirichlet 压力边界直接取 $p_b$。稳态 SIMPLE 下这恒等于旧的增量写法 $u^*_P - d_P(\nabla p')_P$：因为 $\hat u = u^* + d\nabla p_{\text{old}}$，而 $\nabla p_{\text{sol}} - \nabla p_{\text{old}}$ 在 Dirichlet 边上取零、在 Neumann 边上取零梯度，正是原来 $p'$ 的镜像边界。PISO 下 $\alpha_p = 1$，$p_{\text{sol}}$ 就是存储压力，因此多个修正子自然累积。这条重建要求**每个附加修正子前刷新 $\hat u$**（$\hat u = H(u)/a_P$）：若冻结 $\hat u$，第二个修正子的右端会退化成上一次修正留下的求解器残差，修正子循环在第一次之后就到达不动点。为什么第一个修正子与 SIMPLE 的增量写法等价，见"Piso：瞬态驱动"的"PISO 里的三个速度"。
+梯度用广义 Gauss 形式（几何插值权重；neighbour 侧按 owner 外向 $\mathbf S_f$ 翻转符号），Dirichlet 压力边界直接取 $p_b$。稳态 SIMPLE 下这恒等于旧的增量写法 $u^*_P - d_P(\nabla p')_P$：因为 $\hat u = u^* + d\nabla p_{\text{old}}$，而 $\nabla p_{\text{sol}} - \nabla p_{\text{old}}$ 在 Dirichlet 边上取零、在 Neumann 边上取零梯度，正是原来 $p'$ 的镜像边界。PISO 下 $\alpha_p = 1$，$p_{\text{sol}}$ 就是存储压力，因此多个修正子自然累积。这条重建要求**每个附加修正子前刷新 $\hat u$**（$\hat u = H(u)/a_P$）：若冻结 $\hat u$，第二个修正子的右端会退化成上一次修正留下的求解器残差，修正子循环在第一次之后就到达不动点。为什么第一个修正子与 SIMPLE 的增量写法等价，见"Piso：瞬态驱动"的"PISO 里的三个速度"。
 
 > **松弛次序（与 OpenFOAM 的差异）**：本项目速度/通量用未松弛解、只有存储压力吃 $\alpha_p$（Patankar 写法）；OpenFOAM-14 的 `correctPressure()` 先 `p.relax()` 再算 `U = HbyA - rAU·grad(p)`，速度修正也被 $\alpha_p$ 阻尼（通量仍在 relax 之前取，故同样守恒）。两者都是合法 SIMPLE 变体，本项目保留前者以维持既有测试标定；PISO（$\alpha_p = 1$）下二者无差别。
 
@@ -295,7 +323,7 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P\, (\nabla p_{\text{sol}})_P$$
 
 收敛判据（三者同时小于 `SimpleConfig::tolerance`）：
 
-- 连续性：$\max_P |b_P - (A p_{\text{old}})_P| / F_{ref}$（压力方程在旧压力处的初始残差，即该次修正要消除的质量不平衡；与旧写法的 $\max_P|m_P|$ 等价。纯 Neumann 时被消元的 0 号行按冗余关系 $-\sum$ 还原后一起参与取最大），$F_{ref} = \rho \cdot \max\lVert\mathbf{u}\rVert \cdot (dx+dy)/2$；
+- 连续性：$\max_P |b_P - (A p_{\text{old}})_P| / F_{ref}$（压力方程在旧压力处的初始残差，即该次修正要消除的质量不平衡；与旧写法的 $\max_P|m_P|$ 等价。纯 Neumann 时被消元的 0 号行按冗余关系 $-\sum$ 还原后一起参与取最大），$F_{ref} = \rho \cdot \max\lVert\mathbf{u}\rVert \cdot h_{ref}$，$h_{ref}=\sqrt{\sum_P V_P/N}$；方形单元上等于旧的 $(dx+dy)/2$；
 - 速度：$\max_P |\Delta u| / \max\lVert\mathbf{u}\rVert$（$v$ 同理）。
 
 | 类型 | 说明 |
@@ -328,13 +356,13 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P\, (\nabla p_{\text{sol}})_P$$
 | 量 | 代码 | 定义 | 更新时机 | 作用 |
 |---|---|---|---|---|
 | 预测速度 $u^{*}$ | `pred.uStar` | 解动量方程 $A u = b_{np} - V\nabla p^{\text{old}}$ | 每个时间步一次 | 给 $\hat u_1$ 提供求值点（$\hat u_1 = u^{*} + d\nabla p^{\text{old}}$）；修正子里不再直接使用 |
-| 无压力速度 $\hat u$（HbyA） | `pred.uHatU/uHatV` | $\hat u = H(u)/a_P$ | 步初一次（用 $u^{*}$），之后每个附加修正子前用当前 $u$ 重算 | 组装无压力预测通量 $F^{\hat u} = \rho S\, \hat u_f$，即压力方程右端 |
+| 无压力速度 $\hat u$（HbyA） | `pred.uHatU/uHatV` | $\hat u = H(u)/a_P$ | 步初一次（用 $u^{*}$），之后每个附加修正子前用当前 $u$ 重算 | 组装无压力预测通量 $F^{\hat u} = \rho\,\hat u_f\cdot\mathbf S_f$，即压力方程右端 |
 | 修正速度 $u$ | `velocity` | $u = \hat u - d\nabla p_{\text{sol}}$（未松弛解） | 每个修正子末尾 | 本步输出、下一步初值、重算 $\hat u$ 的输入 |
 
 索引 $k$ 为修正子编号（$k \ge 1$）：
 
 $$\hat u_1=\frac{H(u^{*})}{a_P},\quad \hat u_{k+1}=\frac{H(u^{(k)})}{a_P},\qquad
-F^{\hat u}_k=\rho S\, \hat u_{k,f}\ \Rightarrow\ b_k\ \Rightarrow\ p^{(k)}$$
+F^{\hat u}_k=\rho\,\hat u_{k,f}\cdot\mathbf S_f\ \Rightarrow\ b_k\ \Rightarrow\ p^{(k)}$$
 
 $$u^{(k)}=\hat u_k-d\,\nabla p^{(k)} \qquad (\alpha_p = 1)$$
 
@@ -357,6 +385,28 @@ u^{(1)} = \hat u_1 - d\nabla p^{(1)} = u^{*} - d\,\nabla p'^{(1)} .$$
 > **状态（2026-10，已修复并通过测试）**：PISO 已实现并验收（`tests/test_piso.cpp` 已启用在 CMake 中；全量 50 用例 / 3271 条断言通过）。排查共修复**四处**缺陷——`correctPressure` 内三处（边界面预测通量未与内部面同源、封闭域边界净通量不平衡、压力更新与速度重建的顺序）加 `solvePiso` 驱动循环一处（**未在每个附加修正子前用当前速度重算 $\hat u$**）。标量瞬态路径（`assembleTransientTransport`，`tests/test_transient.cpp`）已验证时间阶数正确。四条不变量与 OpenFOAM-14 的定量对照见下文"PISO 与 OpenFOAM 的对照结论"。
 >
 > **2026-10-07 重构**：压力方程由 $p'$ 增量形式改为 OpenFOAM 式的**绝对压力形式**（右端 `div(phiHbyA)`、Dirichlet 压力值直接进右端；`bcPrime` 与 `cumulativeVelocityCorrection` 已删除）；两者代数等价，推导见上文"压力方程（绝对压力形式）"。重构后全量测试仍为 50 用例 / 3271 断言全绿，单步指纹与 OpenFOAM 一致（数值见下文"与 OpenFOAM-14 的定量一致性"）。
+
+## 4.3a：网格抽象与零数值变化验证
+
+本次重构只改变网格表示与几何系数来源，不改变笛卡尔网格上的离散公式：
+
+| 环节 | 旧均匀网格公式 | 现通用公式 | 笛卡尔退化 |
+|------|----------------|------------|------------|
+| 内部扩散 | $\gamma_f S_f/d_{PN}$ | $\gamma_f\alpha_f$ | 相等 |
+| 边界扩散 | $\gamma_P S_f/d_{Pb}$ | $\gamma_P\beta_f$ | 相等 |
+| 面插值 | $1/2$ | $g_f$ | 相等 |
+| 边界通量 | x/y 面分别取 u/v 分量 | $(u_b,v_b)\cdot\mathbf S_b$ | 相等 |
+| Rhie–Chow $C_f$ | $\rho\bar d S_f/\delta_{PN}$ | 投影到 $\mathbf S_f$ 的通用式 | 相等 |
+| SIMPLE 参考尺度 | $(dx+dy)/2$ | $\sqrt{\sum V_P/N}$ | 方形单元相等 |
+
+验证结果：
+
+- 既有 C++ 断言全部原样通过（最终 63 个 test case / 4695 个断言），`pyfvm_tests` 14 项通过；
+- `tests/test_mesh_dual.cpp` 用 `makeStructuredMesh` 与 `CartesianMesh` 表示同一结构网格，验证拓扑/几何/通量以及 diffusion、convection、transport、transient、gradient 装配等价（容差 `1e-12`）；
+- 耦合路径也做了双表示覆盖：`assembleMomentum` 的 u/v、松弛 0.7/1.0、稳态与瞬态 Euler 共 8 种组合在 `1e-12` 内一致；端到端 `solveSimple` 通道流（east Dirichlet 压力）在两种表示下一致到 `1e-8`；
+- `tests/test_unstructured.cpp` 覆盖手工三角形网格的体积/中心/面积向量（两三角形拼成正方形时 $\alpha=3$、$\beta=3$）、非正交面对（$\mathbf k\ne0$ 且 $\mathbf k\cdot\mathbf d=0$、$\alpha>0$）以及构造器的非法输入拒绝。
+
+以下能力为 4.3b/4.3c 计划，当前**尚未实现**：Gmsh `.msh` 读取、`.vtu` 输出、显式非正交交叉扩散修正（$\mathbf k_f\cdot\nabla\phi$ deferred correction）、skewness correction。
 
 ## 与 OpenFOAM 实现的对比
 
@@ -412,7 +462,7 @@ u^{(1)} = \hat u_1 - d\nabla p^{(1)} = u^{*} - d\,\nabla p'^{(1)} .$$
 | 环节 | 本项目 | OpenFOAM |
 |------|--------|----------|
 | 动量对角 | `MomentumAssembly.diag` 显式导出 | `rAU = 1.0/UEqn.A()` |
-| 非压力速度 | `computeUHat`：$(b^{np}_P - \sum_{N\ne P} A_{PN} u_N)/a_P$；步初用 $u^{*}$ 求值，之后每个附加修正子前用当前 $u$ 重算（`refreshUHat`）；装配右端的 `phiHbyA` 取 $\rho S \hat u_f$ | `HbyA = rAU * UEqn.H()`；`phiHbyA = fvc::flux(HbyA) + rAUf·ddtCorr(...)`；`H()` 用矩阵当前持有的 `psi_`，因此每个修正子自动重算 |
+| 非压力速度 | `computeUHat`：$(b^{np}_P - \sum_{N\ne P} A_{PN} u_N)/a_P$；步初用 $u^{*}$ 求值，之后每个附加修正子前用当前 $u$ 重算（`refreshUHat`）；装配右端的 `phiHbyA` 取 $\rho\,\hat u_f\cdot\mathbf S_f$ | `HbyA = rAU * UEqn.H()`；`phiHbyA = fvc::flux(HbyA) + rAUf·ddtCorr(...)`；`H()` 用矩阵当前持有的 `psi_`，因此每个修正子自动重算 |
 | 瞬态算法 | PISO：一次预测 + `nCorrectors` 次修正，无欠松弛；每个附加修正子前重算 $\hat u$ | PISO / PIMPLE，`nCorrectors`/`nOuterCorrectors` |
 | 奇异性 | 参考单元**消元**（钉住 0 号单元旧压力，矩阵缩一维，严格 SPD） | `pEqn.setReference(refCell, refValue)`：软钉，`b_ref += A_ref,ref·p_ref; A_ref,ref *= 2`，矩阵尺寸不变 |
 | 封闭域相容性 | `checkFluxCompatibility`：入口检查边界净通量，不平衡则抛异常 | `adjustPhi` 强制边界净通量为零（自动修正而非报错） |

@@ -28,16 +28,16 @@ def make_cavity_case(n):
     pressure = fvm.ScalarField(mesh, "pressure")
     flux = fvm.FaceFluxField(mesh, "phi")
 
-    bc_u = fvm.BoundaryField()
+    bc_u = fvm.BoundaryField(mesh)
     bc_u.set(fvm.BoundaryField.North, fvm.BCType.Dirichlet, 1.0)
     for side in (fvm.BoundaryField.East, fvm.BoundaryField.West,
                  fvm.BoundaryField.South):
         bc_u.set(side, fvm.BCType.Dirichlet, 0.0)
-    bc_v = fvm.BoundaryField()
+    bc_v = fvm.BoundaryField(mesh)
     for side in (fvm.BoundaryField.North, fvm.BoundaryField.East,
                  fvm.BoundaryField.West, fvm.BoundaryField.South):
         bc_v.set(side, fvm.BCType.Dirichlet, 0.0)
-    bc_p = fvm.BoundaryField()
+    bc_p = fvm.BoundaryField(mesh)
     return mesh, velocity, pressure, flux, bc_u, bc_v, bc_p
 
 
@@ -48,8 +48,9 @@ class TestCoreBindings(unittest.TestCase):
         arr = f.to_numpy()
         self.assertEqual(arr.shape, (12,))
         arr[:] = np.arange(12, dtype=float)
-        self.assertEqual(f.value(2, 1), 6.0)  # cell index = j * nx + i
-        f.set(0, 0, 42.0)
+        self.assertEqual(f.to_numpy()[mesh.cell_index(2, 1)],
+                         6.0)  # cell index = j * nx + i
+        f.to_numpy()[mesh.cell_index(0, 0)] = 42.0
         self.assertEqual(arr[0], 42.0)
 
     def test_field_keeps_mesh_alive(self):
@@ -70,7 +71,8 @@ class TestCoreBindings(unittest.TestCase):
         self.assertAlmostEqual(cy, 0.25)
 
     def test_boundary_field_defaults_and_set(self):
-        bc = fvm.BoundaryField()
+        mesh = fvm.CartesianMesh(4, 3, 0.0, 0.0, 1.0, 1.5)
+        bc = fvm.BoundaryField(mesh)
         for side in (fvm.BoundaryField.East, fvm.BoundaryField.North,
                      fvm.BoundaryField.West, fvm.BoundaryField.South):
             got = bc.get(side)
@@ -79,7 +81,7 @@ class TestCoreBindings(unittest.TestCase):
         bc.set(fvm.BoundaryField.North, fvm.BCType.Dirichlet, 1.0)
         self.assertEqual(bc.get(fvm.BoundaryField.North).type,
                          fvm.BCType.Dirichlet)
-        with self.assertRaises(Exception):
+        with self.assertRaises(IndexError):  # std::out_of_range
             bc.set(4, fvm.BCType.Dirichlet, 0.0)
 
     def test_vector_field_size_and_set_constant(self):
@@ -96,24 +98,24 @@ class TestCoreBindings(unittest.TestCase):
         f = fvm.ScalarField(mesh, "T")
         flux = fvm.FaceFluxField(mesh, "phi")
         with self.assertRaises(IndexError):
-            f.value(nx, 0)
+            f.to_numpy()[mesh.cell_index(nx, 0)]
         # Index is unsigned: negatives are rejected by pybind11's argument
         # conversion (TypeError) before the binding-level range check.
         with self.assertRaises(TypeError):
-            f.value(-1, 0)
+            f.to_numpy()[mesh.cell_index(-1, 0)]
         with self.assertRaises(IndexError):
-            f.set(0, ny, 1.0)
+            f.to_numpy()[mesh.cell_index(0, ny)] = 1.0
         with self.assertRaises(IndexError):
-            flux.x(nx + 1, 0)
+            flux.phi(mesh.x_face(nx + 1, 0))
         with self.assertRaises(IndexError):
-            flux.y(0, ny + 1)
+            flux.phi(mesh.y_face(0, ny + 1))
         with self.assertRaises(IndexError):
             mesh.cell_index(nx, 0)
         with self.assertRaises(IndexError):
             mesh.cell_center(mesh.cell_count())
         # The highest valid face indices still work (x: i == nx, y: j == ny).
-        flux.x(nx, 0)
-        flux.y(0, ny)
+        flux.phi(mesh.x_face(nx, 0))
+        flux.phi(mesh.y_face(0, ny))
 
 
 class TestTransportBinding(unittest.TestCase):
@@ -128,7 +130,7 @@ class TestTransportBinding(unittest.TestCase):
         gamma.set_constant(1.0)
         velocity = fvm.VectorField(mesh, "velocity")  # stays zero
 
-        bc = fvm.BoundaryField()
+        bc = fvm.BoundaryField(mesh)
         bc.set(fvm.BoundaryField.West, fvm.BCType.Dirichlet, 1.0)
         bc.set(fvm.BoundaryField.East, fvm.BCType.Dirichlet, 0.0)
 
@@ -171,7 +173,7 @@ class TestMeshMismatch(unittest.TestCase):
         velocity = fvm.VectorField(mesh, "velocity")
         gamma = fvm.ScalarField(other, "gamma")  # same geometry, wrong mesh
         flux = fvm.interpolate_cell_velocity_flux(mesh, velocity, 1.0)
-        bc = fvm.BoundaryField()
+        bc = fvm.BoundaryField(mesh)
         with self.assertRaises(ValueError):
             fvm.solve_transport(mesh, flux, gamma,
                                 fvm.ConvectionScheme.Upwind, bc)
@@ -184,6 +186,15 @@ class TestMeshMismatch(unittest.TestCase):
         with self.assertRaises(ValueError):
             fvm.solve_simple(mesh, 1.0, 0.01, bc_u, bc_v, bc_p, cfg,
                              foreign_velocity, pressure, flux)
+
+    def test_solve_simple_rejects_foreign_boundary_field(self):
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = make_cavity_case(8)
+        other = fvm.CartesianMesh(8, 8, 0.0, 0.0, 1.0, 1.0)
+        foreign_bc_u = fvm.BoundaryField(other)  # same geometry, wrong mesh
+        cfg = fvm.SimpleConfig()
+        with self.assertRaises(ValueError):
+            fvm.solve_simple(mesh, 1.0, 0.01, foreign_bc_u, bc_v, bc_p, cfg,
+                             velocity, pressure, flux)
 
     def test_write_vti_rejects_foreign_field(self):
         mesh = fvm.CartesianMesh(4, 4, 0.0, 0.0, 1.0, 1.0)

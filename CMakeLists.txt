@@ -26,7 +26,9 @@ add_library(fvm_core STATIC)
 
 target_sources(fvm_core
     PRIVATE
-        src/core/src/Mesh.cpp
+        src/core/src/CartesianMesh.cpp
+        src/core/src/UnstructuredMesh.cpp
+        src/core/src/MeshGeomCache.cpp
         src/core/src/Field.cpp
         src/core/src/FluxField.cpp
         src/math/src/SparseMatrix.cpp
@@ -62,6 +64,8 @@ add_executable(fvm_tests)
 target_sources(fvm_tests
     PRIVATE
         tests/test_mesh.cpp
+        tests/test_unstructured.cpp
+        tests/test_mesh_dual.cpp
         tests/test_linalg.cpp
         tests/test_field.cpp
         tests/test_flux.cpp

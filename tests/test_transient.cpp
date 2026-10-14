@@ -2,7 +2,7 @@
 #include "Convection.h"
 #include "Field.h"
 #include "LinearSolver.h"
-#include "Mesh.h"
+#include "CartesianMesh.h"
 #include "TransportEquation.h"
 #include <cmath>
 #include <doctest/doctest.h>
@@ -84,7 +84,7 @@ TEST_CASE("Transient: assembly matches the theta-scheme identity (Euler)")
     VectorField velocity = makeRecirculatingVelocity(mesh);
     const FaceFluxField flux = interpolateCellVelocityFlux(mesh, velocity, rho);
 
-    BoundaryField bc;
+    BoundaryField bc(mesh);
     bc.set(BoundaryField::West, BCType::Dirichlet, 1.0);
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
@@ -139,7 +139,7 @@ TEST_CASE("Transient: assembly matches the theta-scheme identity (CN)")
     VectorField velocity = makeRecirculatingVelocity(mesh);
     const FaceFluxField flux = interpolateCellVelocityFlux(mesh, velocity, 1.0);
 
-    BoundaryField bc;
+    BoundaryField bc(mesh);
     bc.set(BoundaryField::West, BCType::Dirichlet, 1.0);
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
@@ -195,7 +195,7 @@ TEST_CASE("Transient: backward Euler is first order in time")
     VectorField velocity(mesh, "u"); // zero
     const FaceFluxField flux = interpolateCellVelocityFlux(mesh, velocity, 1.0);
 
-    BoundaryField bc; // all Dirichlet 0
+    BoundaryField bc(mesh); // all Dirichlet 0
     for (int side = 0; side < 4; ++side)
         bc.set(side, BCType::Dirichlet, 0.0);
 
@@ -240,7 +240,7 @@ TEST_CASE("Transient: Crank-Nicolson is second order in time")
     VectorField velocity(mesh, "u"); // zero
     const FaceFluxField flux = interpolateCellVelocityFlux(mesh, velocity, 1.0);
 
-    BoundaryField bc; // all Dirichlet 0
+    BoundaryField bc(mesh); // all Dirichlet 0
     for (int side = 0; side < 4; ++side)
         bc.set(side, BCType::Dirichlet, 0.0);
 
@@ -295,7 +295,7 @@ TEST_CASE("Transient: constant field is preserved in a closed domain")
     velocity.u().setConstant(1.0);
     const FaceFluxField flux = interpolateCellVelocityFlux(mesh, velocity, 1.0);
 
-    BoundaryField bc; // all zero-Neumann
+    BoundaryField bc(mesh); // all zero-Neumann
 
     ScalarField phiOld(mesh, "phi");
     phiOld.setConstant(3.5);

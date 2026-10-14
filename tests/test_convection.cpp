@@ -3,7 +3,7 @@
 #include "Diffusion.h"
 #include "Field.h"
 #include "LinearSolver.h"
-#include "Mesh.h"
+#include "CartesianMesh.h"
 #include "SparseMatrix.h"
 #include <cmath>
 #include <doctest/doctest.h>
@@ -45,7 +45,7 @@ Scalar solveAndL2Error(Index n, ConvectionScheme scheme, Scalar gammaVal)
     const Scalar rho = 1.0;
     const Scalar Pe = rho * 1.0 / gammaVal; // L = 1, u = 1
 
-    BoundaryField bc; // north/south: zero-flux (solution is 1D)
+    BoundaryField bc(s.mesh); // north/south: zero-flux (solution is 1D)
     bc.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bc.set(BoundaryField::East, BCType::Dirichlet, 1.0);
 
@@ -127,7 +127,7 @@ TEST_CASE(
     for (auto scheme : { ConvectionScheme::Upwind, ConvectionScheme::Central })
     {
         ConvDiffSetup s(n, gammaVal);
-        BoundaryField bc;
+        BoundaryField bc(s.mesh);
         bc.set(BoundaryField::West, BCType::Dirichlet, 0.0);
         bc.set(BoundaryField::East, BCType::Dirichlet, 1.0);
 
@@ -171,7 +171,7 @@ TEST_CASE(
     velocity.u().setConstant(2.0);
     velocity.v().setConstant(0.0);
 
-    BoundaryField bc; // all zero-Neumann (zero-gradient inflow at west)
+    BoundaryField bc(mesh); // all zero-Neumann (zero-gradient inflow at west)
 
     for (auto scheme : { ConvectionScheme::Upwind, ConvectionScheme::Central })
     {

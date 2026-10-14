@@ -3,6 +3,7 @@
 #include "Mesh.h"
 #include "Types.h"
 #include <string>
+#include <utility>
 
 namespace fvm::core
 {
@@ -13,7 +14,7 @@ namespace fvm::core
 class ScalarField
 {
 public:
-    ScalarField(const CartesianMesh& mesh, const std::string& name = "")
+    ScalarField(const Mesh& mesh, const std::string& name = "")
         : mesh_(mesh)
         , name_(name)
         , data_(mesh.cellCount())
@@ -21,16 +22,16 @@ public:
         data_.setZero();
     }
 
-    const CartesianMesh& mesh() const
+    const Mesh& mesh() const
     {
         return mesh_;
     }
+
     const std::string& name() const
     {
         return name_;
     }
 
-    // Access by linear cell index
     Scalar& operator()(Index cell)
     {
         return data_[cell];
@@ -40,17 +41,6 @@ public:
         return data_[cell];
     }
 
-    // Access by (i, j) coordinates
-    Scalar& operator()(Index i, Index j)
-    {
-        return data_[mesh_.cellIndex(i, j)];
-    }
-    const Scalar& operator()(Index i, Index j) const
-    {
-        return data_[mesh_.cellIndex(i, j)];
-    }
-
-    // Raw data access
     Vector& data()
     {
         return data_;
@@ -69,13 +59,14 @@ public:
     {
         data_.setZero();
     }
+
     void setConstant(Scalar value)
     {
         data_.setConstant(value);
     }
 
 private:
-    const CartesianMesh& mesh_;
+    const Mesh& mesh_;
     std::string name_;
     Vector data_;
 };
@@ -86,17 +77,19 @@ private:
 class VectorField
 {
 public:
-    VectorField(const CartesianMesh& mesh, const std::string& name = "")
+    VectorField(const Mesh& mesh, const std::string& name = "")
         : mesh_(mesh)
         , name_(name)
         , u_(mesh, name + "_u")
         , v_(mesh, name + "_v")
-    {}
+    {
+    }
 
-    const CartesianMesh& mesh() const
+    const Mesh& mesh() const
     {
         return mesh_;
     }
+
     const std::string& name() const
     {
         return name_;
@@ -110,6 +103,7 @@ public:
     {
         return u_;
     }
+
     ScalarField& v()
     {
         return v_;
@@ -119,7 +113,6 @@ public:
         return v_;
     }
 
-    // Access by linear cell index
     std::pair<Scalar, Scalar> operator()(Index cell) const
     {
         return { u_(cell), v_(cell) };
@@ -143,7 +136,7 @@ public:
     }
 
 private:
-    const CartesianMesh& mesh_;
+    const Mesh& mesh_;
     std::string name_;
     ScalarField u_;
     ScalarField v_;

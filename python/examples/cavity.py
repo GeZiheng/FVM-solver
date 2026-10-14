@@ -23,18 +23,18 @@ def main():
     pressure = fvm.ScalarField(mesh, "pressure")
     flux = fvm.FaceFluxField(mesh, "phi")
 
-    bc_u = fvm.BoundaryField()  # lid moves with U = 1, other walls no-slip
+    bc_u = fvm.BoundaryField(mesh)  # lid moves with U = 1, other walls no-slip
     bc_u.set(fvm.BoundaryField.North, fvm.BCType.Dirichlet, 1.0)
     bc_u.set(fvm.BoundaryField.East, fvm.BCType.Dirichlet, 0.0)
     bc_u.set(fvm.BoundaryField.West, fvm.BCType.Dirichlet, 0.0)
     bc_u.set(fvm.BoundaryField.South, fvm.BCType.Dirichlet, 0.0)
 
-    bc_v = fvm.BoundaryField()  # no penetration on all walls
+    bc_v = fvm.BoundaryField(mesh)  # no penetration on all walls
     for side in (fvm.BoundaryField.North, fvm.BoundaryField.East,
                  fvm.BoundaryField.West, fvm.BoundaryField.South):
         bc_v.set(side, fvm.BCType.Dirichlet, 0.0)
 
-    bc_p = fvm.BoundaryField()  # zero-gradient pressure on all walls (default)
+    bc_p = fvm.BoundaryField(mesh)  # zero-gradient pressure on all walls (default)
 
     cfg = fvm.SimpleConfig()
     cfg.tolerance = 1e-6

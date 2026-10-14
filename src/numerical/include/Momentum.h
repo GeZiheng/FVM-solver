@@ -11,7 +11,7 @@
 
 namespace fvm::numerical
 {
-using fvm::core::CartesianMesh;
+using fvm::core::Mesh;
 using fvm::core::FaceFluxField;
 using fvm::core::Index;
 using fvm::core::Scalar;
@@ -33,7 +33,7 @@ struct MomentumAssembly
 /// pre-computed face mass-flux field: diffusion + convection + pressure-gradient
 /// source + under-relaxation (or the transient ddt term).
 /// @note `time.active()` requires `relaxation == 1`; the two are alternatives.
-MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
+MomentumAssembly assembleMomentum(const Mesh& mesh,
     const FaceFluxField& flux,
     const VectorField& velocity,
     Scalar mu,
@@ -61,7 +61,7 @@ struct MomentumPrediction
 
 /// Assemble and solve the u/v momentum equations and compute the Rhie-Chow data
 /// (OpenFOAM UEqn.H).
-MomentumPrediction predictMomentum(const CartesianMesh& mesh,
+MomentumPrediction predictMomentum(const Mesh& mesh,
     const FaceFluxField& flux,
     const VectorField& velocity,
     Scalar mu,

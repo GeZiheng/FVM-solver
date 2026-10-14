@@ -25,7 +25,7 @@ Vector computeUHat(const MomentumAssembly& mom, const Vector& uStar)
 
 } // namespace
 
-MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
+MomentumAssembly assembleMomentum(const Mesh& mesh,
     const FaceFluxField& flux,
     const VectorField& velocity,
     Scalar mu,
@@ -54,7 +54,6 @@ MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
     }
 
     const Index nCells = mesh.cellCount();
-    const Scalar vol = mesh.cellVolume(0);
 
     ScalarField muField(mesh, "mu");
     muField.setConstant(mu);
@@ -87,7 +86,6 @@ MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
         // The explicit old-time contribution - (1 - theta) A_spatial
         // phi_old is moved to the right-hand side (zero for Euler).
         const Scalar theta = time.theta();
-        const Scalar ddtDiag = time.rho * vol / time.dt;
 
         Vector AphiOld;
         if (theta < 1.0)
@@ -98,15 +96,16 @@ MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
         result.system.A.scale(theta);
         for (Index P = 0; P < nCells; ++P)
         {
+            // Per-cell volume: the mesh is unstructured in general.
+            const Scalar ddtDiag = time.rho * mesh.cellVolume(P) / time.dt;
             result.system.A.insert(P, P, ddtDiag);
             result.rhsNoPressure(P) += ddtDiag * phiOld(P);
             if (theta < 1.0)
             {
                 result.rhsNoPressure(P) -= (1.0 - theta) * AphiOld(P);
             }
+            result.diag(P) = theta * aP0(P) + ddtDiag;
         }
-        result.diag = theta * aP0;
-        result.diag.array() += ddtDiag;
     }
     else
     {
@@ -129,13 +128,14 @@ MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
     for (Index P = 0; P < nCells; ++P)
     {
         result.system.b(P)
-            -= cellGradient(mesh, pressure, bcP, P, component) * vol;
+            -= cellGradient(mesh, pressure, bcP, P, component)
+               * mesh.cellVolume(P);
     }
 
     return result;
 }
 
-MomentumPrediction predictMomentum(const CartesianMesh& mesh,
+MomentumPrediction predictMomentum(const Mesh& mesh,
     const FaceFluxField& flux,
     const VectorField& velocity,
     Scalar mu,
@@ -148,7 +148,7 @@ MomentumPrediction predictMomentum(const CartesianMesh& mesh,
     const TimeTerm& time,
     fvm::math::LinearSolver& momSolver)
 {
-    const Scalar vol = mesh.cellVolume(0);
+    const Index nCells = mesh.cellCount();
 
     MomentumPrediction pred{ assembleMomentum(mesh,
                                  flux,
@@ -186,8 +186,14 @@ MomentumPrediction predictMomentum(const CartesianMesh& mesh,
 
     pred.uHatU = computeUHat(pred.momU, pred.uStar);
     pred.uHatV = computeUHat(pred.momV, pred.vStar);
-    pred.dU = pred.momU.diag.cwiseInverse() * vol;
-    pred.dV = pred.momV.diag.cwiseInverse() * vol;
+    // Rhie-Chow d = V / a_P with the per-cell volume (OpenFOAM rAU = 1/A).
+    pred.dU.resize(nCells);
+    pred.dV.resize(nCells);
+    for (Index P = 0; P < nCells; ++P)
+    {
+        pred.dU(P) = mesh.cellVolume(P) / pred.momU.diag(P);
+        pred.dV(P) = mesh.cellVolume(P) / pred.momV.diag(P);
+    }
 
     return pred;
 }

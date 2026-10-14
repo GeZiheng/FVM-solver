@@ -9,9 +9,9 @@
 
 namespace fvm::numerical
 {
-using fvm::core::CartesianMesh;
 using fvm::core::FaceFluxField;
 using fvm::core::Index;
+using fvm::core::Mesh;
 using fvm::core::Scalar;
 using fvm::core::Vector;
 using fvm::core::VectorField;
@@ -25,18 +25,19 @@ enum class ConvectionScheme
 };
 
 /// Build the face mass flux F_f = rho * (u_f . n) * S_f from a cell-centered
-/// velocity: arithmetic mean in the interior, the adjacent cell value on
-/// boundary faces (for transport with a prescribed velocity, no BCs at hand).
-FaceFluxField interpolateCellVelocityFlux(const CartesianMesh& mesh,
+/// velocity: linear interpolation in the interior and the adjacent owner
+/// value on boundary faces.  The flux follows the face orientation.
+FaceFluxField interpolateCellVelocityFlux(const Mesh& mesh,
     const VectorField& velocity,
     Scalar rho);
 
 /// Fill the face mass flux from a cell-centered velocity, honouring the velocity
 /// BCs on boundary faces (OpenFOAM-style createPhi): Dirichlet value of the
-/// matching component (u on east/west, v on north/south), else the adjacent cell
-/// velocity (zero normal gradient).  Filled in place -- FaceFluxField references
-/// its mesh and is not assignable.
-void computeMassFlux(const CartesianMesh& mesh,
+/// patch's u and v components (where prescribed; otherwise the adjacent owner
+/// value, i.e. zero normal gradient), projected onto the owner-outward face
+/// area vector.  Filled in place -- FaceFluxField references its mesh and is
+/// not assignable.
+void computeMassFlux(const Mesh& mesh,
     const VectorField& velocity,
     Scalar rho,
     const BoundaryField& bcU,
@@ -50,8 +51,8 @@ void computeMassFlux(const CartesianMesh& mesh,
 /// unbalanced velocity BCs.  Scaled by sum_b |F_b|.
 void checkFluxCompatibility(const FaceFluxField& flux, Scalar relTol = 1e-10);
 
-/// True if any side of `bcP` prescribes a Dirichlet pressure.  A Dirichlet-p
-/// side makes the pressure equation definite, so no reference cell is needed.
+/// True if any patch of `bcP` prescribes a Dirichlet pressure.  A
+/// Dirichlet-p patch makes the pressure equation definite.
 bool hasDirichletPressure(const BoundaryField& bcP);
 
 /// Shared entry step of solveSimple and solvePiso: build the persistent flux
@@ -59,7 +60,7 @@ bool hasDirichletPressure(const BoundaryField& bcP);
 /// when a closed domain (pure-Neumann p) has an unbalanced boundary flux
 /// (OpenFOAM adjustPhi), which would make the correction equation
 /// incompatible.
-void initializeMassFlux(const CartesianMesh& mesh,
+void initializeMassFlux(const Mesh& mesh,
     const VectorField& velocity,
     Scalar rho,
     const BoundaryField& bcU,
@@ -67,8 +68,8 @@ void initializeMassFlux(const CartesianMesh& mesh,
     const BoundaryField& bcP,
     FaceFluxField& flux);
 
-/// Assemble div(F phi) into A*phi = b from a face mass-flux field (positive
-/// along the coordinate direction; boundary entries are outward fluxes).
+/// Assemble div(F phi) into A*phi = b from a face mass-flux field (interior
+/// values owner-to-neighbour; boundary values owner-outward).
 ///
 /// Boundary faces, with F_b > 0 outflow / F_b < 0 inflow:
 ///   outflow            -> upwind face value,      A(P,P) += F_b
@@ -76,7 +77,7 @@ void initializeMassFlux(const CartesianMesh& mesh,
 ///   inflow, Neumann    -> zero normal gradient,   A(P,P) += F_b
 ///
 /// Accumulates into A and b (A must not be finalized).
-void assembleConvection(const CartesianMesh& mesh,
+void assembleConvection(const Mesh& mesh,
     const FaceFluxField& flux,
     ConvectionScheme scheme,
     const BoundaryField& bc,

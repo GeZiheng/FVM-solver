@@ -3,7 +3,7 @@
 #include "Diffusion.h"
 #include "Field.h"
 #include "LinearSolver.h"
-#include "Mesh.h"
+#include "CartesianMesh.h"
 #include "TransportEquation.h"
 #include <cmath>
 #include <doctest/doctest.h>
@@ -19,7 +19,7 @@ TEST_CASE("Transport: zero velocity reduces to pure diffusion")
     gamma.setConstant(1.5);
     VectorField velocity(mesh, "u"); // zero
 
-    BoundaryField bc;
+    BoundaryField bc(mesh);
     bc.set(BoundaryField::West, BCType::Dirichlet, 1.0);
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
@@ -53,7 +53,7 @@ TEST_CASE(
     ScalarField Sc(mesh, "Sc");
     Sc.setConstant(2.0);
 
-    BoundaryField bc;
+    BoundaryField bc(mesh);
     bc.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
@@ -93,7 +93,7 @@ TEST_CASE("Transport: linear source term treated implicitly (Helmholtz)")
         Sc(c) = 2.0 + cReac * x * (1.0 - x);
     }
 
-    BoundaryField bc;
+    BoundaryField bc(mesh);
     bc.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
@@ -126,7 +126,7 @@ TEST_CASE("Transport: positive Sp is rejected")
     ScalarField Sp(mesh, "Sp");
     Sp.setConstant(1.0); // positive: violates Patankar's rule
 
-    BoundaryField bc;
+    BoundaryField bc(mesh);
     CHECK_THROWS_AS(assembleTransport(mesh,
                         interpolateCellVelocityFlux(mesh, velocity, 1.0),
                         gamma,
@@ -148,7 +148,7 @@ TEST_CASE("Transport: closed domain with uniform flow annihilates constants")
     VectorField velocity(mesh, "u");
     velocity.u().setConstant(1.0);
 
-    BoundaryField bc; // all zero-Neumann
+    BoundaryField bc(mesh); // all zero-Neumann
 
     for (auto scheme : { ConvectionScheme::Upwind, ConvectionScheme::Central })
     {

@@ -1,8 +1,8 @@
 # AGENTS.md
 
 ## Project State
-- **Status**: phases 1–4-1 complete; `pyfvm` Python bindings (Phase 4 item 2) done. C++ suite: 50 test cases (3271 assertions) pass; binding suite (`pyfvm_tests`) passes. Everything described below is implemented and verified.
-- **Capabilities**: 2D uniform-Cartesian FVM (core/io), Eigen-backed sparse solvers (math), steady SIMPLE and transient PISO for incompressible NS on a collocated grid with Rhie–Chow interpolation, and theta-scheme transient scalar transport. A persistent `FaceFluxField` (`phi`) is the only convection input of the assemblers. Cases are written as Python scripts through the optional `pyfvm` bindings (pybind11, numpy-interop); there is no C++ demo executable any more.
+- **Status**: phases 1–4-2 complete; 4.3a mesh abstraction (dual mesh representations, zero numerical change) done. C++ suite: 63 test cases (4695 assertions) pass; binding suite (`pyfvm_tests`, 14 tests) passes. Everything described below is implemented and verified.
+- **Capabilities**: 2D FVM on structured or unstructured polygon meshes (dual mesh representations behind one interface); numerical operators are mesh-generic (`const Mesh&`). Eigen-backed sparse solvers (math), steady SIMPLE and transient PISO for incompressible NS on a collocated grid with Rhie–Chow interpolation, and theta-scheme transient scalar transport. A persistent `FaceFluxField` (`phi`) is the only convection input of the assemblers. Cases are written as Python scripts through the optional `pyfvm` bindings (pybind11, numpy-interop); there is no C++ demo executable any more.
 - **Solver structure**: the iteration is split into reusable `predictMomentum` / `correctPressure` primitives (`Momentum.h/.cpp`, `Pressure.h/.cpp`); `Simple`/`Piso` are thin driver loops. Extend those primitives rather than duplicating the loops.
 - **PISO**: working; `tests/test_piso.cpp` is enabled. Two invariants dominated the implementation — the per-corrector `refreshUHat` and the absolute-pressure form; both are spelled out under **Key Design Decisions** below and reproduce the OpenFOAM single-step fingerprints. Cross-check numbers and the ruled-out list: `docs/numerical.md`; run comparisons with the `openfoam` MCP server.
 
@@ -40,15 +40,20 @@ let parallel children edit overlapping files.
 
 ```
 src/
-  core/                — Types (Scalar/Index/Vector), CartesianMesh (2D uniform), ScalarField/
-                         VectorField (cell-centered), FaceFluxField (face-stored phi, header-only)
+  core/                — Types (Scalar/Index/Vector/Point2/IndexSpan)
+    Mesh.h               — abstract face-first Mesh base (unified face ids, patches)
+    CartesianMesh.h/.cpp — uniform 2D implementation + structured convenience API
+    UnstructuredMesh.h/.cpp — polygon mesh from MeshInput + makeStructuredMesh
+    MeshGeomCache.h/.cpp — cached interpolation/diffusion/non-orthogonality coefficients
+    Field.h/FluxField.h  — mesh-generic ScalarField/VectorField (cell-centered) and
+                           FaceFluxField (single per-face phi array, header-only)
   math/                — SparseMatrix (triplet assembly over Eigen), LinearSolver (abstract +
                          Eigen CG / BiCGSTAB / SparseLU factories)
   io/                  — VtkWriter (.vti ImageData output)
-  numerical/include/
-    BoundaryCondition.h  — BCType{Dirichlet,Neumann} + BoundaryField (4 sides, header-only)
-    GridOperators.h      — cellGradient (Gauss)
-    Diffusion.h          — -div(gamma grad phi) assembly
+  numerical/include/    — mesh-generic APIs (operators and drivers take const Mesh&)
+    BoundaryCondition.h  — BCType{Dirichlet,Neumann} + mesh-backed BoundaryField
+    GridOperators.h      — cellGradient (generalized Gauss)
+    Diffusion.h          — -div(gamma grad phi) assembly from MeshGeomCache
     Convection.h         — div(F phi) from FaceFluxField; ConvectionScheme{Upwind,Central};
                            flux constructors interpolateCellVelocityFlux / computeMassFlux;
                            initializeMassFlux (+ hasDirichletPressure), checkFluxCompatibility
@@ -62,9 +67,11 @@ src/
                            (computeUHat -> uHat = H/a_P, d = V/a_P); Pressure.cpp holds the
                            absolute-pressure equation, reference-cell elimination and the
                            flux/U/p reconstruction.
-tests/                   — doctest: mesh, field, flux, linalg, diffusion, convection, transport,
-                           transient (time order), simple (Poiseuille, cavity Re=100),
-                           piso (impulsive Couette, transient Poiseuille)
+tests/                   — doctest: mesh, unstructured, mesh_dual (Cartesian vs
+                           makeStructuredMesh equivalence), field, flux, linalg, diffusion,
+                           convection, transport, transient (time order), simple
+                           (Poiseuille, cavity Re=100), piso (impulsive Couette,
+                           transient Poiseuille)
 python/                  — pyfvm bindings (optional, -DFVM_BUILD_PYTHON=ON): pyfvm.cpp (pybind11
                            layer, snake_case API), _path.py (sys.path bootstrap), examples/
                            (case scripts: convection_diffusion.py, cavity.py, impulsive_couette.py),
@@ -132,12 +139,14 @@ In Codex every `openfoam` tool except `list_cases` is `approval_mode = "approve"
 ## Key Design Decisions
 
 - **LinearSolver is abstract** (`createEigenBiCGSTAB` / `createEigenCG` / `createEigenSparseLU`); new backends (AMGCL, Hypre) only need a subclass + factory. **SparseMatrix wraps Eigen** and exposes only `insert`, `finalize`, `native()`.
-- **Mesh is cell-centered**; face indices are 0=east, 1=north, 2=west, 3=south (all boundary arrays use the same order). VTK output is `.vti` ImageData.
+- **Mesh abstraction is face-first**: `fvm::core::Mesh` exposes unified interior/boundary face ids and patch topology; `CartesianMesh` and `UnstructuredMesh` implement it. Cells remain cell-centered. Numerical code sees only `const Mesh&` — `src/numerical` must not include `CartesianMesh.h` — while `CartesianMesh` keeps its structured convenience layer for tests and bindings.
+- **Mesh/flux conventions are owner-relative**: face area vector `S` points outward from the owner; interior `phi > 0` means owner→neighbour and boundary `phi` is owner-outward. Cartesian patches remain east/north/west/south (0/1/2/3). VTK output remains `.vti` ImageData (Cartesian meshes only; `.vtu` is planned for 4.3b).
+- **Dual-representation regression discipline**: `makeStructuredMesh` builds the same structured mesh through `UnstructuredMesh`; `tests/test_mesh_dual.cpp` locks geometry, operators, coupled momentum assembly, and end-to-end SIMPLE equivalence so both implementations must answer identically.
 - **Assembly accumulates**: `assembleDiffusion`/`assembleConvection` add into `(A, b)` without zeroing; `assembleTransport` owns the full assembly and returns an unfinalized `EquationSystem`.
-- **Flux is first-class** (OpenFOAM `phi`): assemblers take a `FaceFluxField` (positive along +x/+y, boundary outward fluxes signed) instead of a velocity field; build it with `interpolateCellVelocityFlux` or `computeMassFlux`.
+- **Flux is first-class** (OpenFOAM `phi`): assemblers take a `FaceFluxField` (interior flux positive owner→neighbour; boundary flux owner-outward) instead of a velocity field; build it with `interpolateCellVelocityFlux` or `computeMassFlux`.
 - **Source terms follow Patankar**: `S(phi) = Sc + Sp*phi` per unit volume, `Sp <= 0` enforced by exception.
 - **`SolverConfig::tolerance` is a relative residual** `|Ax-b|/|b|`. The BiCGSTAB wrapper scales Eigen's absolute tolerance by `|b|` and checks convergence itself — do not rely on `solver.info()` for it.
-- **SIMPLE (collocated + Rhie-Chow)**: momentum reuses the convection/diffusion operators; the pressure-gradient source is the Gauss form `sum_f p_f n S_f` (so Dirichlet pressure values drive the flow). The relaxed diagonal is read from a finalized matrix copy; `d = V/a_P` feeds the Rhie-Chow faces (x-faces use the u-equation diagonal, y-faces the v-equation one). During assembly the persistent flux is overwritten with the pressure-free `phiHbyA = rho S uHat_f` and then corrected in place (`F_f = phiHbyA_f - C(p_N - p_P)`; Dirichlet-p boundaries `- Cb(p_b - p_P)`), exactly OpenFOAM's `phi = phiHbyA - pEqn.flux()`. The per-face coefficients `C`/`Cb` are derived once during the assembly and stored per face; the correction reads them back instead of recomputing them, so the equation and its correction cannot drift apart.
+- **SIMPLE (collocated + Rhie-Chow)**: momentum reuses the convection/diffusion operators; the pressure-gradient source is the Gauss form `sum_f p_f S_f` (so Dirichlet pressure values drive the flow). The relaxed diagonal is read from a finalized matrix copy; per-cell `d = V/a_P` is interpolated to faces and projected onto `S_f` (on Cartesian meshes this reduces to the u-equation `d` on x-faces and the v-equation `d` on y-faces). During assembly the persistent flux is overwritten with the pressure-free `phiHbyA = rho (uHat_f . S_f)` and then corrected in place (`F_f = phiHbyA_f - C(p_N - p_P)`; Dirichlet-p boundaries `- Cb(p_b - p_P)`), exactly OpenFOAM's `phi = phiHbyA - pEqn.flux()`. The per-face coefficients `C`/`Cb` are derived once during the assembly and stored per face; the correction reads them back instead of recomputing them, so the equation and its correction cannot drift apart.
 - **Pressure equation is assembled for the absolute pressure**: `A p = b` with `b = -sum_f outward(phiHbyA_f) + sum_Dirichlet C_b p_b`. `p' = p - p_old` solves the same system as the old incremental form (`b - A p_old = -m`); the absolute form avoids forming that cancelling difference and needs no mirror (`Dirichlet -> 0`) pressure BCs. Getting the RHS sign wrong creates positive feedback and blows up.
 - **Boundary face fluxes must be same-sourced as the interior**: the boundary `phiHbyA` uses the pressure-free `uHat` (or the Dirichlet velocity value) with no pressure term; the Dirichlet-p value enters the RHS as `C_b p_b` and the pressure term is applied to the flux afterwards. Using `uStar` (cell-centred pressure gradient) there is inconsistent with the equation and diverges.
 - **Pure-Neumann pressure uses reference-cell elimination**: drop cell 0 and pin it to its previous value (`p_0 = p_old(0)`, the old `p'_0 = 0`), moving the dropped column into its neighbours' RHS — this keeps the CG system well-conditioned SPD. Closed domains must satisfy `checkFluxCompatibility` at entry (adjustPhi-style, throws on unbalanced velocity BCs), and `correctPressure` rebalances `phiHbyA` on every corrector (pure-Neumann only, with the same adjustment reaching the RHS) so the system stays solvable. No-op for all-Dirichlet-velocity domains (e.g. the cavity).
@@ -155,7 +164,7 @@ In Codex every `openfoam` tool except `list_cases` is `approval_mode = "approve"
 Agreed roadmap, in order:
 1. ✅ **Unsteady terms + PISO** — done: transient theta scheme (time order verified), transient transport, the shared `Momentum`/`Pressure`/`GridOperators` primitives and `solvePiso`; `tests/test_piso.cpp` enabled. Cross-check numbers and the ruled-out list: `docs/numerical.md`.
 2. ✅ **`pyfvm` Python bindings** — done: pybind11 (vcpkg `python` feature, `FVM_BUILD_PYTHON=ON`, optional), snake_case API over mesh/fields/BC/SIMPLE/PISO/transport/vti with zero-copy numpy views; case scripts in `python/examples/`; binding-contract tests in `python/tests/` (ctest entry `pyfvm_tests`); the C++ `fvm_solver` demo exe was removed — cases are Python scripts now. Details: `docs/python.md`.
-3. **Arbitrary mesh input** (Gmsh `.msh` first) — the main motivation for the Python front-end; may come with non-orthogonal/skew mesh support.
+3. **Arbitrary mesh input** — 4.3a (mesh abstraction, dual representations, zero numerical change) done. Next 4.3b: Gmsh `.msh` reader + `.vtu` writer + `pyfvm.read_gmsh`; then 4.3c: non-orthogonal correction + validation.
 4. **Application tests for the example cases** — run `python/examples/` scripts as a separate test tier (distinct from the unit tests), e.g. as labelled ctest entries. Agreed in principle, not scheduled.
 
 Deferred/rejected: per-case executables under `examples/` (cumbersome), JSON case config (redundant with Python scripting), per-module CMakeLists/tests/docs split (revisit only if a module is reused externally or build times degrade). AMGCL/Hypre backends remain candidates for larger meshes.

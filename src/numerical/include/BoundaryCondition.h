@@ -1,12 +1,14 @@
 #pragma once
 
-#include <array>
 #include <stdexcept>
+#include <vector>
 
+#include "Mesh.h"
 #include "Types.h"
 
 namespace fvm::numerical
 {
+using fvm::core::Index;
 using fvm::core::Scalar;
 
 /**
@@ -28,9 +30,9 @@ struct BoundaryCondition
 };
 
 /**
- * @brief Boundary conditions for the four sides of a rectangular domain.
+ * @brief Boundary conditions indexed by mesh patches.
  *
- * Side indices follow the mesh face convention:
+ * CartesianMesh creates patches in the order
  *   0 = east, 1 = north, 2 = west, 3 = south.
  *
  * Default: zero-flux (Neumann, g = 0) on all sides.
@@ -38,36 +40,51 @@ struct BoundaryCondition
 class BoundaryField
 {
 public:
-    BoundaryField() = default;
-
-    void set(int side, BCType type, Scalar value)
+    explicit BoundaryField(const fvm::core::Mesh& mesh)
+        : mesh_(mesh)
+        , bcs_(mesh.patchCount())
     {
-        checkSide(side);
-        bcs_[static_cast<size_t>(side)] = BoundaryCondition{ type, value };
     }
 
-    const BoundaryCondition& get(int side) const
+    void set(Index patch, BCType type, Scalar value)
     {
-        checkSide(side);
-        return bcs_[static_cast<size_t>(side)];
+        checkPatch(patch);
+        bcs_[static_cast<std::size_t>(patch)] = BoundaryCondition{ type, value };
     }
 
-    // Side index constants (match CartesianMesh face convention)
-    static constexpr int East = 0;
-    static constexpr int North = 1;
-    static constexpr int West = 2;
-    static constexpr int South = 3;
+    const BoundaryCondition& get(Index patch) const
+    {
+        checkPatch(patch);
+        return bcs_[static_cast<std::size_t>(patch)];
+    }
+
+    Index patchCount() const
+    {
+        return bcs_.size();
+    }
+
+    const fvm::core::Mesh& mesh() const
+    {
+        return mesh_;
+    }
+
+    // Valid for the CartesianMesh patch order.
+    static constexpr Index East = 0;
+    static constexpr Index North = 1;
+    static constexpr Index West = 2;
+    static constexpr Index South = 3;
 
 private:
-    static void checkSide(int side)
+    void checkPatch(Index patch) const
     {
-        if (side < 0 || side > 3)
+        if (patch >= mesh_.patchCount())
         {
-            throw std::invalid_argument("Boundary side must be in [0, 3]");
+            throw std::out_of_range("Boundary patch index is out of range");
         }
     }
 
-    std::array<BoundaryCondition, 4> bcs_{};
+    const fvm::core::Mesh& mesh_;
+    std::vector<BoundaryCondition> bcs_;
 };
 
 } // namespace fvm::numerical

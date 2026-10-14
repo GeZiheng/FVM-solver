@@ -2,7 +2,7 @@
 #include "Diffusion.h"
 #include "Field.h"
 #include "LinearSolver.h"
-#include "Mesh.h"
+#include "CartesianMesh.h"
 #include "SparseMatrix.h"
 #include <cmath>
 #include <doctest/doctest.h>
@@ -52,7 +52,7 @@ TEST_CASE("Diffusion: 1D linear exact solution with Dirichlet BCs")
     CartesianMesh mesh(20, 10, 0.0, 0.0, 1.0, 1.0);
     auto gamma = constantGamma(mesh, 1.0);
 
-    BoundaryField bc; // north/south default to zero-flux
+    BoundaryField bc(mesh); // north/south default to zero-flux
     bc.set(BoundaryField::West, BCType::Dirichlet, 1.0);
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
@@ -71,7 +71,7 @@ TEST_CASE(
     CartesianMesh mesh(16, 16, 0.0, 0.0, 1.0, 1.0);
     auto gamma = constantGamma(mesh, 1.0);
 
-    BoundaryField bc;
+    BoundaryField bc(mesh);
     bc.set(BoundaryField::West, BCType::Dirichlet, 1.0);
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
@@ -106,7 +106,7 @@ TEST_CASE("Diffusion: mixed Dirichlet/Neumann BCs give exact linear profile")
     CartesianMesh mesh(20, 10, 0.0, 0.0, 1.0, 1.0);
     auto gamma = constantGamma(mesh, 1.0);
 
-    BoundaryField bc;
+    BoundaryField bc(mesh);
     bc.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bc.set(BoundaryField::East, BCType::Neumann, 1.0); // outward dphi/dn = 1
 
@@ -137,7 +137,7 @@ TEST_CASE("Diffusion: manufactured solution converges at second order")
         source.setConstant(-2.0);
 
         BoundaryField
-            bc; // north/south default zero-flux (consistent: dphi/dy = 0)
+            bc(mesh); // north/south default zero-flux (consistent: dphi/dy = 0)
         bc.set(BoundaryField::West, BCType::Dirichlet, 0.0);
         bc.set(BoundaryField::East, BCType::Neumann, 2.0);
 
@@ -171,7 +171,7 @@ TEST_CASE(
     CartesianMesh mesh(12, 8, 0.0, 0.0, 1.0, 1.0);
     auto gamma = constantGamma(mesh, 2.5);
 
-    BoundaryField bc; // default: zero-flux everywhere
+    BoundaryField bc(mesh); // default: zero-flux everywhere
 
     SparseMatrix A(mesh.cellCount(), mesh.cellCount());
     Vector b(mesh.cellCount());
@@ -190,8 +190,8 @@ TEST_CASE("Diffusion: default BoundaryField equals explicit zero-Neumann")
     CartesianMesh mesh(8, 8, 0.0, 0.0, 1.0, 1.0);
     auto gamma = constantGamma(mesh, 1.0);
 
-    BoundaryField bcDefault;
-    BoundaryField bcExplicit;
+    BoundaryField bcDefault(mesh);
+    BoundaryField bcExplicit(mesh);
     for (int side = 0; side < 4; ++side)
     {
         bcExplicit.set(side, BCType::Neumann, 0.0);

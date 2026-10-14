@@ -38,20 +38,23 @@ ctest --test-dir build/release-py --output-on-failure   # fvm_unit_tests + pyfvm
 
 core：
 
-- `CartesianMesh(nx, ny, x_min, y_min, x_max, y_max)`：`nx()` / `ny()` / `cell_count()` / `dx()` / `dy()` / `cell_volume(c)` / `cell_center(c)` / `cell_index(i, j)` / `cell_ij(c)`。
+- `Mesh` 是多态基类绑定：`cell_count()` / `face_count()` / `face_owner(face)` / `face_neighbour(face)` / `is_boundary_face(face)` / `cell_faces(cell)` / `cell_volume(cell)` / `cell_centroid(cell)` / `face_centroid(face)` / `face_area_vector(face)` / `patch_count()` / `patch_name(patch)` / `patch_faces(patch)` / `face_patch(face)`。`face_neighbour()` 在边界面上返回无效单元哨兵 `SIZE_MAX`（即 C++ `Mesh::kInvalidCell` 的值），不要当作单元索引用。
+- `CartesianMesh(nx, ny, x_min, y_min, x_max, y_max)` 继承 `Mesh`，保留 `nx()` / `ny()` / `cell_count()` / `dx()` / `dy()` / `cell_volume(c)` / `cell_center(c)` / `cell_index(i, j)` / `cell_ij(c)`，并新增 `x_face(i, j)` / `y_face(i, j)` 返回全局面编号。
 - `ScalarField(mesh, name="")`、`VectorField(mesh, name="")`（`.u` / `.v` 返回 `ScalarField`；`size()` 返回单元数，`set_constant(v)` 同时设置两个分量）、`FaceFluxField(mesh, name="")`。
-- `f.to_numpy()`：**零拷贝可写视图**，cell 顺序 `j*nx+i`，可直接 `reshape(ny, nx)`；`f.value(i, j)` / `f.set(i, j, v)` 按单元读写；`set_zero()` / `set_constant(v)`。
-- `flux.to_numpy_x()` / `flux.to_numpy_y()`：面通量视图（x 面索引 `j*(nx+1)+i`，y 面 `j*nx+i`）；`flux.x(i, j)` / `flux.y(i, j)` / `flux.cell_imbalance(c)`。
+- `field.to_numpy()`：**零拷贝可写一维视图**，按全局单元编号存储；笛卡尔网格仍为 `j*nx+i`，可 `reshape(ny, nx)`。二维 `(i,j)` 读写接口已移除，用 `field.to_numpy()[mesh.cell_index(i,j)]`。
+- `flux.face_count()` / `flux.phi(face)` / `flux.set_phi(face, value)` / `flux.to_numpy()` / `flux.set_zero()` / `flux.cell_imbalance(cell)`：通量是单一按全局面编号的数组（零拷贝视图为 `to_numpy()`）。内部面 `phi>0` 表示 owner → neighbour，边界面为 owner 外向通量；`x()/y()/to_numpy_x()/to_numpy_y()` 已移除。
 
 numerical：
 
-- 边界：`BoundaryField()` + `.set(side, type, value)` / `.get(side)`；边常量 `BoundaryField.East/North/West/South`；类型 `BCType.Dirichlet/Neumann`。默认四边零梯度 Neumann。
+- 边界：`BoundaryField(mesh)` + `.set(patch, type, value)` / `.get(patch)` / `.patch_count()`；patch 常量 `BoundaryField.East/North/West/South` 只对应笛卡尔 patch 顺序，越界 patch 抛 `IndexError`；类型 `BCType.Dirichlet/Neumann`。默认全部 patch 零梯度 Neumann。
 - 枚举：`ConvectionScheme.Upwind/Central`、`TimeScheme.Euler/CrankNicolson`。
 - `SolverConfig`：`tolerance`（相对残差）/ `max_iterations` / `verbose`。
 - `solve_simple(mesh, rho, mu, bc_u, bc_v, bc_p, config, velocity, pressure, flux)` → `SimpleResult`（`converged` / `iterations` / `history`）；`SimpleConfig`：`max_iterations` / `tolerance` / `relaxation_u` / `relaxation_p` / `scheme` / `solver_config` / `verbose`。
 - `solve_piso(...)`（签名同上）→ `PisoResult`（`steps` / `history`）；`PisoConfig`：`dt` / `n_steps` / `n_correctors`（≥2）/ `time_scheme` / `scheme` / `solver_config` / `verbose`。
 - `solve_transport(mesh, flux, gamma, scheme, bc, solver_config=..., Sc=None, Sp=None)`：高层稳态输运（装配 + BiCGSTAB），返回 numpy 解向量；`solve_transient_transport(..., phi_old, dt, time_scheme, ...)` 为单个隐式 theta 时间步。
 - 通量工具：`interpolate_cell_velocity_flux(mesh, velocity, rho)`、`compute_mass_flux(...)`、`initialize_mass_flux(...)`、`check_flux_compatibility(flux, rel_tol=1e-10)`、`has_dirichlet_pressure(bc_p)`。
+
+上述求解器/通量工具的 Python 签名与 4.3a 之前保持不变；变化只在网格、场与 `BoundaryField` 的构造和索引方式。
 
 io：
 
@@ -60,10 +63,10 @@ io：
 约定与陷阱：
 
 - **生命周期**：C++ 场类持有网格引用，绑定用 `keep_alive` 让场对象钉住网格，正常使用无需关心。
-- **网格一致性**：`solve_transport`、`solve_transient_transport`、`solve_simple`、`solve_piso`、`write_vti`、`interpolate_cell_velocity_flux`、`compute_mass_flux`、`initialize_mass_flux` 会检查字段实参与 `mesh` 实参是否来自同一个网格对象；不一致时抛 `ValueError`，消息中给出字段名（`write_vti` 用字典键，`Sc` / `Sp` 仅在非 `None` 时检查）。
-- **索引范围**：`ScalarField.value/set` 与 `mesh.cell_index` 要求 `i`、`j` 分别在 `[0, nx)`、`[0, ny)`；x 面的 `flux.x` 要求 `i`、`j` 分别在 `[0, nx]`、`[0, ny)`；y 面的 `flux.y` 要求 `i`、`j` 分别在 `[0, nx)`、`[0, ny]`；`mesh.cell_volume/cell_center/cell_ij` 与 `flux.cell_imbalance` 要求线性单元索引在 `[0, cell_count)`。越界抛 `IndexError`；负数因 `Index` 是无符号类型，在 pybind11 参数转换阶段就抛 `TypeError`，不会进入上述范围检查。
-- **GIL 与并发写**：长求解（`solve_simple` / `solve_piso` / 两个 `solve_*transport`）在 C++ 段内手动释放 GIL、返回前重新持有。求解运行期间，其他 Python 线程通过 `to_numpy()` / `to_numpy_x()` / `to_numpy_y()` 写**任何**字段的零拷贝视图都是数据竞争（未定义行为）；单线程算例不受影响。不要用 pybind11 的 `call_guard<gil_scoped_release>` 包返回 numpy 数组或绑定对象的函数——返回值转换也发生在 GIL 释放区里，会段错误（本项目实测踩过）。
-- **异常**：C++ 的 `std::exception`（非法边界 side、`Sp > 0`、闭域通量不平衡等）自动映射为 Python 异常。
+- **网格一致性**：所有求解/装配/输出入口都会检查场对象与 `BoundaryField` 是否创建在传入的同一个 mesh 上；不一致抛 `ValueError`，消息中给出字段名（`write_vti` 用字典键，`Sc` / `Sp` 仅在非 `None` 时检查）。
+- **索引范围**：`Mesh` 的 cell/face/patch 查询、`flux.phi/set_phi`、`flux.cell_imbalance` 分别要求索引小于 `cell_count/face_count/patch_count`；`CartesianMesh.cell_index` 要求 `i∈[0,nx)`、`j∈[0,ny)`，`x_face` 要求 `i∈[0,nx]`、`j∈[0,ny)`，`y_face` 要求 `i∈[0,nx)`、`j∈[0,ny]`。越界抛 `IndexError`；负数因 `Index` 是无符号类型，在 pybind11 参数转换阶段就抛 `TypeError`，不会进入上述范围检查。
+- **GIL 与并发写**：长求解（`solve_simple` / `solve_piso` / 两个 `solve_*transport`）在 C++ 段内手动释放 GIL、返回前重新持有。求解运行期间，其他 Python 线程通过任何 `to_numpy()` 视图写字段或通量都是数据竞争（未定义行为）；单线程算例不受影响。不要用 pybind11 的 `call_guard<gil_scoped_release>` 包返回 numpy 数组或绑定对象的函数——返回值转换也发生在 GIL 释放区里，会段错误（本项目实测踩过）。
+- **异常**：C++ 的 `std::exception`（非法 patch、`Sp > 0`、闭域通量不平衡等）自动映射为 Python 异常。
 
 ## 示例（python/examples/）
 
@@ -72,6 +75,8 @@ io：
 - **convection_diffusion.py**：单位方域稳态对流-扩散。无散度回流速度场（流函数 ψ = sin(πx)·sin(πy) 派生），γ = 0.01（Pe ~ 100），西墙 T=1、东墙 T=0、南北绝热。演示 `solve_transport` 与 numpy 填场。
 - **cavity.py**：顶盖驱动方腔流 Re=100（64×64，SIMPLE，relaxation_u=0.7 / relaxation_p=0.3），约 1000 次外迭代收敛；输出 `cavity.vti` 可在 ParaView 看主涡与角隅二次涡。
 - **impulsive_couette.py**：瞬态 Couette 启动（PISO，ν=0.1，dt=0.005 × 100 步到 t=0.5），与精确 Fourier 级数解对比打印误差。
+
+4.3a 只替换底层网格/场表示，三个脚本的行为与输出保持不变。
 
 ## 测试分工
 

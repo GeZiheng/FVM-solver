@@ -12,7 +12,7 @@
 
 namespace fvm::numerical
 {
-using fvm::core::CartesianMesh;
+using fvm::core::Mesh;
 using fvm::core::FaceFluxField;
 using fvm::core::Index;
 using fvm::core::Scalar;
@@ -56,7 +56,7 @@ struct SimpleResult
 /// (computeMassFlux); on return it holds the corrected conservative flux
 /// (net outflow zero to the pressure solver's accuracy).  The iteration
 /// itself lives in the shared predictor/corrector; this file owns the loop.
-SimpleResult solveSimple(const CartesianMesh& mesh,
+SimpleResult solveSimple(const Mesh& mesh,
     Scalar rho,
     Scalar mu,
     const BoundaryField& bcU,

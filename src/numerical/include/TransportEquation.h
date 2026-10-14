@@ -11,8 +11,8 @@
 
 namespace fvm::numerical
 {
-using fvm::core::CartesianMesh;
 using fvm::core::Index;
+using fvm::core::Mesh;
 using fvm::core::Scalar;
 using fvm::core::ScalarField;
 using fvm::core::Vector;
@@ -40,7 +40,7 @@ struct EquationSystem
 ///
 /// Patankar source linearization: Sp must be <= 0 and goes to the diagonal
 /// implicitly; a positive Sp is rejected with an exception.
-EquationSystem assembleTransport(const CartesianMesh& mesh,
+EquationSystem assembleTransport(const Mesh& mesh,
     const FaceFluxField& flux,
     const ScalarField& gamma,
     ConvectionScheme scheme,
@@ -54,7 +54,7 @@ EquationSystem assembleTransport(const CartesianMesh& mesh,
 ///       = (V/dt) phi^n - (1 - theta) A_sp phi^n + b_sp
 /// theta = 1 is backward Euler, theta = 1/2 Crank-Nicolson.  The convecting
 /// flux is frozen over the step, as are the source terms.
-EquationSystem assembleTransientTransport(const CartesianMesh& mesh,
+EquationSystem assembleTransientTransport(const Mesh& mesh,
     const FaceFluxField& flux,
     const ScalarField& gamma,
     ConvectionScheme scheme,

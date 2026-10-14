@@ -13,7 +13,7 @@
 
 namespace fvm::numerical
 {
-using fvm::core::CartesianMesh;
+using fvm::core::Mesh;
 using fvm::core::FaceFluxField;
 using fvm::core::Index;
 using fvm::core::Scalar;
@@ -61,7 +61,7 @@ struct PisoResult
 /// is conservative to the pressure solver's accuracy.  Closed domains
 /// (pure-Neumann pressure) are supported via reference-cell elimination and the
 /// entry flux-compatibility check.
-PisoResult solvePiso(const CartesianMesh& mesh,
+PisoResult solvePiso(const Mesh& mesh,
     Scalar rho,
     Scalar mu,
     const BoundaryField& bcU,

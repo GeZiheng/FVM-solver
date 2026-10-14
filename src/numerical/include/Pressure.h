@@ -10,7 +10,7 @@
 
 namespace fvm::numerical
 {
-using fvm::core::CartesianMesh;
+using fvm::core::Mesh;
 using fvm::core::FaceFluxField;
 using fvm::core::Index;
 using fvm::core::Scalar;
@@ -53,7 +53,7 @@ struct CorrectorResult
 ///  - the flux and the velocity use the *unrelaxed* solved pressure; only the
 ///    stored field is relaxed, so steady SIMPLE applies the full p' correction
 ///    to the velocity and relaxationP of it to the pressure.
-CorrectorResult correctPressure(const CartesianMesh& mesh,
+CorrectorResult correctPressure(const Mesh& mesh,
     Scalar rho,
     const MomentumPrediction& pred,
     const BoundaryField& bcU,

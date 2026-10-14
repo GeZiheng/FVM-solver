@@ -48,7 +48,7 @@ void VtkWriter::write(const std::string& filename,
         {
             for (Index i = 0; i < nx; ++i)
             {
-                file << (*field)(i, j);
+                file << (*field)(mesh.cellIndex(i, j));
                 if (i < nx - 1)
                     file << " ";
             }
