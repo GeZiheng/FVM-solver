@@ -26,7 +26,7 @@ import sys
 
 MAX_OUTPUT_CHARS = 8000
 SERVER_NAME = "build-and-test"
-SERVER_VERSION = "1.2.0"
+SERVER_VERSION = "1.3.0"
 # Used only when the client does not request a version; otherwise the
 # requested version is echoed back so the client keeps the negotiation.
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
@@ -53,14 +53,18 @@ TOOL_DESCRIPTION = (
     "python=true, the pyfvm extension, then optionally run ctest (which "
     "includes the pyfvm_tests Python binding tests when python=true). Use "
     "this instead of invoking cmake/ctest/ninja directly for project builds. "
+    "Returns structured JSON. Failures include first_error, tail and "
+    "log_path, and the complete untruncated transcript is written to "
+    "build_and_test.log in the build directory. "
     "When the user directly requests a build or test, confirm the options "
     "(config, target, run, python) with the user first unless they already "
     "stated them. "
     "When building as part of a code modification workflow, proceed with the "
     "defaults (config=Release, target=all, run=tests, python=false). "
-    "Success reports are compact by default (quiet=true, a one-line summary); "
-    "pass quiet=false for the full configure/build/test transcript. "
-    "Failures always return the full diagnostic output."
+    "Success reports are compact by default (quiet=true). Failures return "
+    "first_error, a bounded tail and log_path; quiet=false keeps a bounded "
+    "sectioned transcript in report. The only untruncated transcript is "
+    "build_and_test.log in the build directory."
 )
 
 TOOL_SCHEMA = {
@@ -104,8 +108,9 @@ TOOL_SCHEMA = {
             "default": True,
             "description": (
                 "Compact success report (default true): build/test summary "
-                "only. Failures always include the full output. Pass "
-                "quiet=false to keep the full transcript on success."
+                "only. Failures include first_error/tail/log_path; "
+                "quiet=false keeps a bounded sectioned transcript in report "
+                "(the untruncated transcript is only in build_and_test.log)."
             ),
         },
     },
@@ -121,6 +126,63 @@ def _tail(text: str) -> str:
         f"... (truncated, showing last {MAX_OUTPUT_CHARS} chars)\n"
         + text[-MAX_OUTPUT_CHARS:]
     )
+
+
+def _first_error(output: str) -> str | None:
+    """Return the first material error line, by diagnostic category."""
+    categories = (
+        "CMake Error",
+        "FAILED:",
+        re.compile(r"error C\d+"),
+        "error:",
+        "The following tests FAILED:",
+    )
+    lines = output.splitlines()
+    for category in categories:
+        for line in lines:
+            if isinstance(category, str):
+                if category == "FAILED:":
+                    matched = line.startswith(category)
+                else:
+                    matched = category in line
+                if matched:
+                    return line.strip()[:MAX_OUTPUT_CHARS]
+            elif category.search(line):
+                return line.strip()[:MAX_OUTPUT_CHARS]
+    return None
+
+
+def _parse_ctest(output: str) -> dict:
+    """Parse ctest's summary and failed-test names from its output."""
+    result: dict = {"summary": None, "total": None, "failed": []}
+    summary = re.search(
+        r"(\d+)% tests passed, (\d+) tests? failed out of (\d+)", output
+    )
+    if summary:
+        result["summary"] = summary.group(0)
+        result["total"] = int(summary.group(3))
+
+    lines = output.splitlines()
+    try:
+        failed_header = lines.index("The following tests FAILED:")
+    except ValueError:
+        failed_header = None
+    if failed_header is not None:
+        for line in lines[failed_header + 1 :]:
+            match = re.match(r"^\s*\d+\s+-\s+(\S+)", line)
+            if not match:
+                break
+            name = match.group(1)
+            if name not in result["failed"]:
+                result["failed"].append(name)
+
+    if not result["failed"]:
+        result["failed"] = re.findall(
+            r"^\*{3}(?:Failed|Timeout)\*?\s+[\d.]+s\s+(\S+)",
+            output,
+            flags=re.MULTILINE,
+        )
+    return result
 
 
 def _run(
@@ -355,24 +417,82 @@ def build_and_test(
 ) -> tuple[str, bool]:
     """Configure, build and optionally run the project.
 
-    Returns ``(report, ok)``.
+    Returns ``(json_text, ok)``.
     """
     if config not in ("Debug", "Release"):
-        return f"invalid config {config!r}: expected Debug or Release", False
+        return (
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": (
+                        f"invalid config {config!r}: expected Debug or Release"
+                    ),
+                },
+                indent=2,
+            ),
+            False,
+        )
     if target not in ("all", "fvm_tests", "pyfvm"):
         return (
-            f"invalid target {target!r}: expected all, fvm_tests or pyfvm",
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": (
+                        f"invalid target {target!r}: expected all, fvm_tests "
+                        "or pyfvm"
+                    ),
+                },
+                indent=2,
+            ),
             False,
         )
     if run not in ("none", "tests"):
-        return f"invalid run {run!r}: expected none or tests", False
+        return (
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": f"invalid run {run!r}: expected none or tests",
+                },
+                indent=2,
+            ),
+            False,
+        )
     if target == "pyfvm" and not python:
-        return "invalid combination: target=pyfvm requires python=true", False
+        return (
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": (
+                        "invalid combination: target=pyfvm requires "
+                        "python=true"
+                    ),
+                },
+                indent=2,
+            ),
+            False,
+        )
 
     build_dir = REPO_ROOT / "build" / f"{config}-agent{'-py' if python else ''}"
     sections = [f"project: {REPO_ROOT}", f"build dir: {build_dir}"]
+    transcript: list[str] = []
     failed = False
+    stage = "configure"
     test_summary: str | None = None
+    tests: dict | None = None
+    log_file = build_dir / "build_and_test.log"
+    log_path: str | None = None
+
+    def write_log() -> None:
+        """Persist the complete stage transcript; failures stay silent."""
+        nonlocal log_path
+        if not log_file.parent.exists():
+            return
+        try:
+            with log_file.open("w", encoding="utf-8", newline="\n") as stream:
+                stream.write("\n".join(transcript) + "\n")
+            log_path = log_file.relative_to(REPO_ROOT).as_posix()
+        except OSError:
+            log_path = None
 
     # --- Build environment ---
     # Agents launch us with a filtered environment, so activate MSVC here
@@ -434,24 +554,76 @@ def build_and_test(
             "toolchain file (eigen3/doctest will not be found)."
         )
     sections.append("\n$ " + " ".join(configure_cmd))
+    transcript.append("$ " + " ".join(configure_cmd))
     code, output = _run(configure_cmd, CONFIGURE_TIMEOUT, build_env)
     sections.append(_tail(output))
+    transcript.append(output)
     if code != 0:
         sections.append(f"\nCONFIGURE FAILED (exit code {code})")
-        return "\n".join(sections), False
 
+    write_log()
+
+    if code != 0:
+        sections.append("\nRESULT: FAILED")
+        transcript.append("\nRESULT: FAILED (configure)")
+        write_log()
+        report = "\n".join(sections) if not quiet else (
+            f"CONFIGURE FAILED (exit code {code})\nRESULT: FAILED"
+        )
+        payload: dict = {
+            "ok": False,
+            "config": config,
+            "target": target,
+            "run": run,
+            "python": python,
+            "build_dir": str(build_dir),
+            "stage": stage,
+            "first_error": _first_error(output),
+            "tail": _tail(output),
+            "report": report,
+        }
+        if log_path is not None:
+            payload["log_path"] = log_path
+        return json.dumps(payload, indent=2), False
+
+    stage = "build"
+    write_log()
     # --- Build ---
     build_cmd = ["cmake", "--build", str(build_dir), "--parallel"]
     if target != "all":
         build_cmd += ["--target", target]
     sections.append("\n$ " + " ".join(build_cmd))
+    transcript.append("\n$ " + " ".join(build_cmd))
     code, output = _run(build_cmd, BUILD_TIMEOUT, build_env)
     sections.append(_tail(output))
+    transcript.append(output)
+    write_log()
     if code != 0:
         sections.append(f"\nBUILD FAILED (exit code {code})")
-        return "\n".join(sections), False
+        sections.append("\nRESULT: FAILED")
+        transcript.append(f"\nRESULT: FAILED (build, exit code {code})")
+        write_log()
+        report = "\n".join(sections) if not quiet else (
+            f"BUILD FAILED (exit code {code})\nRESULT: FAILED"
+        )
+        payload = {
+            "ok": False,
+            "config": config,
+            "target": target,
+            "run": run,
+            "python": python,
+            "build_dir": str(build_dir),
+            "stage": stage,
+            "first_error": _first_error(output),
+            "tail": _tail(output),
+            "report": report,
+        }
+        if log_path is not None:
+            payload["log_path"] = log_path
+        return json.dumps(payload, indent=2), False
     sections.append(f"\nBUILD SUCCEEDED ({config}, target: {target})")
 
+    stage = "test" if run == "tests" and target != "pyfvm" else "done"
     # --- Run ---
     if run == "tests":
         if target == "pyfvm":
@@ -468,19 +640,18 @@ def build_and_test(
                 config,
             ]
             sections.append("\n$ " + " ".join(test_cmd))
+            transcript.append("\n$ " + " ".join(test_cmd))
             code, output = _run(test_cmd, RUN_TIMEOUT, build_env)
             sections.append(_tail(output))
+            transcript.append(output)
+            write_log()
+            tests = _parse_ctest(output)
             if code != 0:
                 failed = True
                 sections.append(f"\nTESTS FAILED (exit code {code})")
             else:
                 sections.append("\nALL TESTS PASSED")
-                match = re.search(
-                    r"\d+% tests passed, \d+ tests? failed out of \d+", output
-                )
-                test_summary = (
-                    match.group(0) if match else "all tests passed"
-                )
+                test_summary = tests["summary"] or "all tests passed"
 
     if not failed and quiet:
         summary = [
@@ -489,10 +660,44 @@ def build_and_test(
             f"TESTS: {test_summary or 'not run'}",
             "RESULT: SUCCESS (quiet=true; full transcript with quiet=false)",
         ]
-        return "\n".join(summary), True
+        payload = {
+            "ok": True,
+            "config": config,
+            "target": target,
+            "run": run,
+            "python": python,
+            "build_dir": str(build_dir),
+            "stage": "done",
+            "report": "\n".join(summary),
+        }
+        if tests is not None:
+            payload["tests"] = tests
+        if log_path is not None:
+            payload["log_path"] = log_path
+        return json.dumps(payload, indent=2), True
 
-    sections.append("\n" + ("RESULT: FAILED" if failed else "RESULT: SUCCESS"))
-    return "\n".join(sections), not failed
+    result_line = "RESULT: FAILED" if failed else "RESULT: SUCCESS"
+    sections.append("\n" + result_line)
+    transcript.append("\n" + result_line)
+    write_log()
+    payload = {
+        "ok": not failed,
+        "config": config,
+        "target": target,
+        "run": run,
+        "python": python,
+        "build_dir": str(build_dir),
+        "stage": stage,
+        "report": "\n".join(sections),
+    }
+    if tests is not None:
+        payload["tests"] = tests
+    if failed:
+        payload["first_error"] = _first_error(output)
+        payload["tail"] = _tail(output)
+    if log_path is not None:
+        payload["log_path"] = log_path
+    return json.dumps(payload, indent=2), not failed
 
 
 # ---------------------------------------------------------------------------

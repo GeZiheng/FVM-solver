@@ -157,7 +157,9 @@ opencode.json               — OpenCode：skill 路径、同一组 MCP server�
 - `VCPKG_ROOT` 与 `Path` 中的 `ninja.exe` 必须在 agent 会话启动前就绪；前提与构建命令见上文“构建与测试”。
 - `FVM_OF_ALLOWED_ROOTS` 是冒号分隔的绝对 WSL 路径，用于扩大 `run_case` 允许的 `template`/`root` 根；候选路径在 WSL 内经 `realpath` 规范化，符号链接与 `..` 无法逃逸。该检查不是 TOCTOU-free 的；威胁模型是混淆的 agent，不是本地竞争者。
 - 工具副作用：`build_and_test` 写 `build/<config>-agent[-py]/`，`run_case` 在 WSL 中创建 case 目录并启动 `foamRun`，其余工具全部只读。ascii-only 限制见 [`AGENTS.md`](AGENTS.md) 的 MCP Servers 小节。
-- 审批模式记录在 `.codex/config.toml`：当前 `openfoam` 除 `list_cases` 外的每个工具都需要审批，`build_and_test` 亦然。
+- `build_and_test` 返回结构化 JSON：成功含 `ok`/`config`/`build_dir`/`stage`/`tests`/`report`；失败附 `first_error`（按 CMake > ninja `FAILED:` > MSVC `error C<n>` > `error:` > ctest 的优先级取首行）、截断的 `tail` 与 `log_path`——完整未截断 transcript 只写入构建目录的 `build_and_test.log`。
+- `run_status` 的状态为 `running` / `finished` / `failed` / `stale` / `unknown`；`stale` 表示启动器进程已死且没有 `.exitcode`（例如 server 重启），需要重跑 case。启动器 PID 记录在 case 目录的 `.launcher_pid`（`kill -0` + `/proc/<pid>/cmdline` 含 case 路径双重校验，防 PID 复用）。
+- 审批模式记录在 `.codex/config.toml`：当前仅 `run_case` 与 `build_and_test` 需要审批，`openfoam` 的只读工具默认免批；三个只读子 agent（explorer/reviewer/test-triage）的 toml 另有"禁调 `build_and_test`/`run_case`"的指令。
 - openfoam 字段映射假定结构网格：`nx*ny` 必须等于网格单元数，`grid[j][i] = cell j*nx+i`，面通量从 OpenFOAM 的 owner→neighbour 约定转换到本项目的 `+x/+y` 约定。
 
 ### 手工验证
@@ -180,9 +182,7 @@ python -c "import sys; sys.path.insert(0, r'.agents/mcp'); import openfoam_field
 
 ### 已知局限 / 计划项
 
-- 只读子 agent 的本地命令受沙箱约束，但 MCP 工具在沙箱外运行，仍可能调用 `build_and_test` / `run_case`；计划通过指令收口或 per-agent 工具白名单处理。
-- server 进程重启后，`run_status` 无法识别过期的运行状态；计划把启动器 PID 记入 case 的 `mcp_run`。
-- `build_and_test` 目前返回文本报告而非结构化 JSON；结构化输出在计划中。
+- 只读子 agent 的本地命令受沙箱约束，但 MCP 工具在沙箱外运行；已通过 toml 指令禁调 `build_and_test`/`run_case`（软约束），硬性的 per-agent 工具白名单待 Codex 机制验证后再引入。
 
 ## 文档索引
 

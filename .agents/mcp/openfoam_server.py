@@ -63,7 +63,7 @@ import openfoam_fields as of_fields
 
 MAX_OUTPUT_CHARS = 8000
 SERVER_NAME = "openfoam"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
 MAX_TIMEOUT = 3600
@@ -94,8 +94,9 @@ RUN_CASE_DESCRIPTION = (
     "Create a fresh OpenFOAM case in WSL from an existing template, patch its "
     "dictionaries (endTime/deltaT/writeInterval, nCorrectors) and start "
     "foamRun in the background. Returns immediately with case_dir, log_path "
-    "and status='running'; poll run_status until state is 'finished', then "
-    "read the fields with extract_fields. Each configuration gets its own "
+    "and status='running'; poll run_status until the state is terminal "
+    "('finished', 'failed' or 'stale'), then read the fields with "
+    "extract_fields. Each configuration gets its own "
     "timestamped directory with the configuration baked into the name; "
     "nothing is overwritten. For a cross-check: compare a single step first "
     "(end_time = dt) and run both nCorrectors = 1 and 2."
@@ -148,10 +149,11 @@ RUN_CASE_SCHEMA = {
 
 RUN_STATUS_DESCRIPTION = (
     "Poll a background run started by run_case. Reports state ('running', "
-    "'finished', 'failed' or 'unknown') from the case's .exitcode marker and "
-    "the log, and includes a per-step summary of log.run (partial while "
-    "running) when the log exists. dt/dx default to the values recorded in "
-    "the case's mcp_run file at launch."
+    "'finished', 'failed', 'stale' or 'unknown') from the case's .exitcode "
+    "marker and the log; 'stale' means the launcher died before writing "
+    ".exitcode, e.g. after a server restart. Includes a per-step summary of "
+    "log.run (partial while running) when the log exists. dt/dx default to "
+    "the values recorded in the case's mcp_run file at launch."
 )
 
 RUN_STATUS_SCHEMA = {
@@ -409,7 +411,7 @@ def _build_case_command(
 # server instance.  Background processes spawned from a `wsl.exe -e`
 # invocation are killed when that invocation ends, so the run's wsl.exe must
 # stay a live child of this (long-lived) server process; the handle also
-# lets run_status detect a dead launcher.  Runs started by a previous server
+# lets run_case report start_failed.  Runs started by a previous server
 # instance simply have no entry here.
 _RUNS: dict[str, subprocess.Popen] = {}
 
@@ -421,10 +423,14 @@ _BASHRC_BASH = '"$HOME/OpenFOAM/OpenFOAM-14/etc/bashrc"'
 
 def _launch_run(case_dir: str, solver: str) -> None:
     """Start foamRun for a prepared case as a live wsl.exe child of this
-    process.  Writes log.run and drops the exit code into .exitcode."""
+    process.  Writes the launcher PID, log.run and the foamRun exit code."""
+    # The trailing brace group (not a simple command) keeps bash from
+    # exec-optimising itself away: /proc/<launcher_pid>/cmdline must keep the
+    # case path, because run_status' liveness check greps for it.
     launcher = (
         f"source {_BASHRC_BASH} >/dev/null; "
-        f"cd {shlex.quote(case_dir)} && {{ foamRun -solver {shlex.quote(solver)}"
+        f"cd {shlex.quote(case_dir)} && {{ echo $$ > .launcher_pid; "
+        f"foamRun -solver {shlex.quote(solver)}"
         " > log.run 2>&1; echo $? > .exitcode; }"
     )
     try:
@@ -514,7 +520,10 @@ def run_case(
         "case_dir": case_dir,
         "log_path": f"{case_dir}/log.run",
         "status": "running" if started else "start_failed",
-        "poll": "call run_status with this case_dir until state is 'finished'/'failed'",
+        "poll": (
+            "call run_status with this case_dir until the state is terminal: "
+            "'finished'/'failed'/'stale'"
+        ),
         "config": {
             "template": template,
             "name": name,
@@ -540,7 +549,18 @@ elif [ -f .exitcode ]; then
     echo "STATE=finished"
     echo "EXIT=$(cat .exitcode)"
 elif [ -f log.run ]; then
-    echo "STATE=running"
+    if [ -f .launcher_pid ]; then
+        pid=$(cat .launcher_pid 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
+           && grep -qaF -- "$1" "/proc/$pid/cmdline" 2>/dev/null; then
+            echo "STATE=running"
+        else
+            echo "STATE=stale"
+        fi
+    else
+        echo "STATE=running"
+        echo "PIDFILE=missing"
+    fi
 else
     echo "STATE=unknown"
 fi
@@ -572,6 +592,8 @@ def run_status(
     meta: dict[str, float] = {}
     state = "unknown"
     exit_code = None
+    pidfile_missing = False
+    payload_note = None
     for line in output.splitlines():
         if line == "---STATE---":
             continue
@@ -580,6 +602,8 @@ def run_status(
             meta[match.group(1)] = float(match.group(2))
         elif line.startswith("STATE="):
             state = line[len("STATE=") :].strip()
+        elif line == "PIDFILE=missing":
+            pidfile_missing = True
         elif line.startswith("EXIT="):
             try:
                 exit_code = int(line[len("EXIT=") :].strip())
@@ -588,28 +612,24 @@ def run_status(
     if state == "finished" and exit_code not in (None, 0):
         state = "failed"
     if state == "running":
-        handle = _RUNS.get(case_dir)
-        if handle is not None and handle.poll() is not None:
-            state = "failed"
+        if pidfile_missing:
             payload_note = (
-                "the launcher process is gone but no .exitcode was written; "
-                "the run died with it (e.g. the server or WSL was restarted)"
+                "no .launcher_pid (case started by an older server); "
+                "liveness unknown"
             )
-        elif handle is None:
-            payload_note = (
-                "this run was not started by the current server process, so "
-                "its liveness cannot be tracked; if the server was restarted "
-                "since run_case, the run may have died"
-            )
-        else:
-            payload_note = None
+    elif state == "stale":
+        payload_note = (
+            "the launcher process is dead and no .exitcode was written; "
+            "the run died with the server or WSL (e.g. a restart). Rerun "
+            "the case for a fresh comparison."
+        )
 
     payload: dict = {
         "case_dir": case_dir,
         "log_path": f"{case_dir}/log.run",
         "state": state,
     }
-    if state == "running" and payload_note:
+    if payload_note:
         payload["note"] = payload_note
     if exit_code is not None:
         payload["exit_code"] = exit_code
