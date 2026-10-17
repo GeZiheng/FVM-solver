@@ -159,7 +159,7 @@ opencode.json               — OpenCode：skill 路径、同一组 MCP server�
 - 工具副作用：`build_and_test` 写 `build/<config>-agent[-py]/`，`run_case` 在 WSL 中创建 case 目录并启动 `foamRun`，其余工具全部只读。ascii-only 限制见 [`AGENTS.md`](AGENTS.md) 的 MCP Servers 小节。
 - `build_and_test` 返回结构化 JSON：成功含 `ok`/`config`/`build_dir`/`stage`/`tests`/`report`；失败附 `first_error`（按 CMake > ninja `FAILED:` > MSVC `error C<n>` > `error:` > ctest 的优先级取首行）、截断的 `tail` 与 `log_path`——完整未截断 transcript 只写入构建目录的 `build_and_test.log`。
 - `run_status` 的状态为 `running` / `finished` / `failed` / `stale` / `unknown`；`stale` 表示启动器进程已死且没有 `.exitcode`（例如 server 重启），需要重跑 case。启动器 PID 记录在 case 目录的 `.launcher_pid`（`kill -0` + `/proc/<pid>/cmdline` 含 case 路径双重校验，防 PID 复用）。
-- 审批模式记录在 `.codex/config.toml`：当前仅 `run_case` 与 `build_and_test` 需要审批，`openfoam` 的只读工具默认免批；三个只读子 agent（explorer/reviewer/test-triage）的 toml 另有"禁调 `build_and_test`/`run_case`"的指令。
+- 审批模式记录在 `.codex/config.toml`：当前仅 `run_case` 需要审批；`build_and_test` 免批（副作用仅限仓库内 `build/` 与 vcpkg 缓存，且持久 implementer 工作流依赖无人工介入的中间编译检查），`openfoam` 的只读工具默认免批；三个只读子 agent（explorer/reviewer/test-triage）的 toml 另有"禁调 `build_and_test`/`run_case`"的指令。
 - openfoam 字段映射假定结构网格：`nx*ny` 必须等于网格单元数，`grid[j][i] = cell j*nx+i`，面通量从 OpenFOAM 的 owner→neighbour 约定转换到本项目的 `+x/+y` 约定。
 
 ### 手工验证

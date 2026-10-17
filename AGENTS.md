@@ -21,14 +21,32 @@ The project parent uses `glm-5.3` (configured in `.codex/config.toml`; the ZAI p
 | Task class | Default agent | Mode |
 | --- | --- | --- |
 | Bounded code edits under an approved plan (refactor Phase 2) | `fvm-implementer` | serialized, disjoint write scopes |
-| Structural/style review of a bounded diff (Phase 3) | `fvm-reviewer` | may run in parallel |
+| Structural/style review of a bounded diff (Phase 3 only) | `fvm-reviewer` | may run in parallel |
 | Documentation updates for an approved change (Phase 4) | `fvm-docs` | serialized |
 | Build / ctest / binding / OpenFOAM log triage | `fvm-test-triage` | may run in parallel |
 | Read-only fact-finding answering one specific question | `fvm-explorer` | may run in parallel |
 
 Skip delegation and let the parent do the work directly when the round trip would cost more than the task itself: single-file or single-hunk fixes, questions answerable by reading one or two files, or tasks that would need repeated parent-child clarification.  Delegation pays off when it saves parent context (large material distilled into a summary) or moves mechanical multi-file edits onto the flash model.
 
-Single source of truth for delegation: this section (routing table, skip threshold, parent-owned responsibilities) is the only home of the policy.  `.codex/agents/*.toml` own each agent's runtime behaviour (the mechanism layer), and the `refactor-code` skill only maps workflow phases to agents without restating the policy.
+**Delegation shape (persistent implementer session)**: one approved plan maps
+to one persistent `fvm-implementer` session.  Spawn it once with the full
+step-group overview plus the first group's detailed brief, feed each later
+group as a queued message, quickly review each group's diff (`git diff --stat`
+first, then the touched hunks) before feeding the next one, and close the
+session when the plan is done — never respawn the implementer per step, and
+never `fork_context` it (see Token discipline).  The gate review is the
+parent's own quick pass and is never delegated: `fvm-reviewer` runs once, on
+the whole diff, in Phase 3 only, and a stalled group goes through the fuse
+rule — triage it yourself or via `fvm-test-triage`, never through a
+mid-Phase-2 reviewer (including a pipelined deep review of one group while
+the next one runs).  Solver-sensitive slices (SIMPLE/PISO, pressure
+correction, Rhie–Chow, flux reconstruction, boundary flux logic) stay
+delegable, but only with a **design-complete brief**: formulas, sign/index
+conventions, boundary handling, and every call site are fixed by the approved
+plan.  A detail the brief does not cover is a stop-and-report question, not a
+decision the child makes.
+
+Single source of truth for delegation: this section (routing table, skip threshold, delegation shape, parent-owned responsibilities) is the only home of the policy.  `.codex/agents/*.toml` own each agent's runtime behaviour (the mechanism layer), and the `refactor-code` skill only maps workflow phases to agents without restating the policy.
 
 The parent owns requirements analysis, decomposition, architecture, numerical
 design decisions, conflict resolution, final integration, and final review of
@@ -40,8 +58,9 @@ let parallel children edit overlapping files.
 
 ### Token discipline (the parent context is the scarce resource)
 
-- Run one refactor phase (or one bounded group of steps) per session; hand off state through `AGENTS.md` / `docs/`, never through conversation history.
+- Run one refactor phase per parent session.  A persistent implementer session may span all step groups of that one phase (see Delegation shape); state handed across phases or across agent sessions goes through `AGENTS.md` / `docs/`, never through conversation history.
 - Spawn flash sub-agents with a fresh context and a self-contained brief; never combine `fork_context` with `agent_type` (forked agents inherit the parent model and its whole context).
+- Reuse one live implementer session across the step groups of a plan (feed the groups as queued messages) instead of respawning it per group; close sub-agents once their work is done — completed agents keep occupying a concurrency slot.
 - Sub-agent reports must stay compact (a few hundred words); long material is written to a scratch file (e.g. `.agents/notes/<topic>.md`) and the report returns only the summary plus the path.
 - Prefer an `fvm-explorer` distillation over the parent reading whole files; when the parent must read, read headers, signatures or narrow line windows, and run `git diff --stat` before any full diff.
 - `build_and_test` reports success compactly by default (`quiet=true`); pass `quiet=false` only when triaging a failure needs the full transcript.
@@ -64,7 +83,7 @@ Full directory layout: see README.md (Project Structure).
 
 Human-facing prerequisites and the canonical manual CMake/CTest commands are in README.md (Build & Test); use them only when the MCP tool is unavailable.
 
-**IMPORTANT for agents:** use the `build-and-test` MCP tool (see **MCP Servers** below) instead of shelling out to `cmake`/`ctest`/`ninja`. It configures into `build/<config>-agent` and runs **outside** the agent sandbox, which is required because vcpkg writes under `$VCPKG_ROOT` (outside this repository). Options: `config` Release/Debug, `target` all/fvm_tests/pyfvm, `run` none/tests, `python` true/false, `quiet` true/false (defaults: Release, all, tests, false, true). `python=true` builds the `pyfvm` bindings (`-DFVM_BUILD_PYTHON=ON`) into the separate `build/<config>-agent-py` directory, and ctest there additionally runs `pyfvm_tests` (the Python binding tests). The result is structured JSON: `quiet=true` (the default) keeps success compact, and failures carry `first_error`, a bounded `tail` and `log_path` (the untruncated transcript goes to `build_and_test.log` in the build directory). As part of a code-modification workflow, proceed with the defaults; when the user asks for a build/test directly, confirm the options first. Running a Python case script needs no sandbox escape — just `python python/examples/<name>.py`.
+**IMPORTANT for agents:** use the `build-and-test` MCP tool (see **MCP Servers** below) instead of shelling out to `cmake`/`ctest`/`ninja`. It configures into `build/<config>-agent` and runs **outside** the agent sandbox, which is required because vcpkg writes under `$VCPKG_ROOT` (outside this repository). Options: `config` Release/Debug, `target` all/fvm_tests/pyfvm, `run` none/tests, `python` true/false, `quiet` true/false (defaults: Release, all, tests, false, true). `python=true` builds the `pyfvm` bindings (`-DFVM_BUILD_PYTHON=ON`) into the separate `build/<config>-agent-py` directory, and ctest there additionally runs `pyfvm_tests` (the Python binding tests). The result is structured JSON: `quiet=true` (the default) keeps success compact, and failures carry `first_error`, a bounded `tail` and `log_path` (the untruncated transcript goes to `build_and_test.log` in the build directory). As part of a code-modification workflow, proceed with the defaults unless the workflow step specifies otherwise (refactor Phase 2's grouped validation is the exception; the `refactor-code` skill owns that granularity); when the user asks for a build/test directly, confirm the options first. Running a Python case script needs no sandbox escape — just `python python/examples/<name>.py`.
 
 ## MCP Servers
 
@@ -90,7 +109,7 @@ Hardening: `run_case` confines its `template`/`root` arguments to allowed roots 
 
 Discipline for a comparison (this is what keeps conclusions valid): fix the contract first (mesh, properties, schemes, every BC, `dt`, solver tolerances, algorithm settings such as `nCorrectors`); compare a **single step** first (`end_time == dt`) and check `p(0,0)` and the inlet `phi/S` to solver-tolerance level; one configuration per directory (never reuse a directory with different settings); run both `nCorrectors = 1` and `= 2`; never loosen a test tolerance to hide a difference. Record the conclusion (with its evidence and any ruled-out hypotheses) in `docs/numerical.md`, not in this file.
 
-In Codex only `run_case` (and `build_and_test`) require approval; the read-only `openfoam` tools are auto-approved. Read-only subagents are additionally instructed never to call `build_and_test`/`run_case` (`.codex/agents/*.toml`). The helper scripts the server drives (`make_of_case.sh`, `of_log_summary.py`) live in `.agents/mcp/openfoam/` — the fallback for humans when the MCP tool is unavailable. Nothing in this workflow ever modifies the OpenFOAM source tree or an existing case directory.
+In Codex only `run_case` requires approval; `build_and_test` is auto-approved (its writes are confined to the repository `build/` tree and the vcpkg cache, and the persistent-implementer workflow relies on unattended intermediate compile checks), and the read-only `openfoam` tools are auto-approved. Read-only subagents are additionally instructed never to call `build_and_test`/`run_case` (`.codex/agents/*.toml`). The helper scripts the server drives (`make_of_case.sh`, `of_log_summary.py`) live in `.agents/mcp/openfoam/` — the fallback for humans when the MCP tool is unavailable. Nothing in this workflow ever modifies the OpenFOAM source tree or an existing case directory.
 
 ## Key Design Decisions
 
