@@ -6,9 +6,9 @@
 - **Solver structure**: the iteration is split into reusable `predictMomentum` / `correctPressure` primitives (`Momentum.h/.cpp`, `Pressure.h/.cpp`); `Simple`/`Piso` are thin driver loops. Extend those primitives rather than duplicating the loops.
 - **PISO**: working; `tests/test_piso.cpp` is enabled. Two invariants dominated the implementation — the per-corrector `refreshUHat` and the absolute-pressure form; both are spelled out under **Key Design Decisions** below and reproduce the OpenFOAM single-step fingerprints. Cross-check numbers and the ruled-out list: `docs/numerical.md`; run comparisons with the `openfoam` MCP server.
 
-## Skills (`.agents/skills/`, shared by Codex and opencode)
+## Skills (`.agents/skills/`, shared by Codex and OpenCode)
 
-Both agents load the project skills from `.agents/skills` (Codex: project skill root; opencode: `skills.paths` in `opencode.json`). Use them:
+Both agents load the project skills from `.agents/skills` (Codex: project skill root; OpenCode: `skills.paths` in `opencode.json`). Use them:
 
 - **`refactor-code`** — every planned change to this project's code goes through its four phases (plan → edit → review → docs). Phase 1 must present a plan and wait for the user's confirmation before any code is touched.
 
@@ -27,6 +27,8 @@ The project parent uses `glm-5.3` (configured in `.codex/config.toml`; the ZAI p
 | Read-only fact-finding answering one specific question | `fvm-explorer` | may run in parallel |
 
 Skip delegation and let the parent do the work directly when the round trip would cost more than the task itself: single-file or single-hunk fixes, questions answerable by reading one or two files, or tasks that would need repeated parent-child clarification.  Delegation pays off when it saves parent context (large material distilled into a summary) or moves mechanical multi-file edits onto the flash model.
+
+Single source of truth for delegation: this section (routing table, skip threshold, parent-owned responsibilities) is the only home of the policy.  `.codex/agents/*.toml` own each agent's runtime behaviour (the mechanism layer), and the `refactor-code` skill only maps workflow phases to agents without restating the policy.
 
 The parent owns requirements analysis, decomposition, architecture, numerical
 design decisions, conflict resolution, final integration, and final review of
@@ -123,11 +125,12 @@ The extension is version-locked to the interpreter: pass `-DPython_EXECUTABLE=..
 
 ## MCP Servers
 
-Two project-scoped servers, both plain-stdlib Python speaking newline-delimited JSON-RPC over stdio: `build-and-test` (`.agents/mcp/build_and_test_server.py`) and `openfoam` (`.agents/mcp/openfoam_server.py`). They are registered for Codex in `.codex/config.toml` and for opencode in `opencode.json`, and both run **outside** the agent sandbox — that is what makes WSL and vcpkg access work without per-call escalation, and it is the reason they exist. Prefer them; fall back to the manual commands above only when a server is unavailable.
+Two project-scoped servers, both plain-stdlib Python speaking newline-delimited JSON-RPC over stdio: `build-and-test` (`.agents/mcp/build_and_test_server.py`) and `openfoam` (`.agents/mcp/openfoam_server.py`). They are registered for Codex in `.codex/config.toml` and for OpenCode in `opencode.json`, and both run **outside** the agent sandbox — that is what makes WSL and vcpkg access work without per-call escalation, and it is the reason they exist. Prefer them; fall back to the manual commands above only when a server is unavailable.
+Harness internals (file map, environment variables, verification and extension rules): `docs/harness.md` (Chinese).
 
 ### build-and-test (`.agents/mcp/build_and_test_server.py`)
 
-One tool, `build_and_test(config, target, run, python, quiet)`: configure (`cmake -G Ninja`) + build + optionally run ctest. Always use it instead of shelling out to `cmake`/`ctest`/`ninja` — the opencode bash permission block denies those commands, and in Codex this instruction is the rule. Options, defaults (Release / all / tests / false / quiet=true) and when to confirm them with the user: see **Build Instructions** above. `quiet=true` (default) keeps success reports to a two-line summary to protect the caller's context; failures always return the full transcript. It deliberately does **not** run arbitrary scripts: Python case scripts run fine inside the agent sandbox, and regression coverage for the bindings lives in `pyfvm_tests`.
+One tool, `build_and_test(config, target, run, python, quiet)`: configure (`cmake -G Ninja`) + build + optionally run ctest. Always use it instead of shelling out to `cmake`/`ctest`/`ninja` — the OpenCode bash permission block denies those commands, and in Codex this instruction is the rule. Options, defaults (Release / all / tests / false / quiet=true) and when to confirm them with the user: see **Build Instructions** above. `quiet=true` (default) keeps success reports to a two-line summary to protect the caller's context; failures always return the full transcript. It deliberately does **not** run arbitrary scripts: Python case scripts run fine inside the agent sandbox, and regression coverage for the bindings lives in `pyfvm_tests`.
 
 ### openfoam (`.agents/mcp/openfoam_server.py`)
 
@@ -139,6 +142,8 @@ The single entry point for reference-implementation checks; it returns structure
 - `extract_fields` — read a time directory's fields and map them onto this project's layout (`grid[j][i]`, `x_faces`/`y_faces`, per-patch values with owner cells and a side guess); `nx`/`ny` must equal the mesh's own cell counts (`nCells`).
 - `find_source` / `read_source` — grep and read the OpenFOAM-14 tree (`~/OpenFOAM/OpenFOAM-14`) when the data alone cannot explain a difference. Note: OF-14 has no `pEqn.H`/`UEqn.H` for the modern solvers; the incompressible pressure correction is `applications/modules/incompressibleFluid/correctPressure.C`.
 - `list_cases` — existing case directories under the root.
+
+Hardening: `run_case` confines its `template`/`root` arguments to allowed roots — the default run root plus `FVM_OF_ALLOWED_ROOTS` (":"-separated absolute WSL paths) — canonicalised with `realpath` inside WSL, so a confused agent cannot copy a template from (or write a case to) an arbitrary location. `extract_fields` is ascii-only: a `writeFormat binary` case is rejected explicitly (plus a per-field NUL/replacement-character heuristic) instead of returning garbage. The dictionary parsing and field remapping live in the pure module `openfoam_fields.py` (no WSL, no I/O), so they can be unit-tested directly.
 
 Discipline for a comparison (this is what keeps conclusions valid): fix the contract first (mesh, properties, schemes, every BC, `dt`, solver tolerances, algorithm settings such as `nCorrectors`); compare a **single step** first (`end_time == dt`) and check `p(0,0)` and the inlet `phi/S` to solver-tolerance level; one configuration per directory (never reuse a directory with different settings); run both `nCorrectors = 1` and `= 2`; never loosen a test tolerance to hide a difference. Record the conclusion (with its evidence and any ruled-out hypotheses) in `docs/numerical.md`, not in this file.
 
