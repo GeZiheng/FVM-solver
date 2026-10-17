@@ -13,7 +13,7 @@ metadata:
 
 - **最小改动**：只改实现重构目标所必需的代码，不顺手做无关修改。
 - **不改动既有测试逻辑**：重构改变接口时只修复调用点，不修改测试的既有断言语义。
-- **编译与测试**：优先使用项目提供的 `build-and-test` MCP 工具（参数 config/target/run，默认 Release、all、tests）。涉及 `python/`、pybind11 绑定或 `pyfvm_tests` 的改动，验证必须额外以 `python=true` 跑一轮（ctest 含 `pyfvm_tests`，见阶段 2）。该工具不可用时，先读项目 `AGENTS.md` 的构建说明，按其中的方式构建，不要凭猜测直接敲构建命令。
+- **编译与测试**：优先使用项目提供的 `build-and-test` MCP 工具（参数 config/target/run，默认 Release、all、tests）。涉及 `python/`、pybind11 绑定或 `pyfvm_tests` 的改动，验证必须额外以 `python=true` 跑一轮（ctest 含 `pyfvm_tests`，见阶段 2）。该工具不可用时，先读项目 `AGENTS.md` 的构建说明——其手动命令位于 `README.md`——再按其中方式构建，不要凭猜测直接敲构建命令。
 - **用户确认**：所有需要用户确认的节点，直接在回复里向用户提问并等待答复，不要替用户默认同意。
 - **进度跟踪**：方案拆分为多步时，维护一份步骤清单并实时更新状态（有计划工具就用工具，没有就用文字列在回复里）。
 - **默认委派执行**：环境提供项目子 agent 时，把边界内的执行类任务（阶段 2 代码编辑 → `fvm-implementer`、阶段 3 有界 diff 审查 → `fvm-reviewer`、阶段 4 文档更新 → `fvm-docs`）默认交给对应 flash 子 agent。委派策略（类别→默认 agent、串行/并行、跳过门槛、父 agent 保留职责）以项目 `AGENTS.md` 的「Codex Subagent Policy」为唯一出处，本技能只做阶段映射、不复述策略。

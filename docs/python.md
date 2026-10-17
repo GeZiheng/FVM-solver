@@ -10,20 +10,12 @@ python/
   _path.py               — sys.path 引导：按当前解释器标签扫描 build/*/python 定位 pyfvm 扩展
   examples/              — 算例脚本（见下）
   tests/test_pyfvm.py    — 绑定契约测试（unittest；ctest 条目 pyfvm_tests）
-  overlay-ports/python3/ — 空 vcpkg overlay 端口（见"构建"）
+  overlay-ports/python3/ — 空 vcpkg overlay 端口（机制见下）
 ```
 
 ## 构建
 
-默认关闭，需要显式开启：
-
-```powershell
-cmake -B build/release-py -S . -G Ninja `
-      -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake `
-      -DCMAKE_BUILD_TYPE=Release -DFVM_BUILD_PYTHON=ON
-cmake --build build/release-py
-ctest --test-dir build/release-py --output-on-failure   # fvm_unit_tests + pyfvm_tests
-```
+默认关闭，需要用 `-DFVM_BUILD_PYTHON=ON` 显式开启；完整的 configure/build/CTest 命令以 README.md 的“构建与测试”为 canonical 出处。
 
 机制要点：
 
@@ -68,15 +60,9 @@ io：
 - **GIL 与并发写**：长求解（`solve_simple` / `solve_piso` / 两个 `solve_*transport`）在 C++ 段内手动释放 GIL、返回前重新持有。求解运行期间，其他 Python 线程通过任何 `to_numpy()` 视图写字段或通量都是数据竞争（未定义行为）；单线程算例不受影响。不要用 pybind11 的 `call_guard<gil_scoped_release>` 包返回 numpy 数组或绑定对象的函数——返回值转换也发生在 GIL 释放区里，会段错误（本项目实测踩过）。
 - **异常**：C++ 的 `std::exception`（非法 patch、`Sp > 0`、闭域通量不平衡等）自动映射为 Python 异常。
 
-## 示例（python/examples/）
+## 示例
 
-三个算例即原 C++ demo 与 PISO 测试的 Python 版，直接 `python python/examples/<name>.py` 运行，vti 写到 `python/examples/output/<算例名>/`，与当前工作目录无关：
-
-- **convection_diffusion.py**：单位方域稳态对流-扩散。无散度回流速度场（流函数 ψ = sin(πx)·sin(πy) 派生），γ = 0.01（Pe ~ 100），西墙 T=1、东墙 T=0、南北绝热。演示 `solve_transport` 与 numpy 填场。
-- **cavity.py**：顶盖驱动方腔流 Re=100（64×64，SIMPLE，relaxation_u=0.7 / relaxation_p=0.3），约 1000 次外迭代收敛；输出 `cavity.vti` 可在 ParaView 看主涡与角隅二次涡。
-- **impulsive_couette.py**：瞬态 Couette 启动（PISO，ν=0.1，dt=0.005 × 100 步到 t=0.5），与精确 Fourier 级数解对比打印误差。
-
-4.3a 只替换底层网格/场表示，三个脚本的行为与输出保持不变。
+三个 Python 算例的用途、参数与运行方式见 README.md 的“示例”。
 
 ## 测试分工
 
