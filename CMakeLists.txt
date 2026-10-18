@@ -34,6 +34,7 @@ target_sources(fvm_core
         src/math/src/SparseMatrix.cpp
         src/math/src/LinearSolver.cpp
         src/io/src/VtkWriter.cpp
+        src/io/src/Su2Reader.cpp
         src/numerical/src/Diffusion.cpp
         src/numerical/src/Convection.cpp
         src/numerical/src/GridOperators.cpp
@@ -65,6 +66,7 @@ target_sources(fvm_tests
     PRIVATE
         tests/test_mesh.cpp
         tests/test_unstructured.cpp
+        tests/test_su2_reader.cpp
         tests/test_mesh_dual.cpp
         tests/test_linalg.cpp
         tests/test_field.cpp

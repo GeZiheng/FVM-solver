@@ -1,6 +1,25 @@
 # io 模块说明
 
-`fvm::io` 命名空间，负责将计算结果写出为可视化文件。目前只有一个类 `VtkWriter`，输出 VTK ImageData（`.vti`）格式。
+`fvm::io` 命名空间，负责网格输入与结果输出：`Su2Reader` 读取 2D SU2 ASCII 网格（`.su2`），`VtkWriter` 将计算结果写出为 VTK ImageData（`.vti`）格式。
+
+## Su2Reader：.su2 输入
+
+### 设计思路
+
+- **只做映射，不做几何**：reader 把文件内容映射到 `MeshInput`（点、多边形单元、patch 边）后交给 `UnstructuredMesh` 构造器；拓扑校验（流形性、边界全覆盖、非零面积）全部复用构造器，reader 只负责文法与 SU2 特有的约定。
+- **无状态静态接口**：`Su2Reader::read(filename)` 一次调用完成读文件、映射、构造，返回校验过的 `UnstructuredMesh`。
+- **严格拒绝**：契约之外的任何变体（未知关键字、节缺失/重复/乱序、计数不符、未知单元类型）都抛异常而不是静默容忍。唯一容忍点是 `NELEM` 行尾的可选单元号——各家导出器实践不一，存在即忽略。
+
+### 文法契约
+
+- **范围**：2D SU2 ASCII，首节 `NDIME= 2`（其余拒绝）。按空白分词（`NDIME=2` 与 `NDIME= 2` 等价）；关键字大小写敏感（仅大写）；节顺序固定 `NDIME → NPOIN → NELEM → NMARK`。
+- **节点**（`NPOIN= n` + n 行 `id x y`）：id 为 1-based 正整数、允许稀疏，映射为紧凑 0-based 点索引；重复 id、行数与 n 不符、后续引用未知 id 均拒绝；点按文件顺序全量保留。
+- **单元**（`NELEM= n` + n 行 `type v... [elemId]`）：仅 VTK 类型 **5（triangle）/ 9（quad）** 为 cell，按文件顺序；环向任意（构造器归一为 CCW）；行尾单元号可选、忽略；其他类型（含此处出现的 line、高阶单元）拒绝。
+- **marker → patch**（`NMARK= m`）：每个 marker 依次为 `MARKER_TAG= name`（非空、不得重名）+ `MARKER_ELEMS= k` + k 行 `3 v1 v2`（仅 VTK line）。**marker 在文件中的出现顺序即 patch 索引顺序**（格式自带的确定性，不依赖单元顺序）。marker 边必须落在边界上——由 cell 邻接计数判定：出现 0 次 = 非单元边、2 次 = 内部边、≥3 次 = 非流形，全部拒绝；每条边界边恰好属于一个 marker 由 `UnstructuredMesh` 构造器保证。
+
+### 错误处理
+
+文件打开失败抛 `std::runtime_error`；其余格式/拓扑错误抛 `std::invalid_argument`，消息形如 `Su2Reader: '<file>': line N: <原因>`，尽量带上 marker 名/类型码等上下文。`UnstructuredMesh` 构造器抛出的异常会被捕获并加 `Su2Reader: '<file>': ` 前缀重抛。
 
 ## VtkWriter：.vti 输出
 

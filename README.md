@@ -27,7 +27,7 @@ src/
                            FaceFluxField (single per-face phi array, header-only)
   math/                — SparseMatrix (triplet assembly over Eigen), LinearSolver (abstract +
                          Eigen CG / BiCGSTAB / SparseLU factories)
-  io/                  — VtkWriter (.vti ImageData output)
+  io/                  — Su2Reader (.su2 mesh input) + VtkWriter (.vti ImageData output)
   numerical/include/    — mesh-generic APIs (operators and drivers take const Mesh&)
     BoundaryCondition.h  — BCType{Dirichlet,Neumann} + mesh-backed BoundaryField
     GridOperators.h      — cellGradient (generalized Gauss)
@@ -45,7 +45,8 @@ src/
                            (computeUHat -> uHat = H/a_P, d = V/a_P); Pressure.cpp holds the
                            absolute-pressure equation, reference-cell elimination and the
                            flux/U/p reconstruction.
-tests/                   — doctest: mesh, unstructured, mesh_dual (Cartesian vs
+tests/                   — doctest: mesh, unstructured, su2_reader (SU2 format
+                           contract), mesh_dual (Cartesian vs
                            makeStructuredMesh equivalence), field, flux, linalg, diffusion,
                            convection, transport, transient (time order), simple
                            (Poiseuille, cavity Re=100), piso (impulsive Couette,
@@ -119,7 +120,7 @@ python python/examples/<name>.py
 
 1. ✅ **非定常项 + PISO** — 已完成：瞬态 theta scheme（时间精度已验证）、瞬态输运、共享的 `Momentum`/`Pressure`/`GridOperators` 原语与 `solvePiso`；`tests/test_piso.cpp` 已启用。交叉验证数值与已排除假设清单见 [`docs/numerical.md`](docs/numerical.md)。
 2. ✅ **`pyfvm` Python bindings** — 已完成：pybind11（vcpkg `python` feature、`FVM_BUILD_PYTHON=ON`、可选），覆盖 mesh/fields/BC/SIMPLE/PISO/transport/vti 的 snake_case API 与 numpy 零拷贝视图；算例脚本在 `python/examples/`；绑定契约测试在 `python/tests/`（ctest 条目 `pyfvm_tests`）；C++ `fvm_solver` demo 可执行文件已移除——算例一律为 Python 脚本。细节见 [`docs/python.md`](docs/python.md)。
-3. **任意网格输入** — 4.3a（mesh abstraction、双网格表示、零数值变化）已完成。下一步 4.3b：Gmsh `.msh` reader + `.vtu` writer + `pyfvm.read_gmsh`；随后 4.3c：non-orthogonal correction + validation。
+3. **任意网格输入** — 4.3a（mesh abstraction、双网格表示、零数值变化）与 4.3b Step 1（`Su2Reader`，SU2 `.su2` 网格输入）已完成；格式决策为 SU2-first，Gmsh reader 为可选后续（共享 `MeshInput` 映射层）。4.3b 剩余：`.vtu` writer + `pyfvm.read_su2`；随后 4.3c：non-orthogonal correction + validation。
 4. **示例算例的 application tests** — 把 `python/examples/` 脚本作为独立测试层运行（与 unit tests 分开），例如注册为带标签的 ctest 条目。已原则同意，未排期。
 
 Deferred/rejected：`examples/` 下的 per-case 可执行文件（繁琐）、JSON case 配置（与 Python 脚本重复）、按模块拆分 CMakeLists/tests/docs（仅当模块被外部复用或构建时间恶化时再议）。AMGCL/Hypre 后端仍是更大网格的候选方案。

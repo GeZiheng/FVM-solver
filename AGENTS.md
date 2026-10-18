@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project State
-- **Status**: phases 1–4-2 and 4.3a (mesh abstraction, dual representations, zero numerical change) complete; 63 C++ test cases (4695 assertions) and `pyfvm_tests` (14) pass.
+- **Status**: phases 1–4-2, 4.3a and 4.3b step 1 (mesh abstraction, dual representations, SU2 mesh reader; zero numerical change) complete; 80 C++ test cases (4760 assertions) and `pyfvm_tests` (14) pass.
 - **Capabilities & layout**: see `README.md`. No C++ demo executable.
 - **Solver structure**: reusable `predictMomentum` / `correctPressure` primitives (`Momentum`/`Pressure`); `Simple`/`Piso` are thin drivers — extend the primitives, not the loops.
 - **PISO**: working (`tests/test_piso.cpp`); invariants and cross-check evidence: **Key Design Decisions** + `docs/numerical.md` (via the `openfoam` MCP server).
@@ -124,6 +124,7 @@ Rules only; derivations and evidence: `docs/<module>.md` (mainly `docs/numerical
 - **Mesh abstraction is face-first**: `fvm::core::Mesh` exposes unified interior/boundary face ids and patch topology; `CartesianMesh` and `UnstructuredMesh` implement it; cells stay cell-centered. Numerical code sees only `const Mesh&` — `src/numerical` must not include `CartesianMesh.h` — while `CartesianMesh` keeps its structured convenience layer (`docs/core.md`).
 - **Mesh/flux conventions are owner-relative**: `S` points outward from the owner; interior `phi > 0` means owner→neighbour and boundary `phi` is owner-outward; patches stay east/north/west/south (0/1/2/3); VTK output stays `.vti` ImageData until 4.3b (`docs/core.md`).
 - **Dual-representation regression discipline**: `makeStructuredMesh` + `tests/test_mesh_dual.cpp` lock geometry, operators, coupled momentum assembly, and end-to-end SIMPLE equivalence (`docs/numerical.md` §4.3a).
+- **SU2 mesh input is strict and marker-ordered**: `Su2Reader::read` maps a 2D SU2 ASCII file onto `MeshInput` and delegates topology validation to `UnstructuredMesh`; marker file order is the patch order, and every off-contract variant is rejected (`docs/io.md`).
 - **Assembly accumulates**: `assembleDiffusion`/`assembleConvection` add into `(A, b)` without zeroing; `assembleTransport` owns the full assembly and returns an unfinalized `EquationSystem` (`docs/numerical.md`).
 - **Flux is first-class** (OpenFOAM `phi`): assemblers take a `FaceFluxField`, never a velocity field; build it with `interpolateCellVelocityFlux` or `computeMassFlux` (`docs/core.md`).
 - **Source terms follow Patankar**: `S(phi) = Sc + Sp*phi` per unit volume, `Sp <= 0` enforced by exception (`docs/numerical.md`).
@@ -138,5 +139,5 @@ Rules only; derivations and evidence: `docs/<module>.md` (mainly `docs/numerical
 - **SIMPLE/PISO reuse the same predictor/corrector, and PISO must refresh the Rhie–Chow data between correctors**: `refreshUHat(pred, velocity)` before every corrector after the first; `solvePiso` rejects `nCorrectors < 2` (`docs/numerical.md` §Piso).
 
 ## Next Phase (Phase 4)
-Next is 4.3b: Gmsh `.msh` reader + `.vtu` writer + `pyfvm.read_gmsh`; 4.3c then adds non-orthogonal correction + validation. Application tests for the example cases are agreed in principle but not scheduled.
+Next in 4.3b: `.vtu` writer + `pyfvm.read_su2` (mesh input is SU2-first; a Gmsh reader is an optional later addition sharing the same `MeshInput` mapping); 4.3c then adds non-orthogonal correction + validation. Application tests for the example cases are agreed in principle but not scheduled.
 Full roadmap: see README.md.
