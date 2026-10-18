@@ -16,7 +16,7 @@
 
 ## 项目结构
 
-```
+```text
 src/
   core/                — Types (Scalar/Index/Vector/Point2/IndexSpan)
     Mesh.h               — abstract face-first Mesh base (unified face ids, patches)
@@ -139,7 +139,7 @@ harness 的单一出处分为三层：
 
 ### 文件图
 
-```
+```text
 .agents/mcp/
   build_and_test_server.py   — build-and-test MCP server（CMake/Ninja/ctest 封装）
   openfoam_server.py         — openfoam MCP server（WSL OpenFOAM-14 驱动）

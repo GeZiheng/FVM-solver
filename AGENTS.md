@@ -1,6 +1,7 @@
 # AGENTS.md
 
 ## Project State
+
 - **Status**: phases 1–4-2, 4.3a and 4.3b step 1 (mesh abstraction, dual representations, SU2 mesh reader; zero numerical change) complete; 80 C++ test cases (4760 assertions) and `pyfvm_tests` (14) pass.
 - **Capabilities & layout**: see `README.md`. No C++ demo executable.
 - **Solver structure**: reusable `predictMomentum` / `correctPressure` primitives (`Momentum`/`Pressure`); `Simple`/`Piso` are thin drivers — extend the primitives, not the loops.
@@ -16,60 +17,41 @@ There is no OpenFOAM skill: cross-check mechanics live in the `openfoam` MCP ser
 
 ## Codex Subagent Policy
 
-The project parent uses `glm-5.3` (configured in `.codex/config.toml`; the ZAI provider remains user-level).  The `glm-5.3-flash` custom agents in `.codex/agents/` are the executors for work that **passes the delegation gates** below; anything failing the gates is executed by the parent directly.  Delegating needs no extra user approval beyond the plan confirmation the workflow already requires:
+The project parent uses `glm-5.3` (`.codex/config.toml`; the ZAI provider stays user-level). The `glm-5.3-flash` agents in `.codex/agents/` execute work that **passes the delegation gates** or **meets the read-only triggers** below; everything else is parent-direct, with no approval beyond the plan confirmation the workflow already requires:
 
 | Task class | Default agent | Mode |
 | --- | --- | --- |
 | Gate-passing code-edit groups under an approved plan (refactor Phase 2) | `fvm-implementer` | serialized, disjoint write scopes |
-| Structural/style review of a bounded diff (Phase 3 only) | `fvm-reviewer` | may run in parallel |
+| Structural/style review of the whole diff (Phase 3 only) | `fvm-reviewer` | may run in parallel |
 | Gate-passing documentation updates (Phase 4) | `fvm-docs` | serialized |
-| Build / ctest / binding / OpenFOAM log triage | `fvm-test-triage` | may run in parallel |
-| Read-only fact-finding answering one specific question | `fvm-explorer` | may run in parallel |
+| Build / ctest / binding / OpenFOAM log triage (trigger-gated) | `fvm-test-triage` | may run in parallel |
+| Read-only fact-finding answering one specific question (trigger-gated) | `fvm-explorer` | may run in parallel |
 
-**Delegation gates** — the measured floor for one delegation round trip is ~40 s wall time and ~1k parent-side coordination tokens (`.agents/notes/fvm-implementer-benchmark.md`), so the gates exist to keep that cost off small work.  The Phase 1 plan labels every step group's executor (parent / `fvm-implementer`) according to:
+**Delegation gates** — one round trip costs a measured floor of ~40 s and ~1k parent-side coordination tokens (`.agents/notes/fvm-implementer-benchmark.md`); the gates keep that off small work. The Phase 1 plan labels every step group's executor (parent / `fvm-implementer`) according to:
 
 - **Size gate** (initial values; re-tune after every 10 log entries): delegate only if the group touches >= 3 files, or >= 2 files with >= 100 changed lines, or applies one pattern at >= 3 call sites (porter class — the brief carries a worked before/after example).
-- **Design gate** (unchanged): formulas, sign/index conventions, boundary handling, and every call site are fixed by the plan; a detail the brief does not cover is a stop-and-report question.  If a brief would be paste-ready, the parent pastes it instead of delegating.
+- **Design gate**: formulas, sign/index conventions, boundary handling, and every call site are fixed by the plan; an uncovered detail is a stop-and-report question, not a child decision, and a paste-ready brief is pasted by the parent instead of delegated.
 - **Value gate**: delegation buys parallelism or parent-context relief, not latency — if the parent would only idle-wait on the child, it executes directly.
 
-The parent may cross a gate in either direction with a one-line justification.  Log every delegation in `.agents/notes/delegation-log.md` (date, agent, group, brief/report chars, wall time, outcome, override note).  A brief carries scope files, interface/invariants, the call-site list, the validation instruction, and which trivial details the child may decide; reports are <= 150 words — changed files, validation status, deviations, risks — and never restate the plan.  Batching trial: up to 3 disjoint porter-class groups may be queued in one message with one combined report; everything else stays one brief per gate review.  `fvm-docs` delegations pass the same gates; `fvm-reviewer` stays once-per-diff and ungated.
+The parent may cross a gate either way with a one-line justification; `fvm-docs` passes the same gates. The gates measure edits — read-only agents use the triggers below instead: normal in-policy delegations, never gate overrides, still logged.
 
-**Measured non-levers** (do not re-litigate without new data): reasoning-effort overrides (A/B: 40 s vs 41 s, no gain), respawning the implementer per group, removing stop-and-report.
+**Read-only triggers** — `fvm-explorer`: >= 2 independent read-only questions fan out while the parent advances the critical path (Phase 1 planning is the natural slot), or the answer needs a whole-file / cross-module / multi-doc sweep (> ~150 lines) where only the distilled conclusion matters; blocking questions are parent-direct, and solver-sensitive numerical-design reading is first-hand (headers, signatures, narrow windows otherwise). `fvm-test-triage`: the structured report (`first_error` / `tail` / `summarize_log`) is not self-explanatory and full-log or multi-cycle triage would flood parent context, triage parallels parent work, or the Phase-2 fuse rule routes a stalled group there; a single obvious failure read straight from the report is parent-direct. Each dispatch must outweigh the fixed overhead above; when in doubt, parent-direct.
 
-**Delegation shape (persistent implementer session)**: one approved plan maps
-to one persistent `fvm-implementer` session.  Spawn it once with the full
-step-group overview plus the first group's detailed brief, feed each later
-group as a queued message, quickly review each group's diff (`git diff --stat`
-first, then the touched hunks) before feeding the next one, and close the
-session when the plan is done — never respawn the implementer per step, and
-never `fork_context` it (see Token discipline).  The gate review is the
-parent's own quick pass and is never delegated: `fvm-reviewer` runs once, on
-the whole diff, in Phase 3 only, and a stalled group goes through the fuse
-rule — triage it yourself or via `fvm-test-triage`, never through a
-mid-Phase-2 reviewer (including a pipelined deep review of one group while
-the next one runs).  Solver-sensitive slices (SIMPLE/PISO, pressure
-correction, Rhie–Chow, flux reconstruction, boundary flux logic) stay
-delegable, but only with a **design-complete brief**: formulas, sign/index
-conventions, boundary handling, and every call site are fixed by the approved
-plan.  A detail the brief does not cover is a stop-and-report question, not a
-decision the child makes.
+**Session shape** — one approved plan, one persistent `fvm-implementer` session: spawn once with the step-group overview plus the first brief, feed later groups as queued messages, review each group's diff (`git diff --stat`, then the touched hunks) before the next, close when the plan is done — never respawn per group. Give flash sub-agents fresh context and a self-contained brief, never `fork_context` (forking inherits the parent model and whole context), and close every sub-agent once done — completed agents keep occupying a concurrency slot.
 
-Single source of truth for delegation: this section (routing table, delegation gates, delegation shape, parent-owned responsibilities) is the only home of the policy.  `.codex/agents/*.toml` own each agent's runtime behaviour (the mechanism layer), and the `refactor-code` skill only maps workflow phases to agents without restating the policy or the gate numbers.
+**Reviewer rule** — `fvm-reviewer` is the ungated exception: exactly once per diff, on the whole diff, Phase 3 only. Phase-2 gate reviews are the parent's own quick pass, never delegated; a stalled group goes to the fuse rule (triage it yourself or via `fvm-test-triage`), never to a mid-Phase-2 reviewer or a pipelined per-group deep review.
 
-The parent owns requirements analysis, decomposition, architecture, numerical
-design decisions, conflict resolution, final integration, and final review of
-solver-sensitive code (SIMPLE/PISO, pressure correction, Rhie–Chow, flux
-reconstruction, and boundary flux logic).  A flash child must escalate
-ambiguity, repeated test failures, numerical-risk findings, or cross-module
-changes instead of deciding them itself.  Keep child outputs compact and never
-let parallel children edit overlapping files.
+**Briefs, reports, logging** — log every delegation in `.agents/notes/delegation-log.md` (date, agent, group, brief/report chars, wall time, outcome, override note). Briefs carry scope files, interface/invariants, the call-site list, the validation instruction, and the trivial details the child may decide. Reports: <= 150 words — changed files, validation status, deviations, risks — never restating the plan; long material goes to a scratch file (`.agents/notes/<topic>.md`), the report returns summary plus path. Batching trial: up to 3 disjoint porter-class groups per message, one combined report; otherwise one brief per gate review.
+
+**Parent-owned work** — requirements analysis, decomposition, architecture, numerical design decisions, conflict resolution, final integration, and final review of solver-sensitive code (SIMPLE/PISO, pressure correction, Rhie–Chow, flux reconstruction, boundary flux logic); such slices stay delegable only with a design-complete brief (design gate). A flash child escalates ambiguity, repeated test failures, numerical-risk findings, or cross-module changes instead of deciding them; parallel children never edit overlapping files.
+
+**Measured non-levers** (do not re-litigate without new data): reasoning-effort overrides (A/B: 40 s vs 41 s), respawning the implementer per group, removing stop-and-report.
+
+Single source of truth for delegation: this section (routing table, gates, read-only triggers, session shape, parent-owned work). `.codex/agents/*.toml` own runtime behaviour; the `refactor-code` skill only maps workflow phases to agents, never restating policy or gate numbers.
 
 ### Token discipline (the parent context is the scarce resource)
 
-- Run one refactor phase per parent session.  A persistent implementer session may span all step groups of that one phase (see Delegation shape); state handed across phases or across agent sessions goes through `AGENTS.md` / `docs/`, never through conversation history.
-- Spawn flash sub-agents with a fresh context and a self-contained brief; never combine `fork_context` with `agent_type` (forked agents inherit the parent model and its whole context).
-- Reuse one live implementer session across the step groups of a plan (feed the groups as queued messages) instead of respawning it per group; close sub-agents once their work is done — completed agents keep occupying a concurrency slot.
-- Sub-agent reports must stay compact (a few hundred words); long material is written to a scratch file (e.g. `.agents/notes/<topic>.md`) and the report returns only the summary plus the path.
+- Run one refactor phase per parent session; state handed across phases or across agent sessions goes through `AGENTS.md` / `docs/`, never through conversation history.
 - Prefer an `fvm-explorer` distillation over the parent reading whole files; when the parent must read, read headers, signatures or narrow line windows, and run `git diff --stat` before any full diff.
 - `build_and_test` reports success compactly by default (`quiet=true`); pass `quiet=false` only when triaging a failure needs the full transcript.
 
@@ -82,6 +64,7 @@ let parallel children edit overlapping files.
 Full directory layout: see README.md (Project Structure).
 
 ## Naming Conventions
+
 - **Strict sub-namespaces**: `fvm::core`, `fvm::math`, `fvm::io`, `fvm::numerical`; each module has its own `include/` + `src/`.
 - Cross-module dependencies use `using` declarations for brevity (e.g. `math` uses `fvm::core::Scalar`). Declare them **inside the module's own namespace**, never at global scope: a global-scope `using` injects the alias into every translation unit that includes the header, hides missing includes (each header must list the aliases it actually uses), and collides with Eigen/pybind11 internals (measured: 269 MSVC C4459 warnings). A using-declaration imports one name only — it does not nest the other namespace.
 - **Dependency rule**: `core` → nothing; `math` → core (+ Eigen); `io` → core; `numerical` → core + math. Inside `numerical`: `Momentum` → Diffusion/Convection/GridOperators/TransportEquation/TimeScheme; `Pressure` → Momentum/GridOperators; `Simple`/`Piso` → Momentum/Pressure/Convection (they own the linear solvers). Do not introduce cycles.
@@ -139,5 +122,6 @@ Rules only; derivations and evidence: `docs/<module>.md` (mainly `docs/numerical
 - **SIMPLE/PISO reuse the same predictor/corrector, and PISO must refresh the Rhie–Chow data between correctors**: `refreshUHat(pred, velocity)` before every corrector after the first; `solvePiso` rejects `nCorrectors < 2` (`docs/numerical.md` §Piso).
 
 ## Next Phase (Phase 4)
+
 Next in 4.3b: `.vtu` writer + `pyfvm.read_su2` (mesh input is SU2-first; a Gmsh reader is an optional later addition sharing the same `MeshInput` mapping); 4.3c then adds non-orthogonal correction + validation. Application tests for the example cases are agreed in principle but not scheduled.
 Full roadmap: see README.md.
