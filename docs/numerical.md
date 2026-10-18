@@ -412,6 +412,17 @@ u^{(1)} = \hat u_1 - d\nabla p^{(1)} = u^{*} - d\,\nabla p'^{(1)} .$$
 
 以 OpenFOAM-14 的 `incompressibleFluid` 模块（`correctPressure.C` / `momentumPredictor.C`）为参照。两者数学上是同一算法，差异集中在公式写法、数据结构与工程化程度上。
 
+### 对比纪律
+
+对照结论有效的先决条件（自 `AGENTS.md` 迁入，2026-10）：
+
+- 先钉死对比契约：网格、物性、离散格式、全部边界条件、`dt`、求解器容差、算法设置（如 `nCorrectors`）；
+- 先做**单步对比**（`end_time == dt`），检查 `p(0,0)` 与进口 `phi/S` 到求解器容差量级；
+- 一个目录一种配置（绝不以不同设置复用 case 目录）；
+- `nCorrectors = 1` 与 `= 2` 都要跑；
+- 绝不放宽测试容差来掩盖差异；
+- 结论（含证据与已排除的假设）记录在本文档，不写进 `AGENTS.md`。
+
 ### PISO 与 OpenFOAM 的对照结论（2026-10）
 
 本项目的 PISO 与 OpenFOAM-14 做过逐单元/逐面、单步与多步的对照（参照算例 `~/OpenFOAM/gzh1057-14/run/pisoPoiseuille`：16×16、$\nu=1$、$\Delta t=0.02$、进出口 `fixedValue p`、进出口 U 零梯度、上下壁 no-slip、迎风、Euler、纯 PISO）。复现与对照用 `openfoam` MCP server（工具清单见 `AGENTS.md`）；被排除的假设见下一小节。
