@@ -16,17 +16,25 @@ There is no OpenFOAM skill: cross-check mechanics live in the `openfoam` MCP ser
 
 ## Codex Subagent Policy
 
-The project parent uses `glm-5.3` (configured in `.codex/config.toml`; the ZAI provider remains user-level).  The `glm-5.3-flash` custom agents in `.codex/agents/` are the **default executors** for bounded, low-reasoning work.  Once a task falls into a class below, delegate it automatically — no extra user approval is needed beyond the plan confirmation the workflow already requires:
+The project parent uses `glm-5.3` (configured in `.codex/config.toml`; the ZAI provider remains user-level).  The `glm-5.3-flash` custom agents in `.codex/agents/` are the executors for work that **passes the delegation gates** below; anything failing the gates is executed by the parent directly.  Delegating needs no extra user approval beyond the plan confirmation the workflow already requires:
 
 | Task class | Default agent | Mode |
 | --- | --- | --- |
-| Bounded code edits under an approved plan (refactor Phase 2) | `fvm-implementer` | serialized, disjoint write scopes |
+| Gate-passing code-edit groups under an approved plan (refactor Phase 2) | `fvm-implementer` | serialized, disjoint write scopes |
 | Structural/style review of a bounded diff (Phase 3 only) | `fvm-reviewer` | may run in parallel |
-| Documentation updates for an approved change (Phase 4) | `fvm-docs` | serialized |
+| Gate-passing documentation updates (Phase 4) | `fvm-docs` | serialized |
 | Build / ctest / binding / OpenFOAM log triage | `fvm-test-triage` | may run in parallel |
 | Read-only fact-finding answering one specific question | `fvm-explorer` | may run in parallel |
 
-Skip delegation and let the parent do the work directly when the round trip would cost more than the task itself: single-file or single-hunk fixes, questions answerable by reading one or two files, or tasks that would need repeated parent-child clarification.  Delegation pays off when it saves parent context (large material distilled into a summary) or moves mechanical multi-file edits onto the flash model.
+**Delegation gates** — the measured floor for one delegation round trip is ~40 s wall time and ~1k parent-side coordination tokens (`.agents/notes/fvm-implementer-benchmark.md`), so the gates exist to keep that cost off small work.  The Phase 1 plan labels every step group's executor (parent / `fvm-implementer`) according to:
+
+- **Size gate** (initial values; re-tune after every 10 log entries): delegate only if the group touches >= 3 files, or >= 2 files with >= 100 changed lines, or applies one pattern at >= 3 call sites (porter class — the brief carries a worked before/after example).
+- **Design gate** (unchanged): formulas, sign/index conventions, boundary handling, and every call site are fixed by the plan; a detail the brief does not cover is a stop-and-report question.  If a brief would be paste-ready, the parent pastes it instead of delegating.
+- **Value gate**: delegation buys parallelism or parent-context relief, not latency — if the parent would only idle-wait on the child, it executes directly.
+
+The parent may cross a gate in either direction with a one-line justification.  Log every delegation in `.agents/notes/delegation-log.md` (date, agent, group, brief/report chars, wall time, outcome, override note).  A brief carries scope files, interface/invariants, the call-site list, the validation instruction, and which trivial details the child may decide; reports are <= 150 words — changed files, validation status, deviations, risks — and never restate the plan.  Batching trial: up to 3 disjoint porter-class groups may be queued in one message with one combined report; everything else stays one brief per gate review.  `fvm-docs` delegations pass the same gates; `fvm-reviewer` stays once-per-diff and ungated.
+
+**Measured non-levers** (do not re-litigate without new data): reasoning-effort overrides (A/B: 40 s vs 41 s, no gain), respawning the implementer per group, removing stop-and-report.
 
 **Delegation shape (persistent implementer session)**: one approved plan maps
 to one persistent `fvm-implementer` session.  Spawn it once with the full
@@ -46,7 +54,7 @@ conventions, boundary handling, and every call site are fixed by the approved
 plan.  A detail the brief does not cover is a stop-and-report question, not a
 decision the child makes.
 
-Single source of truth for delegation: this section (routing table, skip threshold, delegation shape, parent-owned responsibilities) is the only home of the policy.  `.codex/agents/*.toml` own each agent's runtime behaviour (the mechanism layer), and the `refactor-code` skill only maps workflow phases to agents without restating the policy.
+Single source of truth for delegation: this section (routing table, delegation gates, delegation shape, parent-owned responsibilities) is the only home of the policy.  `.codex/agents/*.toml` own each agent's runtime behaviour (the mechanism layer), and the `refactor-code` skill only maps workflow phases to agents without restating the policy or the gate numbers.
 
 The parent owns requirements analysis, decomposition, architecture, numerical
 design decisions, conflict resolution, final integration, and final review of

@@ -17,8 +17,14 @@ assigned scope, or commit.
 If a brief leaves a design detail open - above all on solver-sensitive paths -
 stop and report the question instead of choosing an answer.
 
-Return the changed file list, implementation notes, test/build status, and any
-risk that needs the parent's review.
+For mechanical (porter) briefs that carry a worked example, apply the pattern
+exactly; when a site does not match the example's assumptions, stop and report
+instead of adapting.  Finish each brief before starting the next, and report
+after each brief — or once, combined, when the parent batches disjoint
+porter-class briefs in one message (cover each brief's files separately).
+Report with the parent's fixed compact template: changed files, validation
+status, deviations from the brief, and risks needing parent review; never
+restate the brief or the plan.
 """
 model = "glm-5.3-flash"
 sandbox_mode = "workspace-write"
