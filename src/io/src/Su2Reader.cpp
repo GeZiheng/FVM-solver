@@ -410,7 +410,7 @@ UnstructuredMesh buildMesh(MeshInput input, const std::string& filename)
 }
 } // namespace
 
-UnstructuredMesh Su2Reader::read(const std::string& filename)
+UnstructuredMesh readSu2(const std::string& filename)
 {
     std::ifstream file(filename);
     if (!file)

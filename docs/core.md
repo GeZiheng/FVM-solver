@@ -127,4 +127,4 @@ OpenFOAM `surfaceScalarField` 的对应物：一个长度为 `mesh.faceCount()` 
 
 ## VTK 输出
 
-`VtkWriter` 保持结构网格 `.vti` ImageData 路径，仅接受 `CartesianMesh`；`UnstructuredMesh` 重载输出 `.vtu` UnstructuredGrid。文件结构与格式细节见 `docs/io.md`。
+`writeVti` 保持结构网格 `.vti` ImageData 路径，仅接受 `CartesianMesh`；`writeVtu` 输出 `UnstructuredMesh` 的 `.vtu` UnstructuredGrid。文件结构与格式细节见 `docs/io.md`。

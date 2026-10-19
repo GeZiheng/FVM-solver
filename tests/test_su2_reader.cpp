@@ -12,7 +12,7 @@
 #include <string>
 
 using namespace fvm::core;
-using fvm::io::Su2Reader;
+using fvm::io::readSu2;
 
 namespace
 {
@@ -148,7 +148,7 @@ MARKER_ELEMS= 1
 TEST_CASE("Su2Reader reads a structured quad grid")
 {
     const TempSu2File file(structuredGrid);
-    const UnstructuredMesh mesh = Su2Reader::read(file.path().string());
+    const UnstructuredMesh mesh = readSu2(file.path().string());
     const Mesh& base = mesh;
 
     REQUIRE(base.cellCount() == 6);
@@ -178,7 +178,7 @@ TEST_CASE("Su2Reader reads a structured quad grid")
 TEST_CASE("Su2Reader normalizes a mixed mesh with a clockwise cell")
 {
     const TempSu2File file(mixedCells);
-    const UnstructuredMesh mesh = Su2Reader::read(file.path().string());
+    const UnstructuredMesh mesh = readSu2(file.path().string());
     const Mesh& base = mesh;
 
     REQUIRE(base.cellCount() == 3);
@@ -190,7 +190,7 @@ TEST_CASE("Su2Reader normalizes a mixed mesh with a clockwise cell")
 TEST_CASE("Su2Reader maps sparse one-based node ids")
 {
     const TempSu2File file(sparseQuad);
-    const UnstructuredMesh mesh = Su2Reader::read(file.path().string());
+    const UnstructuredMesh mesh = readSu2(file.path().string());
     const Mesh& base = mesh;
 
     REQUIRE(base.cellCount() == 1);
@@ -229,7 +229,7 @@ MARKER_TAG= west
 MARKER_ELEMS= 1
 3 4 1
 )");
-    const UnstructuredMesh mesh = Su2Reader::read(file.path().string());
+    const UnstructuredMesh mesh = readSu2(file.path().string());
     const Mesh& base = mesh;
 
     REQUIRE(base.cellCount() == 2);
@@ -241,7 +241,7 @@ MARKER_ELEMS= 1
 TEST_CASE("Su2Reader rejects NDIME other than two")
 {
     const TempSu2File file("NDIME= 3\n");
-    CHECK_THROWS_AS(Su2Reader::read(file.path().string()), std::invalid_argument);
+    CHECK_THROWS_AS(readSu2(file.path().string()), std::invalid_argument);
 }
 
 TEST_CASE("Su2Reader rejects an unsupported element type")
@@ -256,7 +256,7 @@ NELEM= 1
 3 1 2 3
 NMARK= 0
 )");
-    CHECK_THROWS_AS(Su2Reader::read(file.path().string()), std::invalid_argument);
+    CHECK_THROWS_AS(readSu2(file.path().string()), std::invalid_argument);
 }
 
 TEST_CASE("Su2Reader rejects a marker edge on an interior edge")
@@ -284,7 +284,7 @@ MARKER_TAG= south
 MARKER_ELEMS= 1
 3 1 2
 )");
-    CHECK_THROWS_AS(Su2Reader::read(file.path().string()), std::invalid_argument);
+    CHECK_THROWS_AS(readSu2(file.path().string()), std::invalid_argument);
 }
 
 TEST_CASE("Su2Reader rejects a boundary edge covered by no marker")
@@ -308,7 +308,7 @@ MARKER_TAG= north
 MARKER_ELEMS= 1
 3 3 4
 )");
-    CHECK_THROWS_AS(Su2Reader::read(file.path().string()), std::invalid_argument);
+    CHECK_THROWS_AS(readSu2(file.path().string()), std::invalid_argument);
 }
 
 TEST_CASE("Su2Reader rejects an unknown node reference")
@@ -323,7 +323,7 @@ NELEM= 1
 9 1 2 99 4
 NMARK= 0
 )");
-    CHECK_THROWS_AS(Su2Reader::read(file.path().string()), std::invalid_argument);
+    CHECK_THROWS_AS(readSu2(file.path().string()), std::invalid_argument);
 }
 
 TEST_CASE("Su2Reader rejects a duplicate node id")
@@ -337,7 +337,7 @@ NPOIN= 4
 NELEM= 0
 NMARK= 0
 )");
-    CHECK_THROWS_AS(Su2Reader::read(file.path().string()), std::invalid_argument);
+    CHECK_THROWS_AS(readSu2(file.path().string()), std::invalid_argument);
 }
 
 TEST_CASE("Su2Reader rejects a point-line count mismatch")
@@ -350,7 +350,7 @@ NPOIN= 4
 NELEM= 0
 NMARK= 0
 )");
-    CHECK_THROWS_AS(Su2Reader::read(file.path().string()), std::invalid_argument);
+    CHECK_THROWS_AS(readSu2(file.path().string()), std::invalid_argument);
 }
 
 TEST_CASE("Su2Reader rejects a marker element that is not a line")
@@ -368,7 +368,7 @@ MARKER_TAG= south
 MARKER_ELEMS= 1
 5 1 2
 )");
-    CHECK_THROWS_AS(Su2Reader::read(file.path().string()), std::invalid_argument);
+    CHECK_THROWS_AS(readSu2(file.path().string()), std::invalid_argument);
 }
 
 TEST_CASE("Su2Reader rejects a marker edge with an unknown node")
@@ -386,7 +386,7 @@ MARKER_TAG= west
 MARKER_ELEMS= 1
 3 9 1
 )");
-    CHECK_THROWS_AS(Su2Reader::read(file.path().string()), std::invalid_argument);
+    CHECK_THROWS_AS(readSu2(file.path().string()), std::invalid_argument);
 }
 
 TEST_CASE("Su2Reader rejects a non-manifold marker edge")
@@ -407,7 +407,7 @@ MARKER_TAG= bad
 MARKER_ELEMS= 1
 3 1 2
 )");
-    CHECK_THROWS_AS(Su2Reader::read(file.path().string()), std::invalid_argument);
+    CHECK_THROWS_AS(readSu2(file.path().string()), std::invalid_argument);
 }
 
 TEST_CASE("Su2Reader rejects a duplicate marker tag")
@@ -428,7 +428,7 @@ MARKER_TAG= south
 MARKER_ELEMS= 1
 3 3 4
 )");
-    CHECK_THROWS_AS(Su2Reader::read(file.path().string()), std::invalid_argument);
+    CHECK_THROWS_AS(readSu2(file.path().string()), std::invalid_argument);
 }
 
 TEST_CASE("Su2Reader rejects an empty element section")
@@ -442,12 +442,12 @@ NPOIN= 4
 NELEM= 0
 NMARK= 0
 )");
-    CHECK_THROWS_AS(Su2Reader::read(file.path().string()), std::invalid_argument);
+    CHECK_THROWS_AS(readSu2(file.path().string()), std::invalid_argument);
 }
 
 TEST_CASE("Su2Reader reports a non-existent file as unavailable")
 {
     const auto path = std::filesystem::temp_directory_path()
         / "fvm_su2_test_missing_file.su2";
-    CHECK_THROWS_AS(Su2Reader::read(path.string()), std::runtime_error);
+    CHECK_THROWS_AS(readSu2(path.string()), std::runtime_error);
 }

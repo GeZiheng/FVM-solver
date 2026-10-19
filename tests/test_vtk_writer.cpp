@@ -11,7 +11,7 @@
 #include <string>
 
 using namespace fvm::core;
-using fvm::io::VtkWriter;
+using fvm::io::writeVtu;
 
 namespace
 {
@@ -127,7 +127,7 @@ TEST_CASE("VtkWriter writes an UnstructuredGrid with mixed cells")
     velocity.v()(2) = 6.0;
 
     const TempVtkFile file;
-    VtkWriter::write(file.path().string(),
+    writeVtu(file.path().string(),
         mesh,
         { { "T", &temperature } },
         { { "U", &velocity } });
@@ -163,7 +163,7 @@ TEST_CASE("VtkWriter escapes UnstructuredGrid field names")
     temperature(0) = 1.0;
 
     const TempVtkFile file;
-    VtkWriter::write(file.path().string(),
+    writeVtu(file.path().string(),
         mesh,
         { { "R&D \"<q>\"", &temperature } },
         {});
@@ -191,7 +191,7 @@ TEST_CASE("VtkWriter maps a polygon cell to VTK_POLYGON")
 
     const UnstructuredMesh mesh(input);
     const TempVtkFile file;
-    VtkWriter::write(file.path().string(), mesh);
+    writeVtu(file.path().string(), mesh);
     const std::string contents = readFile(file.path());
 
     CHECK(contains(contents, "\n7\n"));
@@ -204,6 +204,6 @@ TEST_CASE("VtkWriter reports a .vtu open failure")
     const std::filesystem::path path =
         std::filesystem::path("fvm_missing_directory")
         / "fvm_vtk_test_failure.vtu";
-    CHECK_THROWS_AS(VtkWriter::write(path.string(), mesh),
+    CHECK_THROWS_AS(writeVtu(path.string(), mesh),
         std::runtime_error);
 }

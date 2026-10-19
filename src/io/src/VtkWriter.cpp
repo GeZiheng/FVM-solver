@@ -40,7 +40,7 @@ std::string xmlEscape(const std::string& text)
 }
 } // namespace
 
-void VtkWriter::write(const std::string& filename,
+void writeVti(const std::string& filename,
     const CartesianMesh& mesh,
     const std::vector<std::pair<std::string, const ScalarField*>>& scalarFields,
     const std::vector<std::pair<std::string, const VectorField*>>& vectorFields)
@@ -120,7 +120,7 @@ void VtkWriter::write(const std::string& filename,
     file.close();
 }
 
-void VtkWriter::write(const std::string& filename,
+void writeVtu(const std::string& filename,
     const UnstructuredMesh& mesh,
     const std::vector<std::pair<std::string, const ScalarField*>>& scalarFields,
     const std::vector<std::pair<std::string, const VectorField*>>& vectorFields)

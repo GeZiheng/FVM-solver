@@ -42,8 +42,6 @@ using fvm::core::ScalarField;
 using fvm::core::UnstructuredMesh;
 using fvm::core::Vector;
 using fvm::core::VectorField;
-using fvm::io::Su2Reader;
-using fvm::io::VtkWriter;
 using fvm::math::SolverConfig;
 using fvm::numerical::BCType;
 using fvm::numerical::BoundaryCondition;
@@ -282,7 +280,7 @@ void initializeMassFlux(const Mesh& mesh,
     numerical::initializeMassFlux(mesh, velocity, rho, bcU, bcV, bcP, flux);
 }
 
-/// VtkWriter::write with Python dicts {name: field}.
+/// io::writeVti with Python dicts {name: field}.
 void writeVti(const std::string& filename,
     const CartesianMesh& mesh,
     const py::dict& scalarFields,
@@ -304,10 +302,10 @@ void writeVti(const std::string& filename,
         requireSameMesh(mesh, *field, name.c_str());
         vectors.emplace_back(std::move(name), field);
     }
-    VtkWriter::write(filename, mesh, scalars, vectors);
+    io::writeVti(filename, mesh, scalars, vectors);
 }
 
-/// VtkWriter::write with Python dicts {name: field}.
+/// io::writeVtu with Python dicts {name: field}.
 void writeVtu(const std::string& filename,
     const UnstructuredMesh& mesh,
     const py::dict& scalarFields,
@@ -329,7 +327,7 @@ void writeVtu(const std::string& filename,
         requireSameMesh(mesh, *field, name.c_str());
         vectors.emplace_back(std::move(name), field);
     }
-    VtkWriter::write(filename, mesh, scalars, vectors);
+    io::writeVtu(filename, mesh, scalars, vectors);
 }
 
 void bindCore(py::module_& m)
@@ -645,7 +643,7 @@ void bindAll(py::module_& m)
         py::arg("scalars") = py::dict(), py::arg("vectors") = py::dict(),
         "Write scalar/vector fields (dicts of name -> field) to a .vti file.");
     m.def("read_su2", [](const std::string& filename)
-        { return Su2Reader::read(filename); },
+        { return io::readSu2(filename); },
         py::arg("path"),
         "Read a 2D SU2 ASCII mesh into a validated UnstructuredMesh.");
     m.def("write_vtu", &writeVtu,
