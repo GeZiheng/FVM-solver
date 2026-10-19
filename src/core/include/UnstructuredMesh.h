@@ -45,6 +45,12 @@ public:
         return faces_.size();
     }
 
+    /// Number of mesh points in input order.
+    Index pointCount() const
+    {
+        return points_.size();
+    }
+
     Index faceOwner(Index face) const override;
     Index faceNeighbour(Index face) const override;
     bool isBoundaryFace(Index face) const override;
@@ -63,6 +69,15 @@ public:
     IndexSpan patchFaces(Index patch) const override;
     Index facePatch(Index face) const override;
 
+    /// Point coordinate in mesh point order (no bounds check).
+    Point2 point(Index point) const;
+
+    /// Number of nodes in a cell's CCW-normalized loop.
+    Index cellNodeCount(Index cell) const;
+
+    /// Cell-loop node id in owner-outward orientation order (no bounds check).
+    Index cellNode(Index cell, Index local) const;
+
 private:
     struct Face
     {
@@ -73,6 +88,7 @@ private:
     };
 
     std::vector<Face> faces_;
+    std::vector<Point2> points_;
     std::vector<std::vector<Index>> cellLoops_;
     std::vector<Scalar> cellVolumes_;
     std::vector<Point2> cellCentroids_;

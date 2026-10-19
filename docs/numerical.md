@@ -406,7 +406,7 @@ u^{(1)} = \hat u_1 - d\nabla p^{(1)} = u^{*} - d\,\nabla p'^{(1)} .$$
 - 耦合路径也做了双表示覆盖：`assembleMomentum` 的 u/v、松弛 0.7/1.0、稳态与瞬态 Euler 共 8 种组合在 `1e-12` 内一致；端到端 `solveSimple` 通道流（east Dirichlet 压力）在两种表示下一致到 `1e-8`；
 - `tests/test_unstructured.cpp` 覆盖手工三角形网格的体积/中心/面积向量（两三角形拼成正方形时 $\alpha=3$、$\beta=3$）、非正交面对（$\mathbf k\ne0$ 且 $\mathbf k\cdot\mathbf d=0$、$\alpha>0$）以及构造器的非法输入拒绝。
 
-以下能力为 4.3b/4.3c 计划，当前**尚未实现**：Gmsh `.msh` 读取、`.vtu` 输出、显式非正交交叉扩散修正（$\mathbf k_f\cdot\nabla\phi$ deferred correction）、skewness correction。
+4.3b 的 `.vtu` 输出已完成。以下能力仍为 4.3c/后续计划：Gmsh `.msh` 读取、显式非正交交叉扩散修正（$\mathbf k_f\cdot\nabla\phi$ deferred correction）、skewness correction。
 
 ## 与 OpenFOAM 实现的对比
 

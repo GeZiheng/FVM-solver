@@ -1,6 +1,6 @@
 # python 模块说明（pyfvm 绑定）
 
-`python/` 提供 pybind11 绑定模块 `pyfvm`，让具体算例用 Python 脚本编写：建网格、numpy 填场、设边界、调 SIMPLE/PISO/输运求解、读回 numpy 后处理、写 vti。绑定层只做转发，不含任何数值逻辑；`fvm_core` 的 C++ API 不因绑定而改动。
+`python/` 提供 pybind11 绑定模块 `pyfvm`，让具体算例用 Python 脚本编写：建网格、读 SU2 网格、numpy 填场、设边界、调 SIMPLE/PISO/输运求解、读回 numpy 后处理、写 VTK（vti/vtu）。绑定层只做转发，不含任何数值逻辑；`fvm_core` 的 C++ API 不因绑定而改动。
 
 ## 目录结构
 
@@ -32,6 +32,8 @@ core：
 
 - `Mesh` 是多态基类绑定：`cell_count()` / `face_count()` / `face_owner(face)` / `face_neighbour(face)` / `is_boundary_face(face)` / `cell_faces(cell)` / `cell_volume(cell)` / `cell_centroid(cell)` / `face_centroid(face)` / `face_area_vector(face)` / `patch_count()` / `patch_name(patch)` / `patch_faces(patch)` / `face_patch(face)`。`face_neighbour()` 在边界面上返回无效单元哨兵 `SIZE_MAX`（即 C++ `Mesh::kInvalidCell` 的值），不要当作单元索引用。
 - `CartesianMesh(nx, ny, x_min, y_min, x_max, y_max)` 继承 `Mesh`，保留 `nx()` / `ny()` / `cell_count()` / `dx()` / `dy()` / `cell_volume(c)` / `cell_center(c)` / `cell_index(i, j)` / `cell_ij(c)`，并新增 `x_face(i, j)` / `y_face(i, j)` 返回全局面编号。
+- `UnstructuredMesh` 继承 `Mesh`，没有 Python 构造器，由 `read_su2(path)` 获得；方法为 `point_count()`、`point(i)`（返回 `(x, y)`）、`cell_node_count(c)` 与 `cell_node(c, local)`。
+- 自定义 `Point2` type caster 使 `cell_centroid` / `face_centroid` / `face_area_vector` 返回 `(x, y)` tuple。
 - `ScalarField(mesh, name="")`、`VectorField(mesh, name="")`（`.u` / `.v` 返回 `ScalarField`；`size()` 返回单元数，`set_constant(v)` 同时设置两个分量）、`FaceFluxField(mesh, name="")`。
 - `field.to_numpy()`：**零拷贝可写一维视图**，按全局单元编号存储；笛卡尔网格仍为 `j*nx+i`，可 `reshape(ny, nx)`。二维 `(i,j)` 读写接口已移除，用 `field.to_numpy()[mesh.cell_index(i,j)]`。
 - `flux.face_count()` / `flux.phi(face)` / `flux.set_phi(face, value)` / `flux.to_numpy()` / `flux.set_zero()` / `flux.cell_imbalance(cell)`：通量是单一按全局面编号的数组（零拷贝视图为 `to_numpy()`）。内部面 `phi>0` 表示 owner → neighbour，边界面为 owner 外向通量；`x()/y()/to_numpy_x()/to_numpy_y()` 已移除。
@@ -51,6 +53,8 @@ numerical：
 io：
 
 - `write_vti(filename, mesh, scalars={"name": ScalarField}, vectors={"name": VectorField})`。
+- `read_su2(path)` 返回 `UnstructuredMesh`；SU2 格式错误抛 `ValueError`，文件打开失败抛 `RuntimeError`。
+- `write_vtu(filename, mesh, scalars={"name": ScalarField}, vectors={"name": VectorField})` 写非结构网格结果；传入其他 mesh 的场抛 `ValueError`。
 
 约定与陷阱：
 

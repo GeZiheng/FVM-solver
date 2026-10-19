@@ -29,6 +29,21 @@ Scalar polygonTwiceArea(const std::vector<Index>& loop, const std::vector<Point2
 }
 } // namespace
 
+Point2 UnstructuredMesh::point(Index point) const
+{
+    return points_[point];
+}
+
+Index UnstructuredMesh::cellNodeCount(Index cell) const
+{
+    return cellLoops_[cell].size();
+}
+
+Index UnstructuredMesh::cellNode(Index cell, Index local) const
+{
+    return cellLoops_[cell][local];
+}
+
 UnstructuredMesh::UnstructuredMesh(const MeshInput& input)
 {
     for (const std::vector<Index>& loop : input.cells)
@@ -58,6 +73,7 @@ UnstructuredMesh::UnstructuredMesh(const MeshInput& input)
 
     // A face area vector follows the owner's edge orientation.  Normalizing
     // every cell to CCW order therefore makes each vector owner-outward.
+    points_ = input.points;
     cellLoops_ = input.cells;
     for (std::vector<Index>& loop : cellLoops_)
     {

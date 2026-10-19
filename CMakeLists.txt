@@ -67,6 +67,7 @@ target_sources(fvm_tests
         tests/test_mesh.cpp
         tests/test_unstructured.cpp
         tests/test_su2_reader.cpp
+        tests/test_vtk_writer.cpp
         tests/test_mesh_dual.cpp
         tests/test_linalg.cpp
         tests/test_field.cpp

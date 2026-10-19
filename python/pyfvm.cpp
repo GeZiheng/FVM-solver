@@ -22,8 +22,10 @@
 #include "CartesianMesh.h"
 #include "Piso.h"
 #include "Simple.h"
+#include "Su2Reader.h"
 #include "TimeScheme.h"
 #include "TransportEquation.h"
+#include "UnstructuredMesh.h"
 #include "VtkWriter.h"
 
 namespace py = pybind11;
@@ -37,8 +39,10 @@ using fvm::core::Index;
 using fvm::core::Mesh;
 using fvm::core::Scalar;
 using fvm::core::ScalarField;
+using fvm::core::UnstructuredMesh;
 using fvm::core::Vector;
 using fvm::core::VectorField;
+using fvm::io::Su2Reader;
 using fvm::io::VtkWriter;
 using fvm::math::SolverConfig;
 using fvm::numerical::BCType;
@@ -52,6 +56,43 @@ using fvm::numerical::SimpleConfig;
 using fvm::numerical::SimpleResiduals;
 using fvm::numerical::SimpleResult;
 using fvm::numerical::TimeScheme;
+
+} // namespace fvm::python
+
+namespace pybind11::detail {
+template <>
+struct type_caster<fvm::core::Point2>
+{
+    PYBIND11_TYPE_CASTER(fvm::core::Point2, _("tuple[float, float]"));
+
+    bool load(handle src, bool convert)
+    {
+        make_caster<std::pair<fvm::core::Scalar, fvm::core::Scalar>>
+            pairCaster;
+        if (!pairCaster.load(src, convert))
+        {
+            return false;
+        }
+        const auto coordinates = static_cast<
+            std::pair<fvm::core::Scalar, fvm::core::Scalar>>(pairCaster);
+        value.x = coordinates.first;
+        value.y = coordinates.second;
+        return true;
+    }
+
+    static handle cast(const fvm::core::Point2& src,
+        return_value_policy policy,
+        handle parent)
+    {
+        return make_caster<
+            std::pair<fvm::core::Scalar, fvm::core::Scalar>>::cast(
+            std::make_pair(src.x, src.y), policy, parent);
+    }
+};
+} // namespace pybind11::detail
+
+namespace fvm::python
+{
 
 /// Zero-copy writable 1-D numpy view over an Eigen vector; `owner` (the
 /// field object) is kept alive by the array's base.
@@ -266,6 +307,31 @@ void writeVti(const std::string& filename,
     VtkWriter::write(filename, mesh, scalars, vectors);
 }
 
+/// VtkWriter::write with Python dicts {name: field}.
+void writeVtu(const std::string& filename,
+    const UnstructuredMesh& mesh,
+    const py::dict& scalarFields,
+    const py::dict& vectorFields)
+{
+    std::vector<std::pair<std::string, const ScalarField*>> scalars;
+    for (const auto& item : scalarFields)
+    {
+        auto name = py::cast<std::string>(item.first);
+        const ScalarField* field = py::cast<const ScalarField*>(item.second);
+        requireSameMesh(mesh, *field, name.c_str());
+        scalars.emplace_back(std::move(name), field);
+    }
+    std::vector<std::pair<std::string, const VectorField*>> vectors;
+    for (const auto& item : vectorFields)
+    {
+        auto name = py::cast<std::string>(item.first);
+        const VectorField* field = py::cast<const VectorField*>(item.second);
+        requireSameMesh(mesh, *field, name.c_str());
+        vectors.emplace_back(std::move(name), field);
+    }
+    VtkWriter::write(filename, mesh, scalars, vectors);
+}
+
 void bindCore(py::module_& m)
 {
     py::class_<Mesh>(m, "Mesh")
@@ -361,6 +427,26 @@ void bindCore(py::module_& m)
             }, py::arg("cell"))
         .def("x_face", &CartesianMesh::xFace, py::arg("i"), py::arg("j"))
         .def("y_face", &CartesianMesh::yFace, py::arg("i"), py::arg("j"));
+
+    py::class_<UnstructuredMesh, Mesh>(m, "UnstructuredMesh")
+        .def("point_count", &UnstructuredMesh::pointCount)
+        .def("point", [](const UnstructuredMesh& mesh, Index point)
+            {
+                requireIndex(point < mesh.pointCount());
+                return mesh.point(point);
+            }, py::arg("point"))
+        .def("cell_node_count", [](const UnstructuredMesh& mesh, Index cell)
+            {
+                requireIndex(cell < mesh.cellCount());
+                return mesh.cellNodeCount(cell);
+            }, py::arg("cell"))
+        .def("cell_node", [](const UnstructuredMesh& mesh, Index cell,
+                Index local)
+            {
+                requireIndex(cell < mesh.cellCount());
+                requireIndex(local < mesh.cellNodeCount(cell));
+                return mesh.cellNode(cell, local);
+            }, py::arg("cell"), py::arg("local"));
 
     // Fields hold a mesh reference: keep the mesh alive while the field lives.
     py::class_<ScalarField>(m, "ScalarField")
@@ -558,6 +644,14 @@ void bindAll(py::module_& m)
         py::arg("filename"), py::arg("mesh"),
         py::arg("scalars") = py::dict(), py::arg("vectors") = py::dict(),
         "Write scalar/vector fields (dicts of name -> field) to a .vti file.");
+    m.def("read_su2", [](const std::string& filename)
+        { return Su2Reader::read(filename); },
+        py::arg("path"),
+        "Read a 2D SU2 ASCII mesh into a validated UnstructuredMesh.");
+    m.def("write_vtu", &writeVtu,
+        py::arg("filename"), py::arg("mesh"),
+        py::arg("scalars") = py::dict(), py::arg("vectors") = py::dict(),
+        "Write scalar/vector fields (dicts of name -> field) to a .vtu file.");
 }
 
 } // namespace fvm::python
@@ -565,7 +659,8 @@ void bindAll(py::module_& m)
 PYBIND11_MODULE(pyfvm, m)
 {
     m.doc() = "Python bindings for the FVM-solver (2D Cartesian FVM: "
-              "convection-diffusion transport, SIMPLE, PISO). Fluxes use a "
+              "convection-diffusion transport, SIMPLE, PISO). Meshes may be "
+              "Cartesian or SU2-read unstructured meshes. Fluxes use a "
               "single per-face array; BoundaryField requires a mesh.";
     fvm::python::bindAll(m);
 }

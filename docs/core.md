@@ -91,6 +91,8 @@ struct MeshInput {
 
 `makeStructuredMesh(nx, ny, xMin, yMin, xMax, yMax)` 用非结构路径生成与 `CartesianMesh` 相同的结构网格：单元按 j-major 创建，因此单元编号同为 `cellIndex(i,j)`，patch 也保持 east/north/west/south 顺序。它是双实现回归测试的基准，不用于替代日常结构网格。
 
+`UnstructuredMesh` 保留 `MeshInput` 输入点，并暴露 `pointCount()` / `point(i)` / `cellNodeCount(c)` / `cellNode(c, local)`。单元顶点访问按构造时逆时针规范化后的环序返回；该 CCW 约定与 owner 外向面积向量的推导一致。
+
 ## MeshGeomCache：派生几何系数缓存
 
 `MeshGeomCache(const Mesh&)` 预计算所有面相关的几何系数，避免装配循环重复求距离和点积：
@@ -125,4 +127,4 @@ OpenFOAM `surfaceScalarField` 的对应物：一个长度为 `mesh.faceCount()` 
 
 ## VTK 输出
 
-`VtkWriter` 保持不变：输出 `.vti` ImageData，仅接受 `CartesianMesh`。面向任意多边形网格的 `.vtu` 输出计划在 4.3b 引入。
+`VtkWriter` 保持结构网格 `.vti` ImageData 路径，仅接受 `CartesianMesh`；`UnstructuredMesh` 重载输出 `.vtu` UnstructuredGrid。文件结构与格式细节见 `docs/io.md`。

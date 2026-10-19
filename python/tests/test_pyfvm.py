@@ -236,5 +236,125 @@ class TestIoBinding(unittest.TestCase):
             self.assertIn(b'"U"', content)
 
 
+class TestSu2Bindings(unittest.TestCase):
+    SU2_CONTENT = """NDIME= 2
+NPOIN= 6
+1 0.0 0.0
+2 1.0 0.0
+3 0.0 1.0
+4 1.0 1.0
+5 2.0 0.0
+6 2.0 1.0
+NELEM= 3
+5 1 2 4
+5 1 4 3
+9 2 4 6 5
+NMARK= 4
+MARKER_TAG= bottom
+MARKER_ELEMS= 2
+3 1 2
+3 2 5
+MARKER_TAG= right
+MARKER_ELEMS= 1
+3 5 6
+MARKER_TAG= top
+MARKER_ELEMS= 2
+3 6 4
+3 4 3
+MARKER_TAG= left
+MARKER_ELEMS= 1
+3 3 1
+"""
+
+    def test_point2_geometry_bindings(self):
+        cartesian = fvm.CartesianMesh(4, 4, 0.0, 0.0, 1.0, 1.0)
+        cx, cy = cartesian.cell_centroid(0)
+        self.assertEqual((cx, cy), (0.125, 0.125))
+        # Cartesian face 0 is xFace(0, 0): the west boundary face.
+        fx, fy = cartesian.face_centroid(0)
+        self.assertEqual((fx, fy), (0.0, 0.125))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mixed.su2")
+            with open(path, "w", encoding="ascii") as fh:
+                fh.write(self.SU2_CONTENT)
+            mesh = fvm.read_su2(path)
+
+        cx, cy = mesh.cell_centroid(0)
+        self.assertAlmostEqual(cx, 2.0 / 3.0)
+        self.assertAlmostEqual(cy, 1.0 / 3.0)
+        bottom_face = mesh.patch_faces(0)[0]
+        ax, ay = mesh.face_area_vector(bottom_face)
+        self.assertAlmostEqual(ax, 0.0)
+        self.assertAlmostEqual(ay, -1.0)
+
+    def test_read_su2_smoke(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mixed.su2")
+            with open(path, "w", encoding="ascii") as fh:
+                fh.write(self.SU2_CONTENT)
+            mesh = fvm.read_su2(path)
+
+        self.assertEqual(mesh.cell_count(), 3)
+        self.assertEqual(mesh.point_count(), 6)
+        self.assertEqual(mesh.patch_count(), 4)
+        self.assertEqual([mesh.patch_name(i) for i in range(4)],
+                         ["bottom", "right", "top", "left"])
+        self.assertEqual(mesh.cell_node_count(0), 3)
+        self.assertEqual(mesh.cell_node_count(2), 4)
+        self.assertEqual(mesh.point(0), (0.0, 0.0))
+        self.assertEqual(mesh.point(5), (2.0, 1.0))
+
+    def test_write_vtu_smoke(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            su2_path = os.path.join(tmp, "mixed.su2")
+            with open(su2_path, "w", encoding="ascii") as fh:
+                fh.write(self.SU2_CONTENT)
+            mesh = fvm.read_su2(su2_path)
+
+            T = fvm.ScalarField(mesh, "T")
+            T.to_numpy()[:] = [1.0, 2.0, 3.0]
+            U = fvm.VectorField(mesh, "U")
+            U.u.to_numpy()[:] = [1.0, 3.0, 5.0]
+            U.v.to_numpy()[:] = [2.0, 4.0, 6.0]
+
+            path = os.path.join(tmp, "smoke.vtu")
+            fvm.write_vtu(path, mesh, {"T": T}, {"U": U})
+            with open(path, "r", encoding="ascii") as fh:
+                content = fh.read()
+
+        self.assertIn("UnstructuredGrid", content)
+        self.assertIn('NumberOfPoints="6"', content)
+        self.assertIn('NumberOfCells="3"', content)
+        self.assertIn("5 5 9", content)
+        self.assertIn("3 6 10", content)
+        self.assertIn("1 2 0.0", content)
+
+    def test_write_vtu_rejects_foreign_field(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            su2_path = os.path.join(tmp, "mixed.su2")
+            with open(su2_path, "w", encoding="ascii") as fh:
+                fh.write(self.SU2_CONTENT)
+            mesh = fvm.read_su2(su2_path)
+            other = fvm.CartesianMesh(4, 4, 0.0, 0.0, 1.0, 1.0)
+            foreign = fvm.ScalarField(other, "T")
+
+            path = os.path.join(tmp, "foreign.vtu")
+            with self.assertRaises(ValueError):
+                fvm.write_vtu(path, mesh, {"T": foreign}, {})
+
+    def test_read_su2_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "missing.su2")
+            with self.assertRaises(RuntimeError):
+                fvm.read_su2(missing)
+
+            invalid = os.path.join(tmp, "invalid.su2")
+            with open(invalid, "w", encoding="ascii") as fh:
+                fh.write("NDIME= 2\nNPOIN= x\n")
+            with self.assertRaises(ValueError):
+                fvm.read_su2(invalid)
+
+
 if __name__ == "__main__":
     unittest.main()
