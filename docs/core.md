@@ -63,7 +63,7 @@ struct IndexSpan;                            // C++17 下的非拥有索引区�
 
 | 函数 | 说明 / 公式 |
 | ------ | ------------ |
-| `cellCenter(i, j)` | $x=x_{\min}+(i+\tfrac12)\Delta x$，$y=y_{\min}+(j+\tfrac12)\Delta y$ |
+| `cellCenter(i, j)` | $x=x_{\min}+(i+\tfrac12)\Delta x,\ \ y=y_{\min}+(j+\tfrac12)\Delta y$ |
 | `cellIndex(i, j)` / `cellIJ(cell)` | $\text{cell}=j\,n_x+i$ 及其逆映射 |
 | `xFace(i, j)` / `yFace(i, j)` | 上述全局 x/y 面编号 |
 | `cellVolume(cell)` | $\Delta x\,\Delta y$ |
@@ -100,8 +100,8 @@ struct MeshInput {
 | 接口 | 定义 | 说明 |
 | ------ | ------ | ------ |
 | `interpWeight(face)` | $g_f=\lVert x_f-x_N\rVert/\lVert x_P-x_N\rVert$ | owner 到面/邻点的线性权重；边界面返回 1 |
-| `innerCoef(face)` | $\alpha_f=(\mathbf S_f\cdot\mathbf d)/(\mathbf d\cdot\mathbf d)$，$\mathbf d=x_N-x_P$ | 内部扩散几何系数；边界面调用抛异常 |
-| `boundaryCoef(face)` | $\beta_f=(\mathbf S_f\cdot\mathbf S_f)/(\mathbf S_f\cdot\boldsymbol\delta)$，$\boldsymbol\delta=x_f-x_P$ | 边界扩散几何系数；内部面调用抛异常 |
+| `innerCoef(face)` | $\alpha_f=(\mathbf S_f\cdot\mathbf d)/(\mathbf d\cdot\mathbf d),\ \ \mathbf d=x_N-x_P$ | 内部扩散几何系数；边界面调用抛异常 |
+| `boundaryCoef(face)` | $\beta_f=(\mathbf S_f\cdot\mathbf S_f)/(\mathbf S_f\cdot\boldsymbol\delta),\ \ \boldsymbol\delta=x_f-x_P$ | 边界扩散几何系数；内部面调用抛异常 |
 | `nonOrthCorrection(face)` | $\mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f$ | 内部面非正交部分；正交网格为零，边界面调用抛异常 |
 | `maxNonOrthogonality()` | $\max_f \cos^{-1}\left(\frac{\mathbf S_f\cdot\mathbf d_f}{\lVert\mathbf S_f\rVert\,\lVert\mathbf d_f\rVert}\right)$ | 以度为单位，仅统计内部面 |
 

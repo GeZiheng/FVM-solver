@@ -18,8 +18,8 @@ $$\underbrace{\sum_f F_f\, \phi_f}_{\text{对流通量}} = \underbrace{\sum_f D_
 
 | 系数 | 通用公式 | 均匀笛卡尔退化 |
 | ------ | ---------- | ---------------- |
-| 内部扩散 $\alpha_f$ | $(\mathbf S_f\cdot\mathbf d)/(\mathbf d\cdot\mathbf d)$，$\mathbf d=x_N-x_P$ | $S_f/d_{PN}$ |
-| 边界扩散 $\beta_f$ | $(\mathbf S_f\cdot\mathbf S_f)/(\mathbf S_f\cdot\boldsymbol\delta)$，$\boldsymbol\delta=x_f-x_P$ | $S_f/d_{Pb}$ |
+| 内部扩散 $\alpha_f$ | $(\mathbf S_f\cdot\mathbf d)/(\mathbf d\cdot\mathbf d),\ \ \mathbf d=x_N-x_P$ | $S_f/d_{PN}$ |
+| 边界扩散 $\beta_f$ | $(\mathbf S_f\cdot\mathbf S_f)/(\mathbf S_f\cdot\boldsymbol\delta),\ \ \boldsymbol\delta=x_f-x_P$ | $S_f/d_{Pb}$ |
 | 插值权重 $g_f$ | $\lVert x_f-x_N\rVert/\lVert x_P-x_N\rVert$ | $1/2$ |
 | 边界质量通量 | $F_b=\rho\,(u_b\mathbf S_x+v_b\mathbf S_y)$ | 与旧的分量/面规则一致 |
 
@@ -384,9 +384,9 @@ u_P = \underbrace{\frac{b_{np,P}-\sum_N A_{PN}u_N}{a_P}}_{\hat u_P} - d_P\,(\nab
 
 也就是说 $u=\hat u-d\nabla p$ 只是动量方程的**移项**（代码里 $b_{np}$ 即 `rhsNoPressure`：含 ddt 与松弛源，不含压力源），而它成立的**前提是 $u$ 恰为该 $\nabla p$ 下的动量解**。$u^{*}$ 正是 $p^{(0)}$ 的动量解，所以
 
-$$\hat u_1 = u^{*} + d\,\nabla p^{(0)}
+$$\hat u_1 = u^* + d\nabla p^{(0)}
 \;\Longrightarrow\;
-u^{(1)} = \hat u_1 - d\nabla p^{(1)} = u^{*} - d\,\nabla {p'}^{(1)} .$$
+u^{(1)} = \hat u_1 - d\nabla p^{(1)} = u^{*} - d\nabla {p'}^{(1)}$$
 
 对 $k\ge2$ 这个前提不再成立：$u^{(k-1)}$ 不是 $p^{(k-1)}$ 的动量解，两者相差残差 $R=-\sum_N a_N\big(u^{(k-1)}_N-u^{(k-2)}_N\big)$（即被冻结的非对角耦合），所以必须用当前的 $\hat u_k$ 重新解绝对压力并以 $u^{(k)}=\hat u_k-d\nabla p^{(k)}$ 重建速度——这正是"每个附加修正子前刷新 $\hat u$"的原因，也是 $k\ge2$ 的路径与"只做一次增量修正再叠加"不同的根源。
 
