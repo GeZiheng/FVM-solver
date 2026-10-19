@@ -16,5 +16,6 @@ __pycache__/
 # solver output written by python/examples/ scripts to the CWD
 *.vti
 
-# agent notes
+# agent notes and plans
 .agents/notes/
+.agents/plans/
