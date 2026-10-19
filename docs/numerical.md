@@ -17,7 +17,7 @@ $$\underbrace{\sum_f F_f\, \phi_f}_{\text{对流通量}} = \underbrace{\sum_f D_
 - **派生几何**由 `MeshGeomCache` 提供（定义见 [core.md](core.md)）。离散中实际使用的系数及其在笛卡尔网格上的退化形式：
 
 | 系数 | 通用公式 | 均匀笛卡尔退化 |
-|------|----------|----------------|
+| ------ | ---------- | ---------------- |
 | 内部扩散 $\alpha_f$ | $(\mathbf S_f\cdot\mathbf d)/(\mathbf d\cdot\mathbf d)$，$\mathbf d=x_N-x_P$ | $S_f/d_{PN}$ |
 | 边界扩散 $\beta_f$ | $(\mathbf S_f\cdot\mathbf S_f)/(\mathbf S_f\cdot\boldsymbol\delta)$，$\boldsymbol\delta=x_f-x_P$ | $S_f/d_{Pb}$ |
 | 插值权重 $g_f$ | $\lVert x_f-x_N\rVert/\lVert x_P-x_N\rVert$ | $1/2$ |
@@ -323,7 +323,15 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P\, (\nabla p_{\text{sol}})_P$$
 
 收敛判据（三者同时小于 `SimpleConfig::tolerance`）：
 
-- 连续性：$\max_P |b_P - (A p_{\text{old}})_P| / F_{ref}$（压力方程在旧压力处的初始残差，即该次修正要消除的质量不平衡；与旧写法的 $\max_P|m_P|$ 等价。纯 Neumann 时被消元的 0 号行按冗余关系 $-\sum$ 还原后一起参与取最大），$F_{ref} = \rho \cdot \max\lVert\mathbf{u}\rVert \cdot h_{ref}$，$h_{ref}=\sqrt{\sum_P V_P/N}$；方形单元上等于旧的 $(dx+dy)/2$；
+- 连续性——压力方程在旧压力处的初始残差，即该次修正要消除的质量不平衡：
+
+  $$\max_P \frac{|r_P|}{F_{ref}}, \qquad r_P = b_P - (A p_{\text{old}})_P$$
+
+  与旧写法的 $\max_P|m_P|$ 等价。纯 Neumann 时被消元的 0 号行按矩阵的行冗余关系（各列和为零）$r_0 = -\sum_{P \neq 0} r_P$ 还原后一起参与取最大。参考通量与参考长度为
+
+  $$F_{ref} = \rho \cdot \max\lVert\mathbf{u}\rVert \cdot h_{ref}, \qquad h_{ref} = \sqrt{\sum_P V_P / N}$$
+
+  $h_{ref}$ 在方形单元上等于旧的 $(dx+dy)/2$；
 - 速度：$\max_P |\Delta u| / \max\lVert\mathbf{u}\rVert$（$v$ 同理）。
 
 | 类型 | 说明 |
@@ -378,7 +386,7 @@ u_P = \underbrace{\frac{b_{np,P}-\sum_N A_{PN}u_N}{a_P}}_{\hat u_P} - d_P\,(\nab
 
 $$\hat u_1 = u^{*} + d\,\nabla p^{(0)}
 \;\Longrightarrow\;
-u^{(1)} = \hat u_1 - d\nabla p^{(1)} = u^{*} - d\,\nabla p'^{(1)} .$$
+u^{(1)} = \hat u_1 - d\nabla p^{(1)} = u^{*} - d\,\nabla {p'}^{(1)} .$$
 
 对 $k\ge2$ 这个前提不再成立：$u^{(k-1)}$ 不是 $p^{(k-1)}$ 的动量解，两者相差残差 $R=-\sum_N a_N\big(u^{(k-1)}_N-u^{(k-2)}_N\big)$（即被冻结的非对角耦合），所以必须用当前的 $\hat u_k$ 重新解绝对压力并以 $u^{(k)}=\hat u_k-d\nabla p^{(k)}$ 重建速度——这正是"每个附加修正子前刷新 $\hat u$"的原因，也是 $k\ge2$ 的路径与"只做一次增量修正再叠加"不同的根源。
 
