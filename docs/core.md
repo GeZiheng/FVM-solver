@@ -43,14 +43,14 @@ struct IndexSpan;                            // C++17 下的非拥有索引区�
 ### 设计思路
 
 - **继承 `Mesh`，保留结构化便捷层**：`nx/ny/dx/dy/bounds/cellIndex/cellIJ/cellCenter` 服务于测试与 Python 绑定；数值代码仍只应使用 `const Mesh&`。
-- **单元中心（cell-centered）**：未知量存储在单元中心，线性索引仍为 $\text{cell}=j\,n_x+i$。
+- **单元中心（cell-centered）**：未知量存储在单元中心，线性索引仍为 $\text{cell}=j n_x+i$。
 - **全局面编号**：
 
   $$
-  x_f(i,j)=j\,(n_x+1)+i,\quad i\in[0,n_x],\ j\in[0,n_y);
+  x_f(i,j)=j (n_x+1)+i,\quad i\in[0,n_x],\ j\in[0,n_y);
   $$
   $$
-  y_f(i,j)=(n_x+1)\,n_y+j\,n_x+i,\quad i\in[0,n_x),\ j\in[0,n_y].
+  y_f(i,j)=(n_x+1) n_y+j n_x+i,\quad i\in[0,n_x),\ j\in[0,n_y].
   $$
 
   总面数 $(n_x+1)n_y+n_x(n_y+1)$。内部面 owner 取西/南单元，owner → neighbour 为 $+x/+y$；边界面 owner 是唯一相邻单元。
@@ -64,9 +64,9 @@ struct IndexSpan;                            // C++17 下的非拥有索引区�
 | 函数 | 说明 / 公式 |
 | ------ | ------------ |
 | `cellCenter(i, j)` | $x=x_{\min}+(i+\tfrac12)\Delta x,\ \ y=y_{\min}+(j+\tfrac12)\Delta y$ |
-| `cellIndex(i, j)` / `cellIJ(cell)` | $\text{cell}=j\,n_x+i$ 及其逆映射 |
+| `cellIndex(i, j)` / `cellIJ(cell)` | $\text{cell}=j n_x+i$ 及其逆映射 |
 | `xFace(i, j)` / `yFace(i, j)` | 上述全局 x/y 面编号 |
-| `cellVolume(cell)` | $\Delta x\,\Delta y$ |
+| `cellVolume(cell)` | $\Delta x \Delta y$ |
 | `xMin/yMin/xMax/yMax` | 计算域边界 |
 
 ## UnstructuredMesh：多边形非结构网格
@@ -103,7 +103,7 @@ struct MeshInput {
 | `innerCoef(face)` | $\alpha_f=(\mathbf S_f\cdot\mathbf d)/(\mathbf d\cdot\mathbf d),\ \ \mathbf d=x_N-x_P$ | 内部扩散几何系数；边界面调用抛异常 |
 | `boundaryCoef(face)` | $\beta_f=(\mathbf S_f\cdot\mathbf S_f)/(\mathbf S_f\cdot\boldsymbol\delta),\ \ \boldsymbol\delta=x_f-x_P$ | 边界扩散几何系数；内部面调用抛异常 |
 | `nonOrthCorrection(face)` | $\mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f$ | 内部面非正交部分；正交网格为零，边界面调用抛异常 |
-| `maxNonOrthogonality()` | $\max_f \cos^{-1}\left(\frac{\mathbf S_f\cdot\mathbf d_f}{\lVert\mathbf S_f\rVert\,\lVert\mathbf d_f\rVert}\right)$ | 以度为单位，仅统计内部面 |
+| `maxNonOrthogonality()` | $\max_f \cos^{-1}\left(\frac{\mathbf S_f\cdot\mathbf d_f}{\lVert\mathbf S_f\rVert \lVert\mathbf d_f\rVert}\right)$ | 以度为单位，仅统计内部面 |
 
 ## ScalarField / VectorField：单元中心场
 
