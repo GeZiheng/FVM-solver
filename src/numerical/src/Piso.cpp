@@ -1,5 +1,6 @@
 #include "Piso.h"
 #include "Convection.h"
+#include "MeshGeomCache.h"
 #include "Momentum.h"
 #include "Pressure.h"
 
@@ -9,6 +10,7 @@
 
 namespace fvm::numerical
 {
+using fvm::core::MeshGeomCache;
 
 PisoResult solvePiso(const Mesh& mesh,
     Scalar rho,
@@ -35,6 +37,16 @@ PisoResult solvePiso(const Mesh& mesh,
             "solvePiso: nCorrectors must be >= 2; with a single corrector the "
             "PISO loop reaches its own fixed point after one sweep and "
             "diverges (see docs/numerical.md)");
+    }
+    if (config.corrections.nNonOrthogonalCorrectors < 0)
+    {
+        throw std::invalid_argument(
+            "solvePiso: nNonOrthogonalCorrectors must be non-negative");
+    }
+    if (MeshGeomCache(mesh).maxNonOrthogonality() > 70.0)
+    {
+        std::cerr << "warning: max non-orthogonality exceeds 70 degrees; "
+            "deferred corrections may converge slowly\n";
     }
 
     const Index nCells = mesh.cellCount();
@@ -79,7 +91,8 @@ PisoResult solvePiso(const Mesh& mesh,
             bcP,
             1.0,
             time,
-            *momSolver);
+            *momSolver,
+            config.corrections);
 
         // Several pressure correctors; correctPressure rebuilds the velocity
         // from the absolute pressure, so repeated calls accumulate.
@@ -107,7 +120,8 @@ PisoResult solvePiso(const Mesh& mesh,
                 1.0,
                 velocity,
                 pressure,
-                flux);
+                flux,
+                config.corrections);
         }
 
         t += config.dt;

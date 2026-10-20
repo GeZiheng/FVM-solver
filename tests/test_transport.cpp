@@ -1,4 +1,5 @@
 #include "BoundaryCondition.h"
+#include "CorrectionOptions.h"
 #include "Convection.h"
 #include "Diffusion.h"
 #include "Field.h"
@@ -39,6 +40,53 @@ TEST_CASE("Transport: zero velocity reduces to pure diffusion")
     CHECK((sys.A.native() - Adiff.native()).norm()
           == doctest::Approx(0.0).epsilon(1e-15));
     CHECK((sys.b - bdiff).norm() == doctest::Approx(0.0).epsilon(1e-15));
+}
+
+TEST_CASE("Transport: explicit correction is zero on Cartesian meshes")
+{
+    CartesianMesh mesh(8, 6, 0.0, 0.0, 2.0, 1.5);
+    ScalarField gamma(mesh, "gamma");
+    gamma.setConstant(1.2);
+    VectorField velocity(mesh, "velocity");
+    velocity.u().setConstant(0.3);
+    velocity.v().setConstant(-0.2);
+    ScalarField phi(mesh, "phi");
+    for (Index cell = 0; cell < mesh.cellCount(); ++cell)
+    {
+        phi(cell) = 1.0 + 0.1 * static_cast<Scalar>(cell);
+    }
+
+    BoundaryField bc(mesh);
+    bc.set(BoundaryField::West, BCType::Dirichlet, 1.0);
+    bc.set(BoundaryField::East, BCType::Dirichlet, 2.0);
+
+    const FaceFluxField flux
+        = interpolateCellVelocityFlux(mesh, velocity, 1.0);
+    auto legacy = assembleTransport(mesh,
+        flux,
+        gamma,
+        ConvectionScheme::Upwind,
+        bc);
+    CorrectionOptions corrections;
+    auto corrected = assembleTransport(mesh,
+        flux,
+        gamma,
+        ConvectionScheme::Upwind,
+        bc,
+        nullptr,
+        nullptr,
+        &phi,
+        corrections);
+    SparseMatrix legacyDense = legacy.A;
+    SparseMatrix correctedDense = corrected.A;
+    legacyDense.finalize();
+    correctedDense.finalize();
+
+    CHECK((legacyDense.native().toDense()
+        - correctedDense.native().toDense()).norm()
+        == doctest::Approx(0.0).epsilon(1e-15));
+    CHECK((legacy.b - corrected.b).lpNorm<Eigen::Infinity>()
+        == doctest::Approx(0.0).epsilon(1e-15));
 }
 
 TEST_CASE(

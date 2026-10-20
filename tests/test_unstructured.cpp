@@ -190,6 +190,31 @@ TEST_CASE("UnstructuredMesh non-orthogonal triangle pair")
     const Point2 correction = geometry.nonOrthCorrection(interior);
     CHECK((std::abs(correction.x) + std::abs(correction.y)) > 0.0);
 
+    const Point2 delta = geometry.innerDelta(interior);
+    CHECK(delta.x == doctest::Approx(1.0).epsilon(1.0e-12));
+    CHECK(delta.y == doctest::Approx(1.0 / 3.0).epsilon(1.0e-12));
+
+    CHECK(geometry.interpWeight(interior)
+        == doctest::Approx(0.6519202405).epsilon(1.0e-9));
+    CHECK(geometry.innerCoef(interior)
+        == doctest::Approx(1.5).epsilon(1.0e-12));
+    CHECK(correction.x == doctest::Approx(-0.5).epsilon(1.0e-12));
+    CHECK(correction.y == doctest::Approx(1.5).epsilon(1.0e-12));
+    CHECK(geometry.nonOrthogonality(interior)
+        == doctest::Approx(45.0).epsilon(1.0e-9));
+    CHECK(geometry.nonOrthogonality(interior)
+        == doctest::Approx(geometry.maxNonOrthogonality()).epsilon(1.0e-12));
+
+    const Point2 skew = geometry.skewVector(interior);
+    CHECK(skew.x == doctest::Approx(-0.0147464261).epsilon(1.0e-9));
+    CHECK(skew.y == doctest::Approx(0.0506400802).epsilon(1.0e-9));
+    const Scalar skewRatio = std::sqrt(skew.x * skew.x + skew.y * skew.y)
+        / std::sqrt(delta.x * delta.x + delta.y * delta.y);
+    CHECK(skewRatio
+        == doctest::Approx(geometry.maxSkewness()).epsilon(1.0e-12));
+    CHECK(geometry.maxSkewness()
+        == doctest::Approx(0.0500368597).epsilon(1.0e-9));
+
     const Point2 ownerCentroid = base.cellCentroid(base.faceOwner(interior));
     const Point2 neighbourCentroid = base.cellCentroid(base.faceNeighbour(interior));
     const Point2 distance {
@@ -201,6 +226,24 @@ TEST_CASE("UnstructuredMesh non-orthogonal triangle pair")
     CHECK(geometry.innerCoef(interior) > 0.0);
     CHECK(geometry.maxNonOrthogonality() > 0.0);
     CHECK(geometry.maxNonOrthogonality() < 90.0);
+
+    Index boundaryFace = base.faceCount();
+    for (Index face = 0; face < base.faceCount(); ++face)
+    {
+        if (base.isBoundaryFace(face))
+        {
+            boundaryFace = face;
+        }
+    }
+    REQUIRE(boundaryFace != base.faceCount());
+    CHECK_THROWS_AS(geometry.innerDelta(boundaryFace), std::invalid_argument);
+    CHECK_THROWS_AS(geometry.nonOrthogonality(boundaryFace),
+        std::invalid_argument);
+    CHECK_THROWS_AS(geometry.skewVector(boundaryFace), std::invalid_argument);
+    CHECK_THROWS_AS(geometry.innerDelta(base.faceCount()), std::out_of_range);
+    CHECK_THROWS_AS(geometry.nonOrthogonality(base.faceCount()),
+        std::out_of_range);
+    CHECK_THROWS_AS(geometry.skewVector(base.faceCount()), std::out_of_range);
 }
 
 TEST_CASE("UnstructuredMesh input validation and orientation")

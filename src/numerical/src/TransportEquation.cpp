@@ -11,12 +11,27 @@ EquationSystem assembleTransport(const Mesh& mesh,
     ConvectionScheme scheme,
     const BoundaryField& bc,
     const ScalarField* Sc,
-    const ScalarField* Sp)
+    const ScalarField* Sp,
+    const ScalarField* explicitPhi,
+    const CorrectionOptions& corrections)
 {
     EquationSystem sys(mesh.cellCount());
 
-    assembleDiffusion(mesh, gamma, bc, sys.A, sys.b);
-    assembleConvection(mesh, flux, scheme, bc, sys.A, sys.b);
+    assembleDiffusion(mesh,
+        gamma,
+        bc,
+        sys.A,
+        sys.b,
+        explicitPhi,
+        corrections);
+    assembleConvection(mesh,
+        flux,
+        scheme,
+        bc,
+        sys.A,
+        sys.b,
+        explicitPhi,
+        corrections);
 
     const Index nCells = mesh.cellCount();
     if (Sc)
@@ -53,7 +68,9 @@ EquationSystem assembleTransientTransport(const Mesh& mesh,
     Scalar dt,
     TimeScheme timeScheme,
     const ScalarField* Sc,
-    const ScalarField* Sp)
+    const ScalarField* Sp,
+    const ScalarField* explicitPhi,
+    const CorrectionOptions& corrections)
 {
     if (dt <= 0.0)
     {
@@ -67,7 +84,15 @@ EquationSystem assembleTransientTransport(const Mesh& mesh,
 
     // Full spatial operator (unscaled), reused for the explicit part.
     EquationSystem sys
-        = assembleTransport(mesh, flux, gamma, scheme, bc, Sc, Sp);
+        = assembleTransport(mesh,
+            flux,
+            gamma,
+            scheme,
+            bc,
+            Sc,
+            Sp,
+            explicitPhi,
+            corrections);
 
     SparseMatrix spatial = sys.A;  // copy of the accumulated triplets
     const Vector bSpatial = sys.b; // full spatial right-hand side

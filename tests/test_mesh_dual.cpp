@@ -400,6 +400,20 @@ TEST_CASE("Cartesian and unstructured mesh representations agree")
             {
                 CHECK(std::abs(leftGeometry.innerCoef(leftFace)
                     - rightGeometry.innerCoef(match)) <= 1.0e-12);
+
+                const Point2 leftDelta = leftGeometry.innerDelta(leftFace);
+                const Point2 rightDelta = rightGeometry.innerDelta(match);
+                CHECK(std::abs(leftDelta.x - rightDelta.x) <= 1.0e-12);
+                CHECK(std::abs(leftDelta.y - rightDelta.y) <= 1.0e-12);
+                CHECK(leftGeometry.nonOrthogonality(leftFace) < 1.0e-9);
+                CHECK(rightGeometry.nonOrthogonality(match) < 1.0e-9);
+
+                const Point2 leftSkew = leftGeometry.skewVector(leftFace);
+                const Point2 rightSkew = rightGeometry.skewVector(match);
+                CHECK(std::sqrt(leftSkew.x * leftSkew.x
+                        + leftSkew.y * leftSkew.y) < 1.0e-12);
+                CHECK(std::sqrt(rightSkew.x * rightSkew.x
+                        + rightSkew.y * rightSkew.y) < 1.0e-12);
             }
         }
 
@@ -419,6 +433,8 @@ TEST_CASE("Cartesian and unstructured mesh representations agree")
             }
         }
         CHECK(leftGeometry.maxNonOrthogonality() < 1.0e-9);
+        CHECK(leftGeometry.maxSkewness() < 1.0e-12);
+        CHECK(rightGeometry.maxSkewness() < 1.0e-12);
 
         for (Index face = 0; face < left.faceCount(); ++face)
         {

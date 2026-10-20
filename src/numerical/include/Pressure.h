@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BoundaryCondition.h"
+#include "CorrectionOptions.h"
 #include "Field.h"
 #include "FluxField.h"
 #include "LinearSolver.h"
@@ -63,6 +64,7 @@ CorrectorResult correctPressure(const Mesh& mesh,
     Scalar relaxationP,
     VectorField& velocity,
     ScalarField& pressure,
-    FaceFluxField& flux);
+    FaceFluxField& flux,
+    const CorrectionOptions& corrections = {});
 
 } // namespace fvm::numerical

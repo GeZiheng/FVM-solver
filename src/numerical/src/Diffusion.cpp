@@ -1,7 +1,9 @@
 #include "Diffusion.h"
+#include "GridOperators.h"
 #include "MeshGeomCache.h"
 
 #include <cmath>
+#include <vector>
 
 namespace fvm::numerical
 {
@@ -12,9 +14,16 @@ void assembleDiffusion(const Mesh& mesh,
     const ScalarField& gamma,
     const BoundaryField& bc,
     SparseMatrix& A,
-    Vector& b)
+    Vector& b,
+    const ScalarField* explicitPhi,
+    const CorrectionOptions& corrections)
 {
     const MeshGeomCache geometry(mesh);
+    const bool applyCrossDiffusion
+        = explicitPhi != nullptr && corrections.nonOrthogonalDiffusion;
+    const std::vector<Point2> gradients = applyCrossDiffusion
+        ? leastSquaresGradients(mesh, *explicitPhi, bc)
+        : std::vector<Point2>();
 
     for (Index face = 0; face < mesh.faceCount(); ++face)
     {
@@ -30,6 +39,21 @@ void assembleDiffusion(const Mesh& mesh,
             A.insert(neighbour, neighbour, diffusion);
             A.insert(owner, neighbour, -diffusion);
             A.insert(neighbour, owner, -diffusion);
+
+            if (applyCrossDiffusion)
+            {
+                const Scalar g = geometry.interpWeight(face);
+                const Point2 gradF{ g * gradients[owner].x
+                        + (1.0 - g) * gradients[neighbour].x,
+                    g * gradients[owner].y
+                        + (1.0 - g) * gradients[neighbour].y };
+                const Point2 correction = geometry.nonOrthCorrection(face);
+                const Scalar crossDiffusion = gammaF
+                    * (correction.x * gradF.x + correction.y * gradF.y);
+
+                b(owner) += crossDiffusion;
+                b(neighbour) -= crossDiffusion;
+            }
         }
         else
         {

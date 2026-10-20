@@ -72,6 +72,7 @@ target_sources(fvm_tests
         tests/test_linalg.cpp
         tests/test_field.cpp
         tests/test_flux.cpp
+        tests/test_gradients.cpp
         tests/test_diffusion.cpp
         tests/test_convection.cpp
         tests/test_transport.cpp

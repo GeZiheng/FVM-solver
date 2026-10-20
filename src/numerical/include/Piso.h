@@ -2,6 +2,7 @@
 
 #include "BoundaryCondition.h"
 #include "Convection.h"
+#include "CorrectionOptions.h"
 #include "Field.h"
 #include "FluxField.h"
 #include "LinearSolver.h"
@@ -30,6 +31,7 @@ struct PisoConfig
     TimeScheme timeScheme = TimeScheme::Euler; ///< ddt scheme.
     ConvectionScheme scheme = ConvectionScheme::Upwind;
     fvm::math::SolverConfig solverConfig = {};
+    CorrectionOptions corrections;
     bool verbose = false;
 };
 

@@ -1,9 +1,11 @@
 #include "Convection.h"
+#include "GridOperators.h"
 #include "MeshGeomCache.h"
 
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace fvm::numerical
 {
@@ -12,10 +14,23 @@ using fvm::core::Point2;
 
 FaceFluxField interpolateCellVelocityFlux(const Mesh& mesh,
     const VectorField& velocity,
-    Scalar rho)
+    Scalar rho,
+    const CorrectionOptions& corrections)
 {
     FaceFluxField flux(mesh, "phi");
     const MeshGeomCache geometry(mesh);
+    const std::vector<Point2> uGradients
+        = corrections.skewInterpolation
+        ? leastSquaresGradients(mesh,
+            velocity.u(),
+            BoundaryField(mesh))
+        : std::vector<Point2>();
+    const std::vector<Point2> vGradients
+        = corrections.skewInterpolation
+        ? leastSquaresGradients(mesh,
+            velocity.v(),
+            BoundaryField(mesh))
+        : std::vector<Point2>();
 
     for (Index face = 0; face < mesh.faceCount(); ++face)
     {
@@ -35,7 +50,23 @@ FaceFluxField interpolateCellVelocityFlux(const Mesh& mesh,
             const auto [uNeighbour, vNeighbour] = velocity(neighbour);
             const Scalar uf = g * uOwner + (1.0 - g) * uNeighbour;
             const Scalar vf = g * vOwner + (1.0 - g) * vNeighbour;
-            flux[face] = rho * (uf * area.x + vf * area.y);
+            Scalar uFace = uf;
+            Scalar vFace = vf;
+            if (corrections.skewInterpolation)
+            {
+                const Point2 skew = geometry.skewVector(face);
+                const Point2 uFGrad{ g * uGradients[owner].x
+                        + (1.0 - g) * uGradients[neighbour].x,
+                    g * uGradients[owner].y
+                        + (1.0 - g) * uGradients[neighbour].y };
+                const Point2 vFGrad{ g * vGradients[owner].x
+                        + (1.0 - g) * vGradients[neighbour].x,
+                    g * vGradients[owner].y
+                        + (1.0 - g) * vGradients[neighbour].y };
+                uFace += uFGrad.x * skew.x + uFGrad.y * skew.y;
+                vFace += vFGrad.x * skew.x + vFGrad.y * skew.y;
+            }
+            flux[face] = rho * (uFace * area.x + vFace * area.y);
         }
     }
 
@@ -47,9 +78,18 @@ void computeMassFlux(const Mesh& mesh,
     Scalar rho,
     const BoundaryField& bcU,
     const BoundaryField& bcV,
-    FaceFluxField& flux)
+    FaceFluxField& flux,
+    const CorrectionOptions& corrections)
 {
     const MeshGeomCache geometry(mesh);
+    const std::vector<Point2> uGradients
+        = corrections.skewInterpolation
+        ? leastSquaresGradients(mesh, velocity.u(), bcU)
+        : std::vector<Point2>();
+    const std::vector<Point2> vGradients
+        = corrections.skewInterpolation
+        ? leastSquaresGradients(mesh, velocity.v(), bcV)
+        : std::vector<Point2>();
 
     for (Index face = 0; face < mesh.faceCount(); ++face)
     {
@@ -76,6 +116,21 @@ void computeMassFlux(const Mesh& mesh,
             const auto [uNeighbour, vNeighbour] = velocity(neighbour);
             uf = g * uOwner + (1.0 - g) * uNeighbour;
             vf = g * vOwner + (1.0 - g) * vNeighbour;
+
+            if (corrections.skewInterpolation)
+            {
+                const Point2 skew = geometry.skewVector(face);
+                const Point2 uFGrad{ g * uGradients[owner].x
+                        + (1.0 - g) * uGradients[neighbour].x,
+                    g * uGradients[owner].y
+                        + (1.0 - g) * uGradients[neighbour].y };
+                const Point2 vFGrad{ g * vGradients[owner].x
+                        + (1.0 - g) * vGradients[neighbour].x,
+                    g * vGradients[owner].y
+                        + (1.0 - g) * vGradients[neighbour].y };
+                uf += uFGrad.x * skew.x + uFGrad.y * skew.y;
+                vf += vFGrad.x * skew.x + vFGrad.y * skew.y;
+            }
         }
 
         flux[face] = rho * (uf * area.x + vf * area.y);
@@ -143,9 +198,17 @@ void assembleConvection(const Mesh& mesh,
     ConvectionScheme scheme,
     const BoundaryField& bc,
     SparseMatrix& A,
-    Vector& b)
+    Vector& b,
+    const ScalarField* explicitPhi,
+    const CorrectionOptions& corrections)
 {
     const MeshGeomCache geometry(mesh);
+    const bool applySkew = explicitPhi != nullptr
+        && corrections.skewInterpolation
+        && scheme == ConvectionScheme::Central;
+    const std::vector<Point2> gradients = applySkew
+        ? leastSquaresGradients(mesh, *explicitPhi, bc)
+        : std::vector<Point2>();
 
     for (Index face = 0; face < mesh.faceCount(); ++face)
     {
@@ -176,6 +239,19 @@ void assembleConvection(const Mesh& mesh,
                 A.insert(owner, neighbour, F * (1.0 - g));
                 A.insert(neighbour, owner, -F * g);
                 A.insert(neighbour, neighbour, -F * (1.0 - g));
+
+                if (applySkew)
+                {
+                    const Point2 skew = geometry.skewVector(face);
+                    const Point2 gradF{ g * gradients[owner].x
+                            + (1.0 - g) * gradients[neighbour].x,
+                        g * gradients[owner].y
+                            + (1.0 - g) * gradients[neighbour].y };
+                    const Scalar correction
+                        = gradF.x * skew.x + gradF.y * skew.y;
+                    b(owner) -= F * correction;
+                    b(neighbour) += F * correction;
+                }
             }
         }
         else if (F >= 0.0)

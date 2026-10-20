@@ -35,7 +35,8 @@ MomentumAssembly assembleMomentum(const Mesh& mesh,
     const ScalarField& pressure,
     const BoundaryField& bcP,
     Scalar relaxation,
-    const TimeTerm& time)
+    const TimeTerm& time,
+    const CorrectionOptions& corrections)
 {
     if (component != 0 && component != 1)
     {
@@ -54,6 +55,7 @@ MomentumAssembly assembleMomentum(const Mesh& mesh,
     }
 
     const Index nCells = mesh.cellCount();
+    const ScalarField& phiOld = (component == 0) ? velocity.u() : velocity.v();
 
     ScalarField muField(mesh, "mu");
     muField.setConstant(mu);
@@ -64,21 +66,26 @@ MomentumAssembly assembleMomentum(const Mesh& mesh,
     result.rhsNoPressure.setZero();
 
     // Convection-diffusion part (no pressure source yet).
-    assembleDiffusion(mesh, muField, bc, result.system.A, result.rhsNoPressure);
+    assembleDiffusion(mesh,
+        muField,
+        bc,
+        result.system.A,
+        result.rhsNoPressure,
+        &phiOld,
+        corrections);
     assembleConvection(mesh,
         flux,
         scheme,
         bc,
         result.system.A,
-        result.rhsNoPressure);
+        result.rhsNoPressure,
+        &phiOld,
+        corrections);
 
     // Read the unrelaxed diagonal from a finalized copy.
     SparseMatrix probe = result.system.A;
     probe.finalize();
     const Vector aP0 = probe.native().diagonal();
-
-    const ScalarField& phiOld = (component == 0) ? velocity.u() : velocity.v();
-
     if (time.active())
     {
         // theta-scheme ddt term: diagonal rho V/dt, right-hand side
@@ -146,7 +153,8 @@ MomentumPrediction predictMomentum(const Mesh& mesh,
     const BoundaryField& bcP,
     Scalar relaxationU,
     const TimeTerm& time,
-    fvm::math::LinearSolver& momSolver)
+    fvm::math::LinearSolver& momSolver,
+    const CorrectionOptions& corrections)
 {
     const Index nCells = mesh.cellCount();
 
@@ -160,7 +168,8 @@ MomentumPrediction predictMomentum(const Mesh& mesh,
                                  pressure,
                                  bcP,
                                  relaxationU,
-                                 time),
+                                 time,
+                                 corrections),
         assembleMomentum(mesh,
             flux,
             velocity,
@@ -171,7 +180,8 @@ MomentumPrediction predictMomentum(const Mesh& mesh,
             pressure,
             bcP,
             relaxationU,
-            time),
+            time,
+            corrections),
         Vector(),
         Vector(),
         Vector(),

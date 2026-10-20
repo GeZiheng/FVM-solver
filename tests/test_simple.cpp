@@ -1,13 +1,16 @@
 #include "Field.h"
+#include "ObliqueMeshFixtures.h"
 #include "GridOperators.h"
 #include "LinearSolver.h"
 #include "CartesianMesh.h"
 #include "Momentum.h"
 #include "Simple.h"
 #include "TransportEquation.h"
+#include "UnstructuredMesh.h"
 #include <cmath>
 #include <doctest/doctest.h>
 #include <stdexcept>
+#include <utility>
 
 using namespace fvm::core;
 using namespace fvm::math;
@@ -31,7 +34,138 @@ VectorField makeRecirculatingVelocity(const CartesianMesh& mesh)
     return velocity;
 }
 
+void setShearedChannelBCs(const Mesh& mesh,
+    BoundaryField& bcU,
+    BoundaryField& bcV,
+    BoundaryField& bcP)
+{
+    for (Index patch = 0; patch < mesh.patchCount(); ++patch)
+    {
+        const Index face = mesh.patchFaces(patch)[0];
+        const Point2 centroid = mesh.faceCentroid(face);
+        if (centroid.x < 1.0e-9)
+        {
+            bcU.set(patch, BCType::Dirichlet, 1.0);
+            bcV.set(patch, BCType::Dirichlet, 0.0);
+            bcP.set(patch, BCType::Neumann, 0.0);
+        }
+        else if (centroid.x > 1.0 - 1.0e-9)
+        {
+            bcU.set(patch, BCType::Neumann, 0.0);
+            bcV.set(patch, BCType::Dirichlet, 0.0);
+            bcP.set(patch, BCType::Dirichlet, 0.0);
+        }
+        else
+        {
+            bcU.set(patch, BCType::Dirichlet, 0.0);
+            bcV.set(patch, BCType::Dirichlet, 0.0);
+            bcP.set(patch, BCType::Neumann, 0.0);
+        }
+    }
+}
+
+Scalar netBoundaryFlux(const Mesh& mesh, const FaceFluxField& flux)
+{
+    Scalar net = 0.0;
+    for (Index patch = 0; patch < mesh.patchCount(); ++patch)
+    {
+        for (const Index face : mesh.patchFaces(patch))
+        {
+            net += flux[face];
+        }
+    }
+    return net;
+}
+
 } // namespace
+
+TEST_CASE("Simple channel on sheared mesh")
+{
+    const UnstructuredMesh mesh(makeShearedTriMesh(4));
+    const Mesh& base = mesh;
+    const Scalar rho = 1.0;
+    const Scalar mu = 0.01;
+
+    BoundaryField bcU(base);
+    BoundaryField bcV(base);
+    BoundaryField bcP(base);
+    setShearedChannelBCs(base, bcU, bcV, bcP);
+
+    VectorField velocity(base, "velocity");
+    ScalarField pressure(base, "pressure");
+    FaceFluxField flux(base, "flux");
+
+    SimpleConfig config;
+    config.tolerance = 1.0e-6;
+    config.maxIterations = 5000;
+    config.relaxationU = 0.7;
+    config.relaxationP = 0.3;
+    config.scheme = ConvectionScheme::Upwind;
+    config.solverConfig.tolerance = 1.0e-10;
+    config.solverConfig.maxIterations = 5000;
+
+    const SimpleResult result = solveSimple(base,
+        rho,
+        mu,
+        bcU,
+        bcV,
+        bcP,
+        config,
+        velocity,
+        pressure,
+        flux);
+
+    CHECK(result.converged);
+    REQUIRE(!result.history.empty());
+    CHECK(result.history.back().continuity <= 1.0e-6);
+    CHECK(std::abs(netBoundaryFlux(base, flux)) <= 1.0e-8);
+}
+
+TEST_CASE("Simple non-orthogonal correctors are zero on Cartesian meshes")
+{
+    auto run = [](CorrectionOptions corrections)
+    {
+        CartesianMesh mesh(12, 10, 0.0, 0.0, 1.0, 1.0);
+        BoundaryField bcU(mesh);
+        BoundaryField bcV(mesh);
+        BoundaryField bcP(mesh);
+        setShearedChannelBCs(mesh, bcU, bcV, bcP);
+
+        VectorField velocity(mesh, "velocity");
+        ScalarField pressure(mesh, "pressure");
+        FaceFluxField flux(mesh, "flux");
+
+        SimpleConfig config;
+        config.tolerance = 1.0e-6;
+        config.maxIterations = 2000;
+        config.corrections = corrections;
+        config.solverConfig.tolerance = 1.0e-10;
+        config.solverConfig.maxIterations = 5000;
+        solveSimple(mesh,
+            1.0,
+            0.01,
+            bcU,
+            bcV,
+            bcP,
+            config,
+            velocity,
+            pressure,
+            flux);
+        return std::make_pair(velocity.u().data(), pressure.data());
+    };
+
+    CorrectionOptions noSubiterations;
+    noSubiterations.nNonOrthogonalCorrectors = 0;
+    CorrectionOptions twoSubiterations;
+    twoSubiterations.nNonOrthogonalCorrectors = 2;
+
+    const auto reference = run(noSubiterations);
+    const auto corrected = run(twoSubiterations);
+    CHECK((corrected.first - reference.first).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+    CHECK((corrected.second - reference.second).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+}
 
 TEST_CASE(
     "Simple: momentum assembly matches transport without pressure "

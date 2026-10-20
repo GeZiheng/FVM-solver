@@ -2,6 +2,7 @@
 
 #include "BoundaryCondition.h"
 #include "Convection.h"
+#include "CorrectionOptions.h"
 #include "Field.h"
 #include "FluxField.h"
 #include "LinearSolver.h"
@@ -28,6 +29,7 @@ struct SimpleConfig
     Scalar relaxationP = 0.3; ///< Pressure under-relaxation in (0, 1].
     ConvectionScheme scheme = ConvectionScheme::Upwind;
     fvm::math::SolverConfig solverConfig = {};
+    CorrectionOptions corrections;
     bool verbose = false;
 };
 

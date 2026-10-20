@@ -1,11 +1,17 @@
 #include "BoundaryCondition.h"
+#include "CorrectionOptions.h"
 #include "Diffusion.h"
 #include "Field.h"
+#include "GridOperators.h"
 #include "LinearSolver.h"
 #include "CartesianMesh.h"
+#include "MeshGeomCache.h"
+#include "ObliqueMeshFixtures.h"
 #include "SparseMatrix.h"
+#include "UnstructuredMesh.h"
 #include <cmath>
 #include <doctest/doctest.h>
+#include <vector>
 
 using namespace fvm::core;
 using namespace fvm::math;
@@ -44,6 +50,23 @@ ScalarField constantGamma(const CartesianMesh& mesh, Scalar value)
     return gamma;
 }
 
+} // namespace
+
+namespace
+{
+Scalar obliqueLinear(const Point2& point)
+{
+    return 1.0 + 2.0 * point.x - 3.0 * point.y;
+}
+
+Vector solveWithCG(SparseMatrix A, const Vector& b)
+{
+    A.finalize();
+    SolverConfig config;
+    config.tolerance = 1.0e-12;
+    auto cg = createEigenCG(config);
+    return cg->solve(A, b);
+}
 } // namespace
 
 TEST_CASE("Diffusion: 1D linear exact solution with Dirichlet BCs")
@@ -183,6 +206,182 @@ TEST_CASE(
     Vector Aones = A.native() * ones;
     CHECK(Aones.norm() == doctest::Approx(0.0).epsilon(1e-12));
     CHECK(b.norm() == doctest::Approx(0.0).epsilon(1e-12));
+}
+
+TEST_CASE("Diffusion: linear field exact on oblique pair")
+{
+    const UnstructuredMesh mesh(makeObliquePair());
+    const Mesh& base = mesh;
+    ScalarField gamma(base, "gamma");
+    gamma.setConstant(1.0);
+
+    ScalarField phi(base, "phi");
+    for (Index cell = 0; cell < base.cellCount(); ++cell)
+    {
+        phi(cell) = obliqueLinear(base.cellCentroid(cell));
+    }
+
+    BoundaryField bc(base);
+    for (Index patch = 0; patch < bc.patchCount(); ++patch)
+    {
+        const Index face = base.patchFaces(patch)[0];
+        const Point2 area = base.faceAreaVector(face);
+        const Scalar areaNorm = std::hypot(area.x, area.y);
+        const Scalar normalDerivative
+            = (2.0 * area.x - 3.0 * area.y) / areaNorm;
+        bc.set(patch, BCType::Neumann, normalDerivative);
+    }
+
+    SparseMatrix aOn(base.cellCount(), base.cellCount());
+    SparseMatrix aOff(base.cellCount(), base.cellCount());
+    Vector bOn(base.cellCount());
+    Vector bOff(base.cellCount());
+    bOn.setZero();
+    bOff.setZero();
+    CorrectionOptions corrections;
+    assembleDiffusion(base, gamma, bc, aOn, bOn, &phi, corrections);
+    assembleDiffusion(base, gamma, bc, aOff, bOff);
+    aOn.finalize();
+    aOff.finalize();
+    SparseMatrix aOnDense = aOn;
+    SparseMatrix aOffDense = aOff;
+    aOnDense.finalize();
+    aOffDense.finalize();
+
+    CHECK((aOnDense.native().toDense() - aOffDense.native().toDense()).norm()
+        == doctest::Approx(0.0).epsilon(1e-15));
+
+    const std::vector<Point2> gradients
+        = leastSquaresGradients(base, phi, bc);
+    const MeshGeomCache geometry(base);
+    Vector expectedCorrection = Vector::Zero(base.cellCount());
+    for (Index face = 0; face < base.faceCount(); ++face)
+    {
+        if (base.isBoundaryFace(face))
+        {
+            continue;
+        }
+        const Index owner = base.faceOwner(face);
+        const Index neighbour = base.faceNeighbour(face);
+        const Scalar g = geometry.interpWeight(face);
+        const Point2 gradF{ g * gradients[owner].x
+                + (1.0 - g) * gradients[neighbour].x,
+            g * gradients[owner].y
+                + (1.0 - g) * gradients[neighbour].y };
+        const Point2 correction = geometry.nonOrthCorrection(face);
+        const Scalar flux = correction.x * gradF.x + correction.y * gradF.y;
+        expectedCorrection(owner) += flux;
+        expectedCorrection(neighbour) -= flux;
+    }
+    CHECK((bOn - bOff - expectedCorrection).lpNorm<Eigen::Infinity>()
+        == doctest::Approx(0.0).epsilon(1e-12));
+
+    const Vector residualOn = aOn.native() * phi.data() - bOn;
+    const Vector residualOff = aOff.native() * phi.data() - bOff;
+    CHECK(residualOn.lpNorm<Eigen::Infinity>() <= 1.0e-10);
+    CHECK(residualOff.lpNorm<Eigen::Infinity>() > 1.0e-6);
+}
+
+TEST_CASE("Diffusion: constant field stays conservative on oblique pair")
+{
+    const UnstructuredMesh mesh(makeObliquePair());
+    const Mesh& base = mesh;
+    ScalarField gamma(base, "gamma");
+    gamma.setConstant(1.0);
+    ScalarField phi(base, "phi");
+    phi.setConstant(2.7);
+
+    BoundaryField bc(base); // exact zero normal derivative for a constant.
+
+    SparseMatrix a(base.cellCount(), base.cellCount());
+    Vector b(base.cellCount());
+    b.setZero();
+    CorrectionOptions corrections;
+    assembleDiffusion(base, gamma, bc, a, b, &phi, corrections);
+    a.finalize();
+
+    const Vector ones = Vector::Ones(base.cellCount());
+    const Vector aOnes = a.native() * ones;
+    CHECK(aOnes.norm() == doctest::Approx(0.0).epsilon(1e-12));
+    CHECK(b.norm() == doctest::Approx(0.0).epsilon(1e-12));
+}
+
+TEST_CASE("Diffusion: second order on sheared triangle meshes")
+{
+    auto exact = [](const Point2& point)
+    {
+        return 1.0 + point.x * point.x + 0.5 * point.y * point.y
+            - 0.3 * point.x * point.y;
+    };
+
+    for (const Index n : { Index{ 4 }, Index{ 8 }, Index{ 16 } })
+    {
+        const UnstructuredMesh mesh(makeShearedTriMesh(n));
+        const Mesh& base = mesh;
+        ScalarField gamma(base, "gamma");
+        gamma.setConstant(1.0);
+        ScalarField source(base, "source");
+        source.setConstant(3.0);
+
+        BoundaryField bc(base);
+        for (Index patch = 0; patch < bc.patchCount(); ++patch)
+        {
+            const Index face = base.patchFaces(patch)[0];
+            bc.set(patch, BCType::Dirichlet, exact(base.faceCentroid(face)));
+        }
+
+        Scalar previousOnError = 0.0;
+        Scalar previousOffError = 0.0;
+        for (const bool correctionOn : { true, false })
+        {
+            CorrectionOptions corrections;
+            corrections.nonOrthogonalDiffusion = correctionOn;
+            ScalarField phi(base, "phi");
+            for (Index cell = 0; cell < base.cellCount(); ++cell)
+            {
+                phi(cell) = exact(base.cellCentroid(cell));
+            }
+
+            for (int sweep = 0; sweep < 3; ++sweep)
+            {
+                SparseMatrix a(base.cellCount(), base.cellCount());
+                Vector b(base.cellCount());
+                b.setZero();
+                assembleDiffusion(base, gamma, bc, a, b, &phi, corrections);
+                for (Index cell = 0; cell < base.cellCount(); ++cell)
+                {
+                    b(cell) += source(cell) * base.cellVolume(cell);
+                }
+                phi.data() = solveWithCG(a, b);
+            }
+
+            Scalar error = 0.0;
+            for (Index cell = 0; cell < base.cellCount(); ++cell)
+            {
+                error = std::max(error,
+                    std::abs(phi(cell) - exact(base.cellCentroid(cell))));
+            }
+
+            if (correctionOn && previousOnError > 0.0)
+            {
+                const Scalar rate = previousOnError / error;
+                CHECK(rate > 1.7);
+                CHECK(rate < 2.3);
+            }
+            if (!correctionOn && previousOffError > 0.0)
+            {
+                CHECK(previousOffError / error < 1.5);
+            }
+            if (correctionOn)
+            {
+                previousOnError = error;
+            }
+            else
+            {
+                previousOffError = error;
+            }
+        }
+    }
 }
 
 TEST_CASE("Diffusion: default BoundaryField equals explicit zero-Neumann")

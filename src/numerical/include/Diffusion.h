@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BoundaryCondition.h"
+#include "CorrectionOptions.h"
 #include "Field.h"
 #include "Mesh.h"
 #include "SparseMatrix.h"
@@ -23,11 +24,19 @@ using fvm::math::SparseMatrix;
 /// beta_f = (S.S)/(S.delta); A(P,P) += D_b, b(P) += D_b * phi_b.
 /// Neumann (d(phi)/dn = g, outward): b(P) += gamma_P * g * |S_f|.
 ///
+/// When `explicitPhi` is supplied and `corrections.nonOrthogonalDiffusion` is
+/// true, the interior minimum-correction cross-diffusion term is added to the
+/// RHS only.  It is a deferred correction: callers refresh it by re-assembling
+/// with the latest available iterate.  Boundary faces receive no correction,
+/// so A remains symmetric.
+///
 /// The matrix is symmetric positive semi-definite (definite with any Dirichlet).
 void assembleDiffusion(const Mesh& mesh,
     const ScalarField& gamma,
     const BoundaryField& bc,
     SparseMatrix& A,
-    Vector& b);
+    Vector& b,
+    const ScalarField* explicitPhi = nullptr,
+    const CorrectionOptions& corrections = {});
 
 } // namespace fvm::numerical

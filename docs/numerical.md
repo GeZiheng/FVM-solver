@@ -347,7 +347,7 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P (\nabla p_{\text{sol}})_P$$
 
 1. 入口 `initializeMassFlux` 初始化持久通量（`createPhi` + 封闭域 `adjustPhi` 式相容性检查）；
 2. 每个时间步：
-   - `predictMomentum(..., 1.0, time, momSolver)`，`time = TimeTerm{rho, dt, timeScheme}`（θ 格式 ddt）；它同时给出 $u^{*}$ 与 $\hat u_1 = H(u^{*})/a_P$；
+   - `predictMomentum(..., 1.0, time, momSolver)`，`time = TimeTerm{rho, dt, timeScheme}`（θ 格式 ddt）；它同时给出 $u^*$ 与 $\hat u_1 = H(u^*)/a_P$；
    - 第一个修正子：`correctPressure(..., 1.0, ...)`——解绝对压力；$\alpha_p = 1$ 时存储压力就是解；
    - 之后每个修正子：**先用当前速度重算 $\hat u = H(u)/a_P$**（`refreshUHat`，等价于 OpenFOAM 每个修正子开头的 `HbyA = rAU*UEqn.H()`），再调用 `correctPressure`；
 3. 持久通量跨时间步复用，保持守恒。
@@ -360,17 +360,17 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P (\nabla p_{\text{sol}})_P$$
 
 ### PISO 里的三个速度
 
-多修正子的正确性依赖三者严格区分（OpenFOAM 里 $u^{*}$ 与 $u$ 是同一个 `U` 场被就地覆盖，本实现拆成独立变量，因此刷新步骤必须显式写出）：
+多修正子的正确性依赖三者严格区分（OpenFOAM 里 $u^*$ 与 $u$ 是同一个 `U` 场被就地覆盖，本实现拆成独立变量，因此刷新步骤必须显式写出）：
 
 | 量 | 代码 | 定义 | 更新时机 | 作用 |
 |---|---|---|---|---|
-| 预测速度 $u^{*}$ | `pred.uStar` | 解动量方程 $A u = b_{np} - V\nabla p^{\text{old}}$ | 每个时间步一次 | 给 $\hat u_1$ 提供求值点（$\hat u_1 = u^{*} + d\nabla p^{\text{old}}$）；修正子里不再直接使用 |
-| 无压力速度 $\hat u$（HbyA） | `pred.uHatU/uHatV` | $\hat u = H(u)/a_P$ | 步初一次（用 $u^{*}$），之后每个附加修正子前用当前 $u$ 重算 | 组装无压力预测通量 $F^{\hat u} = \rho \hat u_f\cdot\mathbf S_f$，即压力方程右端 |
+| 预测速度 $u^*$ | `pred.uStar` | 解动量方程 $A u = b_{np} - V\nabla p^{\text{old}}$ | 每个时间步一次 | 给 $\hat u_1$ 提供求值点（$\hat u_1 = u^* + d\nabla p^{\text{old}}$）；修正子里不再直接使用 |
+| 无压力速度 $\hat u$（HbyA） | `pred.uHatU/uHatV` | $\hat u = H(u)/a_P$ | 步初一次（用 $u^*$），之后每个附加修正子前用当前 $u$ 重算 | 组装无压力预测通量 $F^{\hat u} = \rho \hat u_f\cdot\mathbf S_f$，即压力方程右端 |
 | 修正速度 $u$ | `velocity` | $u = \hat u - d\nabla p_{\text{sol}}$（未松弛解） | 每个修正子末尾 | 本步输出、下一步初值、重算 $\hat u$ 的输入 |
 
 索引 $k$ 为修正子编号（$k \ge 1$）：
 
-$$\hat u_1=\frac{H(u^{*})}{a_P},\quad \hat u_{k+1}=\frac{H(u^{(k)})}{a_P},\qquad
+$$\hat u_1=\frac{H(u^*)}{a_P},\quad \hat u_{k+1}=\frac{H(u^{(k)})}{a_P},\qquad
 F^{\hat u}_k=\rho \hat u_{k,f}\cdot\mathbf S_f\ \Rightarrow\ b_k\ \Rightarrow\ p^{(k)}$$
 
 $$u^{(k)}=\hat u_k-d \nabla p^{(k)} \qquad (\alpha_p = 1)$$
@@ -383,9 +383,9 @@ $$a_P u_P + \sum_N A_{PN}u_N = b_{np,P} - V(\nabla p)_P
 \quad\Longleftrightarrow\quad
 u_P = \underbrace{\frac{b_{np,P}-\sum_N A_{PN}u_N}{a_P}}_{\hat u_P} - d_P (\nabla p)_P,$$
 
-也就是说 $u=\hat u-d\nabla p$ 只是动量方程的**移项**（代码里 $b_{np}$ 即 `rhsNoPressure`：含 ddt 与松弛源，不含压力源），而它成立的**前提是 $u$ 恰为该 $\nabla p$ 下的动量解**。$u^{*}$ 正是 $p^{(0)}$ 的动量解，所以
+也就是说 $u=\hat u-d\nabla p$ 只是动量方程的**移项**（代码里 $b_{np}$ 即 `rhsNoPressure`：含 ddt 与松弛源，不含压力源），而它成立的**前提是 $u$ 恰为该 $\nabla p$ 下的动量解**。$u^*$ 正是 $p^{(0)}$ 的动量解，所以
 
-$$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla p^{(1)} = u^{*} - d\nabla {p'}^{(1)}$$
+$$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla p^{(1)} = u^* - d\nabla {p'}^{(1)}$$
 
 对 $k\ge2$ 这个前提不再成立：$u^{(k-1)}$ 不是 $p^{(k-1)}$ 的动量解，两者相差残差 $R=-\sum_N a_N\big(u^{(k-1)}_N-u^{(k-2)}_N\big)$（即被冻结的非对角耦合），所以必须用当前的 $\hat u_k$ 重新解绝对压力并以 $u^{(k)}=\hat u_k-d\nabla p^{(k)}$ 重建速度——这正是"每个附加修正子前刷新 $\hat u$"的原因，也是 $k\ge2$ 的路径与"只做一次增量修正再叠加"不同的根源。
 
@@ -436,7 +436,7 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 
 **必须维持的四条不变量**（本体见上文对应小节，这里只列"必须做什么"）：
 
-1. 边界面预测通量 $F^{\hat u}_b$ 与内部面**同源**（Dirichlet 速度边取给定值，否则零梯度），不能用 $u^{*}$ 的单元中心梯度；
+1. 边界面预测通量 $F^{\hat u}_b$ 与内部面**同源**（Dirichlet 速度边取给定值，否则零梯度），不能用 $u^*$ 的单元中心梯度；
 2. 纯 Neumann 压力域必须对 $F^{\hat u}$ 的边界净通量做**再平衡**，且同一调整同步进入方程右端；
 3. 压力方程右端与通量重建用**同一份**（调整后的）$F^{\hat u}$；速度与通量用未松弛解重建，只有存储压力吃松弛；
 4. 每个附加修正子前**用当前速度重算 $\hat u = H(u)/a_P$**；冻结它等价于 `nCorrectors = 1`（推导见上文"PISO 里的三个速度"）。
@@ -480,7 +480,7 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 | 环节 | 本项目 | OpenFOAM |
 |------|--------|----------|
 | 动量对角 | `MomentumAssembly.diag` 显式导出 | `rAU = 1.0/UEqn.A()` |
-| 非压力速度 | `computeUHat`：$(b^{np}_P - \sum_{N\ne P} A_{PN} u_N)/a_P$；步初用 $u^{*}$ 求值，之后每个附加修正子前用当前 $u$ 重算（`refreshUHat`）；装配右端的 `phiHbyA` 取 $\rho \hat u_f\cdot\mathbf S_f$ | `HbyA = rAU * UEqn.H()`；`phiHbyA = fvc::flux(HbyA) + rAUf·ddtCorr(...)`；`H()` 用矩阵当前持有的 `psi_`，因此每个修正子自动重算 |
+| 非压力速度 | `computeUHat`：$(b^{np}_P - \sum_{N\ne P} A_{PN} u_N)/a_P$；步初用 $u^*$ 求值，之后每个附加修正子前用当前 $u$ 重算（`refreshUHat`）；装配右端的 `phiHbyA` 取 $\rho \hat u_f\cdot\mathbf S_f$ | `HbyA = rAU * UEqn.H()`；`phiHbyA = fvc::flux(HbyA) + rAUf·ddtCorr(...)`；`H()` 用矩阵当前持有的 `psi_`，因此每个修正子自动重算 |
 | 瞬态算法 | PISO：一次预测 + `nCorrectors` 次修正，无欠松弛；每个附加修正子前重算 $\hat u$ | PISO / PIMPLE，`nCorrectors`/`nOuterCorrectors` |
 | 奇异性 | 参考单元**消元**（钉住 0 号单元旧压力，矩阵缩一维，严格 SPD） | `pEqn.setReference(refCell, refValue)`：软钉，`b_ref += A_ref,ref·p_ref; A_ref,ref *= 2`，矩阵尺寸不变 |
 | 封闭域相容性 | `checkFluxCompatibility`：入口检查边界净通量，不平衡则抛异常 | `adjustPhi` 强制边界净通量为零（自动修正而非报错） |

@@ -24,6 +24,9 @@ public:
     /// the owner centroid to the neighbour centroid.
     Scalar innerCoef(Index face) const;
 
+    /// Owner-to-neighbour centroid vector x_N - x_O. Interior faces only.
+    Point2 innerDelta(Index face) const;
+
     /// Boundary-face diffusion coefficient (S.S)/(S.delta), where delta points
     /// from the owner centroid to the face centroid.
     Scalar boundaryCoef(Index face) const;
@@ -32,10 +35,24 @@ public:
     /// the face area vector is parallel to the owner-neighbour distance.
     Point2 nonOrthCorrection(Index face) const;
 
+    /// Interior-face non-orthogonality angle in degrees:
+    /// acos(clamp((S.d)/(|S||d|))). Interior faces only.
+    Scalar nonOrthogonality(Index face) const;
+
+    /// Skewness vector s_f = x_f - (g*x_O + (1-g)*x_N), g = interpWeight(f).
+    /// Interior faces only.
+    Point2 skewVector(Index face) const;
+
     /// Largest interior-face non-orthogonality angle in degrees.
     Scalar maxNonOrthogonality() const
     {
         return maxNonOrthogonality_;
+    }
+
+    /// Max over interior faces of |s_f|/|d| (0.0 when there are none).
+    Scalar maxSkewness() const
+    {
+        return maxSkewness_;
     }
 
 private:
@@ -46,9 +63,13 @@ private:
     std::vector<Point2> faceAreaVectors_;
     std::vector<Scalar> interpWeights_;
     std::vector<Scalar> innerCoefficients_;
+    std::vector<Point2> innerDeltas_;
     std::vector<Scalar> boundaryCoefficients_;
     std::vector<Point2> nonOrthCorrections_;
+    std::vector<Scalar> nonOrthAngles_;
+    std::vector<Point2> skewVectors_;
     Scalar maxNonOrthogonality_ = 0.0;
+    Scalar maxSkewness_ = 0.0;
 };
 
 } // namespace fvm::core

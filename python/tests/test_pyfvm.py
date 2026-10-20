@@ -144,6 +144,70 @@ class TestTransportBinding(unittest.TestCase):
         np.testing.assert_allclose(sol.reshape(n, n),
                                    np.tile(1.0 - x, (n, 1)), atol=1e-8)
 
+    def test_correction_options_plumbing_and_zero_change(self):
+        options = fvm.CorrectionOptions()
+        self.assertTrue(options.non_orthogonal_diffusion)
+        self.assertTrue(options.skew_interpolation)
+        self.assertEqual(options.n_non_orthogonal_correctors, 0)
+
+        def run_channel_case(config):
+            mesh = fvm.CartesianMesh(8, 4, 0.0, 0.0, 1.0, 1.0)
+            velocity = fvm.VectorField(mesh, "velocity")
+            pressure = fvm.ScalarField(mesh, "pressure")
+            flux = fvm.FaceFluxField(mesh, "phi")
+
+            bc_u = fvm.BoundaryField(mesh)
+            bc_u.set(fvm.BoundaryField.West, fvm.BCType.Dirichlet, 1.0)
+            bc_u.set(fvm.BoundaryField.East, fvm.BCType.Dirichlet, 1.0)
+            bc_u.set(fvm.BoundaryField.North, fvm.BCType.Dirichlet, 0.0)
+            bc_u.set(fvm.BoundaryField.South, fvm.BCType.Dirichlet, 0.0)
+            bc_v = fvm.BoundaryField(mesh)
+            for side in (fvm.BoundaryField.East, fvm.BoundaryField.North,
+                         fvm.BoundaryField.West, fvm.BoundaryField.South):
+                bc_v.set(side, fvm.BCType.Dirichlet, 0.0)
+            bc_p = fvm.BoundaryField(mesh)  # natural pressure at both ends
+
+            config.tolerance = 1e-8
+            config.max_iterations = 1000
+            result = fvm.solve_simple(mesh, 1.0, 0.01, bc_u, bc_v, bc_p,
+                                      config, velocity, pressure, flux)
+            self.assertTrue(result.converged)
+            return (velocity.u.to_numpy(), velocity.v.to_numpy(),
+                    pressure.to_numpy())
+
+        enabled_config = fvm.SimpleConfig()
+        enabled_config.corrections.n_non_orthogonal_correctors = 2
+        disabled_config = fvm.SimpleConfig()
+        disabled_config.corrections.non_orthogonal_diffusion = False
+        disabled_config.corrections.skew_interpolation = False
+
+        enabled = run_channel_case(enabled_config)
+        disabled = run_channel_case(disabled_config)
+        for on, off in zip(enabled, disabled):
+            self.assertTrue(np.allclose(on, off, atol=1e-12, rtol=0.0))
+
+    def test_solve_transport_corrections_zero_change_cartesian(self):
+        n = 16
+        mesh = fvm.CartesianMesh(n, n, 0.0, 0.0, 1.0, 1.0)
+        gamma = fvm.ScalarField(mesh, "gamma")
+        gamma.set_constant(1.0)
+        velocity = fvm.VectorField(mesh, "velocity")  # stays zero
+        bc = fvm.BoundaryField(mesh)
+        bc.set(fvm.BoundaryField.West, fvm.BCType.Dirichlet, 1.0)
+        bc.set(fvm.BoundaryField.East, fvm.BCType.Dirichlet, 0.0)
+        solver_cfg = fvm.SolverConfig()
+        solver_cfg.tolerance = 1e-12
+        flux = fvm.interpolate_cell_velocity_flux(mesh, velocity, 1.0)
+
+        base = fvm.solve_transport(mesh, flux, gamma,
+                                   fvm.ConvectionScheme.Upwind, bc,
+                                   solver_cfg)
+        corrected = fvm.solve_transport(mesh, flux, gamma,
+                                        fvm.ConvectionScheme.Upwind, bc,
+                                        solver_cfg,
+                                        corrections=fvm.CorrectionOptions())
+        np.testing.assert_allclose(base, corrected, atol=1e-12)
+
 
 class TestDriverSmokes(unittest.TestCase):
     """End-to-end smokes: the drivers run to completion through the
@@ -304,6 +368,43 @@ MARKER_ELEMS= 1
         self.assertEqual(mesh.cell_node_count(2), 4)
         self.assertEqual(mesh.point(0), (0.0, 0.0))
         self.assertEqual(mesh.point(5), (2.0, 1.0))
+
+    def test_solve_transport_corrections_skew_smoke(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mixed.su2")
+            with open(path, "w", encoding="ascii") as fh:
+                fh.write(self.SU2_CONTENT)
+            mesh = fvm.read_su2(path)
+
+        velocity = fvm.VectorField(mesh, "velocity")
+        for cell in range(mesh.cell_count()):
+            x, y = mesh.cell_centroid(cell)
+            velocity.u.to_numpy()[cell] = 1.0 + 2.0 * x - 3.0 * y
+            velocity.v.to_numpy()[cell] = 4.0 - x + 2.0 * y
+        gamma = fvm.ScalarField(mesh, "gamma")
+        gamma.set_constant(1.0)
+
+        bc = fvm.BoundaryField(mesh)
+        for patch in range(mesh.patch_count()):
+            if mesh.patch_name(patch) == "left":
+                bc.set(patch, fvm.BCType.Dirichlet, 1.0)
+            elif mesh.patch_name(patch) == "right":
+                bc.set(patch, fvm.BCType.Dirichlet, 0.0)
+
+        solver_cfg = fvm.SolverConfig()
+        solver_cfg.tolerance = 1e-10
+        flux = fvm.interpolate_cell_velocity_flux(mesh, velocity, 2.0)
+        phi_explicit = fvm.ScalarField(mesh, "phi_explicit")
+        phi_explicit.to_numpy()[:] = np.zeros(mesh.cell_count())
+        corrections = fvm.CorrectionOptions()
+
+        solution = fvm.solve_transport(mesh, flux, gamma,
+                                       fvm.ConvectionScheme.Central, bc,
+                                       solver_cfg,
+                                       phi_explicit=phi_explicit,
+                                       corrections=corrections)
+        self.assertEqual(solution.size, mesh.cell_count())
+        self.assertTrue(np.isfinite(solution).all())
 
     def test_write_vtu_smoke(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,5 +1,6 @@
 #include "Simple.h"
 #include "Convection.h"
+#include "MeshGeomCache.h"
 #include "Momentum.h"
 #include "Pressure.h"
 #include "TimeScheme.h"
@@ -10,6 +11,7 @@
 
 namespace fvm::numerical
 {
+using fvm::core::MeshGeomCache;
 
 SimpleResult solveSimple(const Mesh& mesh,
     Scalar rho,
@@ -26,6 +28,16 @@ SimpleResult solveSimple(const Mesh& mesh,
     {
         throw std::
             invalid_argument("solveSimple: relaxationP must be in (0, 1]");
+    }
+    if (config.corrections.nNonOrthogonalCorrectors < 0)
+    {
+        throw std::invalid_argument(
+            "solveSimple: nNonOrthogonalCorrectors must be non-negative");
+    }
+    if (MeshGeomCache(mesh).maxNonOrthogonality() > 70.0)
+    {
+        std::cerr << "warning: max non-orthogonality exceeds 70 degrees; "
+            "deferred corrections may converge slowly\n";
     }
 
     const Index nCells = mesh.cellCount();
@@ -63,7 +75,8 @@ SimpleResult solveSimple(const Mesh& mesh,
             bcP,
             config.relaxationU,
             TimeTerm{},
-            *momSolver);
+            *momSolver,
+            config.corrections);
 
         CorrectorResult corr;
         try
@@ -78,7 +91,8 @@ SimpleResult solveSimple(const Mesh& mesh,
                 config.relaxationP,
                 velocity,
                 pressure,
-                flux);
+                flux,
+                config.corrections);
         }
         catch (const std::exception& e)
         {

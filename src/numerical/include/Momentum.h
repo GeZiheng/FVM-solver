@@ -2,6 +2,7 @@
 
 #include "BoundaryCondition.h"
 #include "Convection.h"
+#include "CorrectionOptions.h"
 #include "Field.h"
 #include "LinearSolver.h"
 #include "Mesh.h"
@@ -43,7 +44,8 @@ MomentumAssembly assembleMomentum(const Mesh& mesh,
     const ScalarField& pressure,
     const BoundaryField& bcP,
     Scalar relaxation,
-    const TimeTerm& time = {});
+    const TimeTerm& time = {},
+    const CorrectionOptions& corrections = {});
 
 /// Momentum predictor result: the predicted velocities plus the Rhie-Chow data
 /// (`uHat = H/a_P`, `d = V/a_P`) consumed by the pressure corrector.
@@ -72,7 +74,8 @@ MomentumPrediction predictMomentum(const Mesh& mesh,
     const BoundaryField& bcP,
     Scalar relaxationU,
     const TimeTerm& time,
-    fvm::math::LinearSolver& momSolver);
+    fvm::math::LinearSolver& momSolver,
+    const CorrectionOptions& corrections = {});
 
 /// Re-evaluate the Rhie-Chow data `uHat = H(u)/a_P` from the current velocity
 /// (OpenFOAM `HbyA = rAU*UEqn.H()`).  OpenFOAM re-evaluates it at *every*

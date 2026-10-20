@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BoundaryCondition.h"
+#include "CorrectionOptions.h"
 #include "Field.h"
 #include "FluxField.h"
 #include "Mesh.h"
@@ -13,6 +14,7 @@ using fvm::core::FaceFluxField;
 using fvm::core::Index;
 using fvm::core::Mesh;
 using fvm::core::Scalar;
+using fvm::core::ScalarField;
 using fvm::core::Vector;
 using fvm::core::VectorField;
 using fvm::math::SparseMatrix;
@@ -26,23 +28,31 @@ enum class ConvectionScheme
 
 /// Build the face mass flux F_f = rho * (u_f . n) * S_f from a cell-centered
 /// velocity: linear interpolation in the interior and the adjacent owner
-/// value on boundary faces.  The flux follows the face orientation.
+/// value on boundary faces.  With skew interpolation enabled, interior linear
+/// interpolation is corrected by the owner/neighbour LSQ gradients at the
+/// skew vector.  This overload has no velocity BCs and therefore uses zero-
+/// Neumann gradient rows; prefer `computeMassFlux` when exact Dirichlet rows
+/// are available.  Boundary faces are not skew-corrected.
 FaceFluxField interpolateCellVelocityFlux(const Mesh& mesh,
     const VectorField& velocity,
-    Scalar rho);
+    Scalar rho,
+    const CorrectionOptions& corrections = {});
 
 /// Fill the face mass flux from a cell-centered velocity, honouring the velocity
 /// BCs on boundary faces (OpenFOAM-style createPhi): Dirichlet value of the
 /// patch's u and v components (where prescribed; otherwise the adjacent owner
 /// value, i.e. zero normal gradient), projected onto the owner-outward face
-/// area vector.  Filled in place -- FaceFluxField references its mesh and is
-/// not assignable.
+/// area vector.  With skew interpolation enabled, interior linear
+/// interpolation is corrected by the component LSQ gradients; Dirichlet BCs
+/// supply the exact boundary rows.  Boundary face logic is unchanged.
+/// Filled in place -- FaceFluxField references its mesh and is not assignable.
 void computeMassFlux(const Mesh& mesh,
     const VectorField& velocity,
     Scalar rho,
     const BoundaryField& bcU,
     const BoundaryField& bcV,
-    FaceFluxField& flux);
+    FaceFluxField& flux,
+    const CorrectionOptions& corrections = {});
 
 /// Throw std::runtime_error if the net boundary outflow is not zero (relative
 /// tolerance).  With pure-Neumann pressure the correction equation is only
@@ -77,11 +87,19 @@ void initializeMassFlux(const Mesh& mesh,
 ///   inflow, Neumann    -> zero normal gradient,   A(P,P) += F_b
 ///
 /// Accumulates into A and b (A must not be finalized).
+///
+/// With `explicitPhi` and Central skew interpolation enabled, interior face
+/// values are also corrected by `G_f . s_f`; that explicit increment enters
+/// only the RHS (`b(O) -= F_f * corr`, `b(N) += F_f * corr`).  Upwind is not
+/// corrected because its face value is an owner-centred value, and boundary
+/// faces receive no skew correction.
 void assembleConvection(const Mesh& mesh,
     const FaceFluxField& flux,
     ConvectionScheme scheme,
     const BoundaryField& bc,
     SparseMatrix& A,
-    Vector& b);
+    Vector& b,
+    const ScalarField* explicitPhi = nullptr,
+    const CorrectionOptions& corrections = {});
 
 } // namespace fvm::numerical

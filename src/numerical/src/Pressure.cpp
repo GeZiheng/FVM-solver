@@ -23,7 +23,8 @@ CorrectorResult correctPressure(const Mesh& mesh,
     Scalar relaxationP,
     VectorField& velocity,
     ScalarField& pressure,
-    FaceFluxField& flux)
+    FaceFluxField& flux,
+    const CorrectionOptions& corrections)
 {
     if (relaxationP <= 0.0 || relaxationP > 1.0)
     {
@@ -54,6 +55,12 @@ CorrectorResult correctPressure(const Mesh& mesh,
     const Vector& dU = pred.dU;
     const Vector& dV = pred.dV;
 
+    if (corrections.nNonOrthogonalCorrectors < 0)
+    {
+        throw std::invalid_argument(
+            "correctPressure: nNonOrthogonalCorrectors must be non-negative");
+    }
+
     // ---- Pressure equation for the absolute pressure (OpenFOAM pEqn) ----
     // Cell continuity sum_f F_f = 0 with
     //   F_f = phiHbyA_f - C_f (p_N - p_P)   (interior)
@@ -76,12 +83,65 @@ CorrectorResult correctPressure(const Mesh& mesh,
     // with no pressure term (Neumann p) keeps 0.
     Vector faceC(nFaces);
     faceC.setZero();
+    Vector faceCrossP(nFaces);
+    faceCrossP.setZero();
 
     // Derived face geometry, computed once per corrector (never per cell).
     const MeshGeomCache geom(mesh);
 
     // Value of the eliminated reference cell (kept at its previous level).
     const Scalar pRefValue = pressure(0);
+
+    // Explicit cross-pressure flux.  It does not overwrite the persistent
+    // phiHbyA/massImbalance; the effective pressure-free flux enters only
+    // through the assembled RHS and the matching final flux correction.
+    auto crossPressureOut = [&](const ScalarField& pField,
+                                bool updateFaceFlux)
+    {
+        Vector crossOut = Vector::Zero(nCells);
+        if (!corrections.nonOrthogonalDiffusion)
+        {
+            return crossOut;
+        }
+
+        const std::vector<Point2> gradients
+            = leastSquaresGradients(mesh, pField, bcP);
+        for (Index f = 0; f < nFaces; ++f)
+        {
+            if (mesh.isBoundaryFace(f))
+            {
+                continue;
+            }
+
+            const Index o = mesh.faceOwner(f);
+            const Index n = mesh.faceNeighbour(f);
+            const Scalar g = geom.interpWeight(f);
+            const Point2 d = geom.innerDelta(f);
+            const Point2 gradF{ g * gradients[o].x
+                    + (1.0 - g) * gradients[n].x,
+                g * gradients[o].y + (1.0 - g) * gradients[n].y };
+            const Scalar dd = d.x * d.x + d.y * d.y;
+            const Scalar projection = (gradF.x * d.x + gradF.y * d.y) / dd;
+            const Point2 residualGradient{ gradF.x - projection * d.x,
+                gradF.y - projection * d.y };
+            const Scalar dUf = g * dU(o) + (1.0 - g) * dU(n);
+            const Scalar dVf = g * dV(o) + (1.0 - g) * dV(n);
+            const Point2 area = mesh.faceAreaVector(f);
+            const Scalar crossP = rho
+                * (dUf * residualGradient.x * area.x
+                    + dVf * residualGradient.y * area.y);
+
+            crossOut(o) += crossP;
+            crossOut(n) -= crossP;
+            if (updateFaceFlux)
+            {
+                faceCrossP(f) = crossP;
+            }
+        }
+        return crossOut;
+    };
+
+    Vector crossOut = crossPressureOut(pressure, true);
 
     for (Index f = 0; f < nFaces; ++f)
     {
@@ -244,12 +304,21 @@ CorrectorResult correctPressure(const Mesh& mesh,
     else
         pOld = pressure.data();
 
-    Vector b(nP);
-    for (Index P = 0; P < nCells; ++P)
+    const auto assembleRhs = [&](const Vector& currentCrossOut)
     {
-        if (!isReference(P))
-            b(rowOf(P)) = -massImbalance(P) + rhsExtra(P);
-    }
+        Vector rhs(nP);
+        for (Index P = 0; P < nCells; ++P)
+        {
+            if (!isReference(P))
+            {
+                rhs(rowOf(P)) = -(massImbalance(P) - currentCrossOut(P))
+                    + rhsExtra(P);
+            }
+        }
+        return rhs;
+    };
+
+    Vector b = assembleRhs(crossOut);
 
     pSys.A.finalize();
 
@@ -266,7 +335,27 @@ CorrectorResult correctPressure(const Mesh& mesh,
             = std::max(result.maxImbalance, std::abs(residual.sum()));
     }
 
-    const Vector pSol = pSolver.solve(pSys.A, b);
+    const int subSolves = corrections.nNonOrthogonalCorrectors + 1;
+    Vector pSol;
+    for (int subIteration = 0; subIteration < subSolves; ++subIteration)
+    {
+        if (subIteration > 0)
+        {
+            ScalarField pIter(mesh, "pIter");
+            if (pinReference)
+            {
+                pIter.data()(0) = pRefValue;
+                pIter.data().tail(nCells - 1) = pSol;
+            }
+            else
+            {
+                pIter.data() = pSol;
+            }
+            crossOut = crossPressureOut(pIter, true);
+            b = assembleRhs(crossOut);
+        }
+        pSol = pSolver.solve(pSys.A, b);
+    }
 
     // Absolute pressure used to rebuild the flux and the velocity; the
     // eliminated reference cell keeps its previous value.
@@ -289,6 +378,11 @@ CorrectorResult correctPressure(const Mesh& mesh,
     //   net outflow then equals the linear solver's residual.  The
     //   coefficients are the ones stored by the assembly above, never
     //   recomputed here.
+    for (Index f = 0; f < nFaces; ++f)
+    {
+        flux[f] -= faceCrossP(f);
+    }
+
     for (Index f = 0; f < nFaces; ++f)
     {
         if (faceC(f) == 0.0)

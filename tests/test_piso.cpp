@@ -1,9 +1,12 @@
 #include "Field.h"
 #include "FluxField.h"
 #include "CartesianMesh.h"
+#include "ObliqueMeshFixtures.h"
 #include "Piso.h"
+#include "UnstructuredMesh.h"
 #include <cmath>
 #include <doctest/doctest.h>
+#include <utility>
 
 using namespace fvm::core;
 using namespace fvm::numerical;
@@ -12,6 +15,49 @@ namespace
 {
 
 constexpr Scalar kPi = 3.14159265358979323846;
+
+void setShearedChannelBCs(const Mesh& mesh,
+    BoundaryField& bcU,
+    BoundaryField& bcV,
+    BoundaryField& bcP)
+{
+    for (Index patch = 0; patch < mesh.patchCount(); ++patch)
+    {
+        const Index face = mesh.patchFaces(patch)[0];
+        const Point2 centroid = mesh.faceCentroid(face);
+        if (centroid.x < 1.0e-9)
+        {
+            bcU.set(patch, BCType::Dirichlet, 1.0);
+            bcV.set(patch, BCType::Dirichlet, 0.0);
+            bcP.set(patch, BCType::Neumann, 0.0);
+        }
+        else if (centroid.x > 1.0 - 1.0e-9)
+        {
+            bcU.set(patch, BCType::Neumann, 0.0);
+            bcV.set(patch, BCType::Dirichlet, 0.0);
+            bcP.set(patch, BCType::Dirichlet, 0.0);
+        }
+        else
+        {
+            bcU.set(patch, BCType::Dirichlet, 0.0);
+            bcV.set(patch, BCType::Dirichlet, 0.0);
+            bcP.set(patch, BCType::Neumann, 0.0);
+        }
+    }
+}
+
+Scalar netBoundaryFlux(const Mesh& mesh, const FaceFluxField& flux)
+{
+    Scalar net = 0.0;
+    for (Index patch = 0; patch < mesh.patchCount(); ++patch)
+    {
+        for (const Index face : mesh.patchFaces(patch))
+        {
+            net += flux[face];
+        }
+    }
+    return net;
+}
 
 // Exact solution of the impulsive start of Couette flow between y = 0
 // (fixed) and y = 1 (moving with u = 1), no-slip walls, u(y, 0) = 0:
@@ -29,6 +75,91 @@ Scalar exactCouette(Scalar y, Scalar t, Scalar nu)
 }
 
 } // namespace
+
+TEST_CASE("PISO single step on sheared mesh")
+{
+    const UnstructuredMesh mesh(makeShearedTriMesh(4));
+    const Mesh& base = mesh;
+
+    BoundaryField bcU(base);
+    BoundaryField bcV(base);
+    BoundaryField bcP(base);
+    setShearedChannelBCs(base, bcU, bcV, bcP);
+
+    VectorField velocity(base, "velocity");
+    ScalarField pressure(base, "pressure");
+    FaceFluxField flux(base, "flux");
+
+    PisoConfig config;
+    config.dt = 0.01;
+    config.nSteps = 1;
+    config.nCorrectors = 2;
+    config.scheme = ConvectionScheme::Upwind;
+    config.solverConfig.tolerance = 1.0e-11;
+    config.solverConfig.maxIterations = 10000;
+
+    const PisoResult result = solvePiso(base,
+        1.0,
+        0.01,
+        bcU,
+        bcV,
+        bcP,
+        config,
+        velocity,
+        pressure,
+        flux);
+
+    REQUIRE(result.history.size() == 1);
+    CHECK(result.history[0].continuity <= 1.0e-8);
+    CHECK(std::abs(netBoundaryFlux(base, flux)) <= 1.0e-8);
+}
+
+TEST_CASE("PISO non-orthogonal correctors are zero on Cartesian meshes")
+{
+    auto run = [](CorrectionOptions corrections)
+    {
+        CartesianMesh mesh(12, 10, 0.0, 0.0, 1.0, 1.0);
+        BoundaryField bcU(mesh);
+        BoundaryField bcV(mesh);
+        BoundaryField bcP(mesh);
+        setShearedChannelBCs(mesh, bcU, bcV, bcP);
+
+        VectorField velocity(mesh, "velocity");
+        ScalarField pressure(mesh, "pressure");
+        FaceFluxField flux(mesh, "flux");
+
+        PisoConfig config;
+        config.dt = 0.01;
+        config.nSteps = 1;
+        config.nCorrectors = 2;
+        config.corrections = corrections;
+        config.solverConfig.tolerance = 1.0e-11;
+        config.solverConfig.maxIterations = 10000;
+        solvePiso(mesh,
+            1.0,
+            0.01,
+            bcU,
+            bcV,
+            bcP,
+            config,
+            velocity,
+            pressure,
+            flux);
+        return std::make_pair(velocity.u().data(), pressure.data());
+    };
+
+    CorrectionOptions noSubiterations;
+    noSubiterations.nNonOrthogonalCorrectors = 0;
+    CorrectionOptions twoSubiterations;
+    twoSubiterations.nNonOrthogonalCorrectors = 2;
+
+    const auto reference = run(noSubiterations);
+    const auto corrected = run(twoSubiterations);
+    CHECK((corrected.first - reference.first).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+    CHECK((corrected.second - reference.second).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+}
 
 TEST_CASE("PISO: impulsive Couette start matches the exact series")
 {

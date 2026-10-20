@@ -16,6 +16,7 @@
 
 #include "BoundaryCondition.h"
 #include "Convection.h"
+#include "CorrectionOptions.h"
 #include "Field.h"
 #include "FluxField.h"
 #include "LinearSolver.h"
@@ -47,6 +48,7 @@ using fvm::numerical::BCType;
 using fvm::numerical::BoundaryCondition;
 using fvm::numerical::BoundaryField;
 using fvm::numerical::ConvectionScheme;
+using fvm::numerical::CorrectionOptions;
 using fvm::numerical::PisoConfig;
 using fvm::numerical::PisoResult;
 using fvm::numerical::PisoStepInfo;
@@ -141,7 +143,9 @@ py::array_t<Scalar> solveTransport(const Mesh& mesh,
     const BoundaryField& bc,
     const SolverConfig& solverConfig,
     const ScalarField* Sc,
-    const ScalarField* Sp)
+    const ScalarField* Sp,
+    const ScalarField* phiExplicit,
+    const CorrectionOptions& corrections)
 {
     requireSameMesh(mesh, flux, "flux");
     requireSameMesh(mesh, gamma, "gamma");
@@ -150,7 +154,17 @@ py::array_t<Scalar> solveTransport(const Mesh& mesh,
         requireSameMesh(mesh, *Sc, "Sc");
     if (Sp)
         requireSameMesh(mesh, *Sp, "Sp");
-    auto sys = numerical::assembleTransport(mesh, flux, gamma, scheme, bc, Sc, Sp);
+    if (phiExplicit)
+        requireSameMesh(mesh, *phiExplicit, "phi_explicit");
+    auto sys = numerical::assembleTransport(mesh,
+        flux,
+        gamma,
+        scheme,
+        bc,
+        Sc,
+        Sp,
+        phiExplicit,
+        corrections);
     sys.A.finalize();
     auto solver = math::createEigenBiCGSTAB(solverConfig);
     Vector x;
@@ -172,7 +186,8 @@ py::array_t<Scalar> solveTransientTransport(const Mesh& mesh,
     TimeScheme timeScheme,
     const SolverConfig& solverConfig,
     const ScalarField* Sc,
-    const ScalarField* Sp)
+    const ScalarField* Sp,
+    const CorrectionOptions& corrections)
 {
     requireSameMesh(mesh, flux, "flux");
     requireSameMesh(mesh, gamma, "gamma");
@@ -182,8 +197,18 @@ py::array_t<Scalar> solveTransientTransport(const Mesh& mesh,
         requireSameMesh(mesh, *Sc, "Sc");
     if (Sp)
         requireSameMesh(mesh, *Sp, "Sp");
-    auto sys = numerical::assembleTransientTransport(
-        mesh, flux, gamma, scheme, bc, phiOld, dt, timeScheme, Sc, Sp);
+    auto sys = numerical::assembleTransientTransport(mesh,
+        flux,
+        gamma,
+        scheme,
+        bc,
+        phiOld,
+        dt,
+        timeScheme,
+        Sc,
+        Sp,
+        &phiOld,
+        corrections);
     sys.A.finalize();
     auto solver = math::createEigenBiCGSTAB(solverConfig);
     Vector x;
@@ -244,10 +269,14 @@ PisoResult runPiso(const Mesh& mesh,
 
 FaceFluxField interpolateCellVelocityFlux(const Mesh& mesh,
     const VectorField& velocity,
-    Scalar rho)
+    Scalar rho,
+    const CorrectionOptions& corrections)
 {
     requireSameMesh(mesh, velocity, "velocity");
-    return numerical::interpolateCellVelocityFlux(mesh, velocity, rho);
+    return numerical::interpolateCellVelocityFlux(mesh,
+        velocity,
+        rho,
+        corrections);
 }
 
 void computeMassFlux(const Mesh& mesh,
@@ -255,13 +284,20 @@ void computeMassFlux(const Mesh& mesh,
     Scalar rho,
     const BoundaryField& bcU,
     const BoundaryField& bcV,
-    FaceFluxField& flux)
+    FaceFluxField& flux,
+    const CorrectionOptions& corrections)
 {
     requireSameMesh(mesh, velocity, "velocity");
     requireSameMesh(mesh, flux, "flux");
     requireSameMesh(mesh, bcU, "bc_u");
     requireSameMesh(mesh, bcV, "bc_v");
-    numerical::computeMassFlux(mesh, velocity, rho, bcU, bcV, flux);
+    numerical::computeMassFlux(mesh,
+        velocity,
+        rho,
+        bcU,
+        bcV,
+        flux,
+        corrections);
 }
 
 void initializeMassFlux(const Mesh& mesh,
@@ -540,6 +576,19 @@ void bindNumerical(py::module_& m)
         .def_readwrite("max_iterations", &SolverConfig::maxIterations)
         .def_readwrite("verbose", &SolverConfig::verbose);
 
+    py::class_<CorrectionOptions>(m,
+        "CorrectionOptions",
+        "All corrections are enabled by default and are identically zero on "
+        "orthogonal grids; n_non_orthogonal_correctors is the pressure "
+        "sub-loop count (0 = one pressure solve).")
+        .def(py::init<>())
+        .def_readwrite(
+            "non_orthogonal_diffusion", &CorrectionOptions::nonOrthogonalDiffusion)
+        .def_readwrite(
+            "skew_interpolation", &CorrectionOptions::skewInterpolation)
+        .def_readwrite("n_non_orthogonal_correctors",
+            &CorrectionOptions::nNonOrthogonalCorrectors);
+
     // -- SIMPLE -------------------------------------------------------------
     py::class_<SimpleResiduals>(m, "SimpleResiduals")
         .def_readonly("continuity", &SimpleResiduals::continuity)
@@ -555,6 +604,7 @@ void bindNumerical(py::module_& m)
         .def_readwrite("relaxation_p", &SimpleConfig::relaxationP)
         .def_readwrite("scheme", &SimpleConfig::scheme)
         .def_readwrite("solver_config", &SimpleConfig::solverConfig)
+        .def_readwrite("corrections", &SimpleConfig::corrections)
         .def_readwrite("verbose", &SimpleConfig::verbose);
 
     py::class_<SimpleResult>(m, "SimpleResult")
@@ -584,6 +634,7 @@ void bindNumerical(py::module_& m)
         .def_readwrite("time_scheme", &PisoConfig::timeScheme)
         .def_readwrite("scheme", &PisoConfig::scheme)
         .def_readwrite("solver_config", &PisoConfig::solverConfig)
+        .def_readwrite("corrections", &PisoConfig::corrections)
         .def_readwrite("verbose", &PisoConfig::verbose);
 
     py::class_<PisoResult>(m, "PisoResult")
@@ -601,12 +652,14 @@ void bindNumerical(py::module_& m)
     // -- Flux helpers ---------------------------------------------------------
     m.def("interpolate_cell_velocity_flux", &interpolateCellVelocityFlux,
         py::arg("mesh"), py::arg("velocity"), py::arg("rho"),
+        py::arg("corrections") = CorrectionOptions{},
         py::keep_alive<0, 1>(),
         "Face mass flux from a cell-centred velocity (no BCs; for transport "
         "with a prescribed velocity).");
     m.def("compute_mass_flux", &computeMassFlux,
         py::arg("mesh"), py::arg("velocity"), py::arg("rho"),
-        py::arg("bc_u"), py::arg("bc_v"), py::arg("flux"));
+        py::arg("bc_u"), py::arg("bc_v"), py::arg("flux"),
+        py::arg("corrections") = CorrectionOptions{});
     m.def("initialize_mass_flux", &initializeMassFlux,
         py::arg("mesh"), py::arg("velocity"), py::arg("rho"),
         py::arg("bc_u"), py::arg("bc_v"), py::arg("bc_p"), py::arg("flux"));
@@ -621,16 +674,22 @@ void bindNumerical(py::module_& m)
         py::arg("scheme"), py::arg("bc"),
         py::arg("solver_config") = SolverConfig{},
         py::arg("Sc") = nullptr, py::arg("Sp") = nullptr,
+        py::arg("phi_explicit") = nullptr,
+        py::arg("corrections") = CorrectionOptions{},
         "Steady convection-diffusion-source solve; returns the solution as a "
-        "numpy array (cell order j * nx + i).");
+        "numpy array (cell order j * nx + i). Steady cross-diffusion needs "
+        "phi_explicit; callers re-solve iteratively. Without it the "
+        "correction is lazy/inactive.");
     m.def("solve_transient_transport", &solveTransientTransport,
         py::arg("mesh"), py::arg("flux"), py::arg("gamma"),
         py::arg("scheme"), py::arg("bc"), py::arg("phi_old"),
         py::arg("dt"), py::arg("time_scheme"),
         py::arg("solver_config") = SolverConfig{},
         py::arg("Sc") = nullptr, py::arg("Sp") = nullptr,
+        py::arg("corrections") = CorrectionOptions{},
         "One implicit theta-scheme time step of the scalar transport "
-        "equation; returns the new solution as a numpy array.");
+        "equation; returns the new solution as a numpy array. phi_old is the "
+        "frozen explicit-correction field.");
 }
 
 void bindAll(py::module_& m)
