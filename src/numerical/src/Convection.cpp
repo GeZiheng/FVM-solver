@@ -182,9 +182,10 @@ void initializeMassFlux(const Mesh& mesh,
     const BoundaryField& bcU,
     const BoundaryField& bcV,
     const BoundaryField& bcP,
-    FaceFluxField& flux)
+    FaceFluxField& flux,
+    const CorrectionOptions& corrections)
 {
-    computeMassFlux(mesh, velocity, rho, bcU, bcV, flux);
+    computeMassFlux(mesh, velocity, rho, bcU, bcV, flux, corrections);
 
     // Pure-Neumann p is only compatible when the boundary fluxes balance;
     // catch unbalanced velocity BCs here instead of solving an inconsistent

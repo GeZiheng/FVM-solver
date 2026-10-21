@@ -51,7 +51,7 @@ struct LinearXField
     }
 };
 
-Scalar maxGradientError(const Mesh& mesh,
+Scalar maxGradientError(
     const std::vector<Point2>& gradients,
     const Scalar expectedX,
     const Scalar expectedY)
@@ -84,7 +84,7 @@ TEST_CASE("leastSquaresGradients is exact on a Cartesian mesh")
     const std::vector<Point2> gradients
         = leastSquaresGradients(mesh, phi, bc);
     REQUIRE(gradients.size() == mesh.cellCount());
-    CHECK(maxGradientError(mesh,
+    CHECK(maxGradientError(
         gradients,
         LinearXField::derivativeX(),
         LinearXField::derivativeY())
@@ -123,7 +123,12 @@ TEST_CASE("leastSquaresGradients is exact on an oblique triangle pair")
     const std::vector<Point2> gradients
         = leastSquaresGradients(base, phi, bc);
     REQUIRE(gradients.size() == base.cellCount());
-    CHECK(maxGradientError(base,
+    for (const Point2& gradient : gradients)
+    {
+        REQUIRE(std::isfinite(gradient.x));
+        REQUIRE(std::isfinite(gradient.y));
+    }
+    CHECK(maxGradientError(
         gradients,
         LinearField::derivativeX(),
         LinearField::derivativeY())
@@ -170,7 +175,7 @@ TEST_CASE("leastSquaresGradients honors exact Neumann data")
     const std::vector<Point2> gradients
         = leastSquaresGradients(base, phi, bc);
     REQUIRE(gradients.size() == base.cellCount());
-    CHECK(maxGradientError(base,
+    CHECK(maxGradientError(
         gradients,
         LinearField::derivativeX(),
         LinearField::derivativeY())

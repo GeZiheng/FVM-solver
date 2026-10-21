@@ -23,7 +23,7 @@ $$\underbrace{\sum_f F_f \phi_f}_{\text{convection}} = \underbrace{\sum_f D_f (\
 | 插值权重 $g_f$ | $\lVert x_f-x_N\rVert/\lVert x_P-x_N\rVert$ | $1/2$ |
 | 边界质量通量 | $F_b=\rho (u_b\mathbf S_x+v_b\mathbf S_y)$ | 与旧的分量/面规则一致 |
 
-边界速度 $u_b/v_b$ 取该 patch 的 Dirichlet 值；未给定时取 owner 值（零梯度）。非正交分解中的 $\mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f$ 当前只作为几何诊断/后续修正基础，尚未进入扩散矩阵（见文末 4.3b/4.3c 计划）。
+边界速度 $u_b/v_b$ 取该 patch 的 Dirichlet 值；未给定时取 owner 值（零梯度）。非正交分解中的 $\mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f$ 已由扩散矩阵的隐式正交部分和显式交叉项共同使用：矩阵保持正交扩散形式，$\mathbf k_f$ 只产生进入右端的 deferred-correction 项。
 
 ## BoundaryCondition：边界条件
 
@@ -34,12 +34,16 @@ $$\underbrace{\sum_f F_f \phi_f}_{\text{convection}} = \underbrace{\sum_f D_f (\
 
 ## GridOperators：公共离散算子
 
-存放跨方程复用的离散算子。目前提供单元中心 Gauss 梯度（`cellGradient`），被动量方程的压力梯度源与压力修正的速度重建共同使用：
+存放跨方程复用的离散算子。目前提供单元中心 Gauss 梯度（`cellGradient`）与最小二乘梯度（`leastSquaresGradients`）。GG 梯度仍被动量方程的压力梯度源与压力修正的速度重建共同使用：
 
 $$(\nabla \phi)_{P,d} = \frac{1}{V_P} \sum_f \sigma_{Pf} \phi_f S_{f,d},\qquad
 \sigma_{Pf}=\text{+1 if } P=\mathrm{owner}(f) \text{, -1 if } P=\mathrm{neighbour}(f)$$
 
 内部面 $\phi_f$ 取线性插值 $g_f\phi_P+(1-g_f)\phi_N$（均匀网格为算术平均/中心差分）；边界面 Dirichlet 取给定值、Neumann 取 $\phi_P$（零法向梯度）。求和直接使用 $\mathbf S_f$，按 owner/neighbour 关系统一符号。
+
+### 最小二乘单元梯度
+
+`leastSquaresGradients` 逐单元组装 $2\times2$ 法方程。约束行按面来源加权：内部面取 $(\mathbf d_f,\phi_N-\phi_P,w=1/\lVert\mathbf d_f\rVert)$；Dirichlet 面取 $(\boldsymbol\delta_f,\phi_b-\phi_P,w=1/\lVert\boldsymbol\delta_f\rVert)$；Neumann 面给方向约束 $(\hat{\mathbf n},g_n,w=1)$。斜交网格上它比 GG 更适合构造面插值修正；非正交/skewness 修正与压力子迭代共用该算子。法方程奇异（约束共线等退化邻域）时，该单元回退 GG `cellGradient`，不抛异常。原有 GG 算子和它的既有消费方保持不变。
 
 设计意图：把这类"任何 solver 都可能要用的网格算子"集中为公共接口（`include/`），后续如 `divergence` 等直接加入即可被其他 solver 复用。
 
@@ -47,7 +51,7 @@ $$(\nabla \phi)_{P,d} = \frac{1}{V_P} \sum_f \sigma_{Pf} \phi_f S_{f,d},\qquad
 
 装配算子 $-\nabla \cdot (\gamma \nabla \phi)$。
 
-### 内部面：正交扩散系数
+### 内部面：隐式正交项与显式交叉项
 
 面扩散系数取两侧单元值的**算术平均** $\gamma_f = (\gamma_P + \gamma_N) / 2$，传导率使用几何系数：
 
@@ -60,7 +64,13 @@ A(P,P) += D_f      A(P,N) −= D_f
 A(N,N) += D_f      A(N,P) −= D_f
 ```
 
-内部面按全局编号只遍历一次，每对相邻单元恰好贡献一次。正交部分保持矩阵对称；显式非正交交叉扩散修正推迟到 4.3c。
+内部面按全局编号只遍历一次，每对相邻单元恰好贡献一次。正交部分保持矩阵对称；显式非正交交叉扩散修正见下文。
+
+4.3c 已加入 minimum-correction 形式的交叉扩散。令 $\mathbf G_f$ 为 LSQ 单元梯度的线性插值，定义显式交叉通量
+
+$$X_f=\gamma_f\,(\mathbf k_f\cdot\mathbf G_f),\qquad \mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f .$$
+
+$\mathbf G_f$ 来自调用方提供的冻结显式场 `explicitPhi`；该场未提供时修正保持惰性。$X_f$ 不进入矩阵，只进入右端：`b(O) += X_f`，neighbour 侧取相反符号。因此矩阵仍是对称正交 Laplace 离散，线性求解器看到的 SPD 性质与关闭修正时相同。边界面不加交叉项：Dirichlet 的 $\beta_f$ 与 Neumann 通量公式保持原状。正交网格上 $\mathbf k_f=0$，从而 $X_f$ 恒为零。
 
 ### 边界面
 
@@ -82,7 +92,7 @@ A(N,N) += D_f      A(N,P) −= D_f
 
 ### 矩阵性质
 
-仅有 Dirichlet/Neumann 边界时正交扩散矩阵对称半正定；存在至少一个 Dirichlet patch 时为对称正定（SPD），可用 CG 求解。
+仅有 Dirichlet/Neumann 边界时正交扩散矩阵对称半正定；存在至少一个 Dirichlet patch 时为对称正定（SPD），可用 CG 求解。非正交交叉扩散是显式项且只进入 `b`，不改变上述矩阵对称性或正定性。
 
 ## Convection：通量构造与对流项装配
 
@@ -94,8 +104,8 @@ A(N,N) += D_f      A(N,P) −= D_f
 
 | 函数 | 内部面 | 边界面 | 适用场景 |
 |------|--------|--------|----------|
-| `interpolateCellVelocityFlux(mesh, velocity, rho)` | $\mathbf{u}_f=g_f\mathbf{u}_P+(1-g_f)\mathbf{u}_N$ | owner 单元中心速度 | "给定速度场"的独立输运问题（无速度 BC 可用） |
-| `computeMassFlux(mesh, velocity, rho, bcU, bcV, flux)` | 同上 | patch Dirichlet 的 $u_b/v_b$，未给定时取单元速度（零梯度），再投影到 $\mathbf S_b$ | 有速度边界条件时的底层填充函数（对应 OpenFOAM 的 `createPhi.H`）；**原地填充**（`FaceFluxField` 不可赋值） |
+| `interpolateCellVelocityFlux(mesh, velocity, rho, corrections)` | $\mathbf{u}_f$ 取线性插值；`skew_interpolation` 开启时内部分量加 LSQ skew 修正 | owner 单元中心速度 | "给定速度场"的独立输运问题（无速度 BC 可用） |
+| `computeMassFlux(mesh, velocity, rho, bcU, bcV, flux, corrections)` | 同上 | patch Dirichlet 的 $u_b/v_b$，未给定时取单元速度（零梯度），再投影到 $\mathbf S_b$ | 有速度边界条件时的底层填充函数（对应 OpenFOAM 的 `createPhi.H`）；**原地填充**（`FaceFluxField` 不可赋值） |
 | `initializeMassFlux(mesh, velocity, rho, bcU, bcV, bcP, flux)` | — | — | `solveSimple`/`solvePiso` 的共享入口：先 `computeMassFlux`，纯 Neumann 压力时再 `checkFluxCompatibility`——把"建通量 + 封闭域相容性检查"合成一步 |
 | `hasDirichletPressure(bcP)` | — | — | 判定压力方程是否已正定（任一 patch 为 Dirichlet 压力即无需参考单元）；被 `initializeMassFlux` 与 `correctPressure` 共用 |
 | `checkFluxCompatibility(flux, relTol)` | — | 检查边界净流出量是否为零（相对容差 `relTol * Σ\|F_b\|`，默认 1e-10），不满足则抛 `std::runtime_error` | 纯 Neumann 压力（封闭域）问题的相容性检查（对应 OpenFOAM 的 `adjustPhi`）；`initializeMassFlux` 按需调用，也可由调用方直接用于自检 |
@@ -123,6 +133,14 @@ A(N,P) −= h_P  A(N,N) −= h_N
 ```
 
 特点：精度 $O(h^2)$，但在网格 Peclet 数较大时可能产生非物理振荡（无有界性保证）。
+
+### skewness 面插值修正
+
+对内部面定义 skew 向量 $\mathbf s_f=x_f-(g_f x_O+(1-g_f)x_N)$。`skew_interpolation` 开启时，用 LSQ 梯度的线性插值 $\mathbf G_f$ 把线性面值补到真实面心：
+
+$$\phi_f=g_f\phi_O+(1-g_f)\phi_N+\mathbf G_f\cdot\mathbf s_f .$$
+
+该修正作用于 `assembleConvection` 的 **Central** 内部分支和 `interpolateCellVelocityFlux`/`computeMassFlux` 的内部速度分量（对流对 $\phi$ 修正产生 `b(O) -= F_f(\mathbf G_f\cdot\mathbf s_f)`，`b(N)` 取反号；通量构造对 $u$、$v$ 分别修正）。Upwind 的上游单元心面值、边界面以及 Rhie–Chow 的 `uHat` 插值不加 skew 修正。正交网格上 $\mathbf s_f$ 恒为零；默认开启不改变既有正交回归。
 
 ### 边界面处理
 
@@ -278,9 +296,21 @@ Dirichlet 压力 patch 使用上式；Neumann 压力 patch 不加压力项。笛
 
 把 $F_f = F^{\hat u}_f - C_f (p_N - p_P)$ 代入单元连续性 $\sum_f F_f = 0$，得到关于**新压力**（绝对压力）的方程
 
-$$A p = b, \qquad b_P = -\sum_f \text{outward}\big(F^{\hat u}_f\big) + \sum_{\text{Dirichlet}} C_b p_b$$
+$$A p = b, \qquad b_P = -\sum_f \text{outward}\big(F^{\hat u}_f-\mathit{crossP}_f\big) + \sum_{\text{Dirichlet}} C_b p_b$$
 
 > **符号约定**：右端第一项是预测通量净流出的**负值**，第二项对所有 Dirichlet 压力 patch 的边界面求和。若符号写反，压力方程会形成正反馈，速度场迅速发散。
+
+**非正交交叉压力通量**：对当前压力 $p_k$ 计算 LSQ 梯度，并取它在面法向平面上正交于 $\mathbf d_f$ 的残差
+
+$$\mathbf R_f=\mathbf G_f-\frac{\mathbf G_f\cdot\mathbf d_f}{\mathbf d_f\cdot\mathbf d_f}\mathbf d_f,$$
+
+$$\mathit{crossP}_f=\rho\left(\Delta u_f R_{f,x}S_{f,x}+\Delta v_f R_{f,y}S_{f,y}\right),$$
+
+其中 $\Delta u_f/\Delta v_f$ 是 Rhie–Chow 的面插值投影系数。边界面不加交叉项；正交网格上 $\mathbf R_f$ 的相关投影为零，`crossP` 恒为零。
+
+`CorrectionOptions{nonOrthogonalDiffusion=true, skewInterpolation=true, nNonOrthogonalCorrectors=0}` 是全装配函数与两个驱动的 trailing 默认参数；`nonOrthogonalDiffusion` 同时控制扩散 `X` 和压力 `crossP`。
+
+`nNonOrthogonalCorrectors = n` 时，每个 SIMPLE 压力修正或 PISO 压力修正内部做 $n+1$ 次压力求解：每次求解前刷新 $p_k$ 的 LSQ 梯度和 `crossP`，以有效通量 $F^{\hat u}_f-\mathit{crossP}_f$ 装配求解 $p_{k+1}$。只有最后一次子迭代把内部通量写回持久 `phi`；边界面仍按既有 Dirichlet/Neumann-p 规则处理。子循环全部结束后才做压力松弛（如有），速度重构继续使用未松弛的最终解与 GG 梯度。`n < 0` 被拒绝；驱动入口在最大非正交角超过 $70^\circ$ 时发出收敛性警告。
 
 装配规则：
 
@@ -337,7 +367,7 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P (\nabla p_{\text{sol}})_P$$
 
 | 类型 | 说明 |
 |------|------|
-| `SimpleConfig` | `maxIterations`、`tolerance`、`relaxationU`/`relaxationP`、`scheme`、`solverConfig`、`verbose` |
+| `SimpleConfig` | `maxIterations`、`tolerance`、`relaxationU`/`relaxationP`、`scheme`、`solverConfig`、`corrections`（`CorrectionOptions`）、`verbose` |
 | `SimpleResiduals` | 每次迭代的残差快照：`continuity`、`u`/`v`、`pressure` |
 | `SimpleResult` | `converged`、`iterations`、`history` |
 
@@ -354,7 +384,7 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P (\nabla p_{\text{sol}})_P$$
 
 | 类型 | 说明 |
 |------|------|
-| `PisoConfig` | `dt`、`nSteps`、`nCorrectors`（**必须 ≥ 2**，`solvePiso` 会拒绝更小的值——单修正子在一次扫掠后就到达不动点并发散）、`timeScheme`、`scheme`、`solverConfig`、`verbose` |
+| `PisoConfig` | `dt`、`nSteps`、`nCorrectors`（**必须 ≥ 2**，`solvePiso` 会拒绝更小的值——单修正子在一次扫掠后就到达不动点并发散）、`timeScheme`、`scheme`、`solverConfig`、`corrections`（`CorrectionOptions`）、`verbose` |
 | `PisoStepInfo` | 每步诊断：`time`、`continuity`（修正后真实连续性误差）、`maxSpeed` |
 | `PisoResult` | `steps`、`history` |
 
@@ -411,9 +441,9 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 - 既有 C++ 断言全部原样通过（最终 63 个 test case / 4695 个断言），`pyfvm_tests` 14 项通过；
 - `tests/test_mesh_dual.cpp` 用 `makeStructuredMesh` 与 `CartesianMesh` 表示同一结构网格，验证拓扑/几何/通量以及 diffusion、convection、transport、transient、gradient 装配等价（容差 `1e-12`）；
 - 耦合路径也做了双表示覆盖：`assembleMomentum` 的 u/v、松弛 0.7/1.0、稳态与瞬态 Euler 共 8 种组合在 `1e-12` 内一致；端到端 `solveSimple` 通道流（east Dirichlet 压力）在两种表示下一致到 `1e-8`；
-- `tests/test_unstructured.cpp` 覆盖手工三角形网格的体积/中心/面积向量（两三角形拼成正方形时 $\alpha=3$、$\beta=3$）、非正交面对（$\mathbf k\ne0$ 且 $\mathbf k\cdot\mathbf d=0$、$\alpha>0$）以及构造器的非法输入拒绝。
+- `tests/test_unstructured.cpp` 覆盖手工三角形网格的体积/中心/面积向量（两三角形拼成正方形时 $\alpha=3$、$\beta=3$）、非正交面对（$\mathbf k\ne0$ 且 $\mathbf k\cdot\mathbf d=0$、$\alpha>0$）、派生非正交/skewness 诊断，以及构造器的非法输入拒绝。
 
-4.3b 的 `.vtu` 输出已完成。以下能力仍为 4.3c/后续计划：Gmsh `.msh` 读取、显式非正交交叉扩散修正（$\mathbf k_f\cdot\nabla\phi$ deferred correction）、skewness correction。
+4.3b 的 `.vtu` 输出已完成；4.3c 的显式交叉扩散修正、压力非正交子循环、skewness 面插值修正和 LSQ 梯度已完成。Gmsh `.msh` 读取仍为可选后续。
 
 ## 与 OpenFOAM 实现的对比
 
@@ -454,6 +484,28 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 
 **瞬态验收**：突启 Couette $\max|u-u_{\text{exact}}|=2.0\times10^{-3}$（限值 $2\times10^{-2}$）、瞬态 Poiseuille 相对 $L_2$ 误差 $5.3\times10^{-3}$（限值 $8\times10^{-2}$）、$Q=0.08398\approx1/12$、连续性 $2.1\times10^{-16}$。
 
+### 斜交网格对照（未决，2026-10-21）
+
+4.3c 后 C++ doctest 为 99 个 test case（4.3c 前 85），`pyfvm_tests` 为 22 项（4.3c 前 19）。斜交修正的内部验收通过：线性场扩散通量精确；剪切三角形 manufactured 解在修正开启时收敛阶为 $1.7\sim2.3$，关闭时低于 $1.5$；LSQ 梯度对线性场精确；$\Delta t=0.002$ 时压力子迭代从 `sub=8` 到 `sub=16` 的 $p(0,0)$ 变化约 $2.4\times10^{-8}$，已到收敛平台。
+
+**正交基线复验**：unit square $16\times16$、入口 $p=1$、出口 $p=0$、壁面 no-slip、Euler + upwind、$\Delta t=0.02$ 单步，求解容差 $10^{-9}$：
+
+| 量 | 本项目 | OpenFOAM-14 | 差 |
+|---|---:|---:|---:|
+| $p(0,0)$ | 1.1151914293 | 1.11519143114 | $1.8\times10^{-9}$ |
+
+这确认网格、边界、物性和时间格式映射未因 4.3c 破坏。
+
+**梯形收缩通道 NS 对照仍未决**。算例为 bilinear 梯形（$16\times16$，壁面倾角约 $16.7^\circ$），OpenFOAM `blockMesh` 与本项目 SU2 同参数生成。$\Delta t=0.02$ 的冲击瞬态使算例刚化：OpenFOAM 自身 NC=1 与 NC=2 的 $p(0,0)$ 差达 $O(10)$，且 NC=2 十步发散（$p\to-5522$、Co$\to15$），因此它不是可靠对照区。$\Delta t=0.002$ 时场光滑，但对照仍保持约 $6\%$ 的 $L_2$ 差：
+
+| 配置（$\Delta t=0.002$） | $p(0,0)$ | 距 OF 的 $L_2$ |
+|---|---:|---:|
+| OpenFOAM NC=2 | 0.9009 | — |
+| 本项目修正开启，`sub=8`（收敛） | 1.0048 | 0.058 |
+| 本项目修正关闭 | 0.9787 | 0.063 |
+
+关键事实是**关闭 4.3c 修正的旧路径同样差约 $6.3\%$**，差距主体先于本轮存在，不是新增修正引入。最强但未实验证实的嫌疑是倾斜 Dirichlet-p 边界的系数 $C_b$：本项目为分量投影 minimum-correction 型，OpenFOAM 为 over-relaxed 型 $r_{AU}\lVert\mathbf S\rVert^2/(\mathbf S\cdot\boldsymbol\delta)$；倾斜进出口面上二者约差 $\cos^2\theta\sim9\%$。改变该隐式形式超出已批准计划 D3，已按 fuse 规则停止。裁决选项为：（A）修订 D3 并改边界 $C_b$（或加边界交叉项）后复跑；（B）换速度驱动或更温和收缩的对照算例；（C）以 C++ manufactured 验证作为 4.3c 验收，并把 NS 斜交对照记为开口项。
+
 ### 已排除的假设（不要重复试错，2026-10）
 
 对照中验证过、**不是**差异原因的假设（都在同一套瞬态通道/库埃特算例上做过单步与多步对照）：
@@ -469,7 +521,7 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 
 | | 本项目 | OpenFOAM |
 |---|--------|----------|
-| 压力方程 | `A p = b`，$b = -\sum_f \text{outward}(F^{\hat u}_f) + \sum C_b p_b$，直接解**新压力** | `fvm::laplacian(rAtU, p) == fvc::div(phiHbyA)`，同样直接解**新压力** |
+| 压力方程 | `A p = b`，$b = -\sum_f \text{outward}(F^{\hat u}_f-\mathit{crossP}_f) + \sum C_b p_b$，直接解**新压力** | `fvm::laplacian(rAtU, p) == fvc::div(phiHbyA)`，同样直接解**新压力** |
 | 边界条件 | 直接复用 p 的物理边界（Dirichlet 值进右端、Neumann 零梯度） | 直接复用 p 的 patch 边界条件 |
 | 通量重建 | 在持久通量场上就地修正（式见上文"修正与收敛判据"） | `phi = phiHbyA - pEqn.flux()` |
 
@@ -494,4 +546,4 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 2. **PIMPLE 外层迭代**（`nOuterCorrectors > 1`，每个外层重新解动量方程）——大 Courant 数时的标准做法，是修正子数不够用时的正解。（`ddtCorr` 已排除，见上文"已排除的假设"。）
 3. 次要项：动量预测开关、按场独立的收敛阈值。
 
-**不宜照搬**：`setReference`（消元法更干净、矩阵更小）；patch/fvMatrix 重型抽象层（为非结构网格通用性付的代价，教学项目会淹没算法主线）；非正交修正循环（仅当引入斜交网格时才有意义）。
+**不宜照搬**：`setReference`（消元法更干净、矩阵更小）；patch/fvMatrix 重型抽象层（为非结构网格通用性付的代价，教学项目会淹没算法主线）。本项目已采纳受控的非正交修正形式：`nNonOrthogonalCorrectors` 默认为 0（一次压力求解），需要时按上述子循环开启；不再把它表述为“仅当引入斜交网格才有意义”的未采纳项。

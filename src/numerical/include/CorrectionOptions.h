@@ -7,7 +7,8 @@ namespace fvm::numerical
 /// are exact zeros on orthogonal meshes, so the defaults are safe everywhere.
 struct CorrectionOptions
 {
-    bool nonOrthogonalDiffusion = true;  ///< Explicit interior cross-diffusion.
+    bool nonOrthogonalDiffusion = true;  ///< Explicit interior cross-diffusion
+                                         ///< (diffusion and pressure, D1+D3).
     bool skewInterpolation = true;       ///< Skew-corrected linear interpolation.
     int nNonOrthogonalCorrectors = 0;    ///< Pressure solve sub-loop count.
 };

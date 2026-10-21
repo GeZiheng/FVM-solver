@@ -101,9 +101,13 @@ struct MeshInput {
 | ------ | ------ | ------ |
 | `interpWeight(face)` | $g_f=\lVert x_f-x_N\rVert/\lVert x_P-x_N\rVert$ | owner 到面/邻点的线性权重；边界面返回 1 |
 | `innerCoef(face)` | $\alpha_f=(\mathbf S_f\cdot\mathbf d)/(\mathbf d\cdot\mathbf d),\ \ \mathbf d=x_N-x_P$ | 内部扩散几何系数；边界面调用抛异常 |
+| `innerDelta(face)` | $\mathbf d_f=x_N-x_O$ | owner 到 neighbour 的中心距向量；压力交叉通量的投影使用它；边界面调用抛异常 |
 | `boundaryCoef(face)` | $\beta_f=(\mathbf S_f\cdot\mathbf S_f)/(\mathbf S_f\cdot\boldsymbol\delta),\ \ \boldsymbol\delta=x_f-x_P$ | 边界扩散几何系数；内部面调用抛异常 |
 | `nonOrthCorrection(face)` | $\mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f$ | 内部面非正交部分；正交网格为零，边界面调用抛异常 |
+| `nonOrthogonality(face)` | $\cos^{-1}\left((\mathbf S_f\cdot\mathbf d_f)/(\lVert\mathbf S_f\rVert\lVert\mathbf d_f\rVert)\right)$ | 逐内部面非正交角（度）；驱动端用于诊断/警告 |
 | `maxNonOrthogonality()` | $\max_f \cos^{-1}\left(\frac{\mathbf S_f\cdot\mathbf d_f}{\lVert\mathbf S_f\rVert \lVert\mathbf d_f\rVert}\right)$ | 以度为单位，仅统计内部面 |
+| `skewVector(face)` | $\mathbf s_f=x_f-(g_f x_O+(1-g_f)x_N)$ | 面心相对线性插值点的偏差；Convection 的 Central 对流面插值与质量通量构造使用 |
+| `maxSkewness()` | $\max_f \lVert\mathbf s_f\rVert/\lVert\mathbf d_f\rVert$ | 仅统计内部面；无内部面时为 0 |
 
 ## ScalarField / VectorField：单元中心场
 

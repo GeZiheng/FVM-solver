@@ -1,4 +1,4 @@
-﻿"""Pressure-driven flow in a converging (trapezoidal) channel via PISO.
+"""Pressure-driven flow in a converging (trapezoidal) channel via PISO.
 
 The trapezoidal quad mesh is non-orthogonal (the x-faces tilt with the
 side walls), which exercises the 4.3c non-orthogonal diffusion correction

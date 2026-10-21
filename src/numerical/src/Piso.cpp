@@ -10,6 +10,11 @@
 
 namespace fvm::numerical
 {
+namespace
+{
+constexpr Scalar kMaxNonOrthWarnDeg = 70.0;
+}
+
 using fvm::core::MeshGeomCache;
 
 PisoResult solvePiso(const Mesh& mesh,
@@ -43,7 +48,7 @@ PisoResult solvePiso(const Mesh& mesh,
         throw std::invalid_argument(
             "solvePiso: nNonOrthogonalCorrectors must be non-negative");
     }
-    if (MeshGeomCache(mesh).maxNonOrthogonality() > 70.0)
+    if (MeshGeomCache(mesh).maxNonOrthogonality() > kMaxNonOrthWarnDeg)
     {
         std::cerr << "warning: max non-orthogonality exceeds 70 degrees; "
             "deferred corrections may converge slowly\n";
@@ -63,7 +68,14 @@ PisoResult solvePiso(const Mesh& mesh,
     // Initialize the persistent flux from the velocity field and its BCs
     // (OpenFOAM createPhi), failing fast on a closed domain whose boundary
     // fluxes do not balance (OpenFOAM adjustPhi).
-    initializeMassFlux(mesh, velocity, rho, bcU, bcV, bcP, flux);
+    initializeMassFlux(mesh,
+        velocity,
+        rho,
+        bcU,
+        bcV,
+        bcP,
+        flux,
+        config.corrections);
 
     auto momSolver = fvm::math::createEigenBiCGSTAB(config.solverConfig);
     auto pSolver = fvm::math::createEigenCG(config.solverConfig);

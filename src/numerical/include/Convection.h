@@ -76,7 +76,8 @@ void initializeMassFlux(const Mesh& mesh,
     const BoundaryField& bcU,
     const BoundaryField& bcV,
     const BoundaryField& bcP,
-    FaceFluxField& flux);
+    FaceFluxField& flux,
+    const CorrectionOptions& corrections = {});
 
 /// Assemble div(F phi) into A*phi = b from a face mass-flux field (interior
 /// values owner-to-neighbour; boundary values owner-outward).

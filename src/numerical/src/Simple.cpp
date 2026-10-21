@@ -11,6 +11,11 @@
 
 namespace fvm::numerical
 {
+namespace
+{
+constexpr Scalar kMaxNonOrthWarnDeg = 70.0;
+}
+
 using fvm::core::MeshGeomCache;
 
 SimpleResult solveSimple(const Mesh& mesh,
@@ -34,7 +39,7 @@ SimpleResult solveSimple(const Mesh& mesh,
         throw std::invalid_argument(
             "solveSimple: nNonOrthogonalCorrectors must be non-negative");
     }
-    if (MeshGeomCache(mesh).maxNonOrthogonality() > 70.0)
+    if (MeshGeomCache(mesh).maxNonOrthogonality() > kMaxNonOrthWarnDeg)
     {
         std::cerr << "warning: max non-orthogonality exceeds 70 degrees; "
             "deferred corrections may converge slowly\n";
@@ -55,7 +60,14 @@ SimpleResult solveSimple(const Mesh& mesh,
     // Initialize the persistent flux field from the velocity field and its
     // BCs (OpenFOAM createPhi) and fail fast on a closed domain whose
     // boundary fluxes do not balance (OpenFOAM adjustPhi).
-    initializeMassFlux(mesh, velocity, rho, bcU, bcV, bcP, flux);
+    initializeMassFlux(mesh,
+        velocity,
+        rho,
+        bcU,
+        bcV,
+        bcP,
+        flux,
+        config.corrections);
 
     auto momSolver = createEigenBiCGSTAB(config.solverConfig);
     auto pSolver = createEigenCG(config.solverConfig);

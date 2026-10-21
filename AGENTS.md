@@ -2,7 +2,7 @@
 
 ## Project State
 
-- **Status**: phases 1–4-2, 4.3a and 4.3b (mesh abstraction, dual representations, SU2 mesh reader, `.vtu` writer + `pyfvm.read_su2`; zero numerical change) complete; 85 C++ test cases and `pyfvm_tests` (19) pass.
+- **Status**: phases 1–4-2, 4.3a, 4.3b and 4.3c (mesh abstraction, dual representations, SU2 mesh reader, `.vtu` writer + `pyfvm.read_su2`, non-orthogonal/skewness corrections + LSQ gradients) complete; 99 C++ test cases and `pyfvm_tests` (22) pass. The OpenFOAM oblique trapezoidal NS cross-check is unresolved (orthogonal single-step revalidated; see `docs/numerical.md` / `.agents/notes/43c-g8-crosscheck.md`).
 - **Capabilities & layout**: see `README.md`. No C++ demo executable.
 - **Solver structure**: reusable `predictMomentum` / `correctPressure` primitives (`Momentum`/`Pressure`); `Simple`/`Piso` are thin drivers — extend the primitives, not the loops.
 - **PISO**: working (`tests/test_piso.cpp`); invariants and cross-check evidence: **Key Design Decisions** + `docs/numerical.md` (via the `openfoam` MCP server).
@@ -120,8 +120,9 @@ Rules only; derivations and evidence: `docs/<module>.md` (mainly `docs/numerical
 - **Transient momentum requires `relaxation == 1`**; the ddt diagonal `rho V/dt` is part of `a_P`, so `d = V/a_P` is transient-consistent (`docs/numerical.md`).
 - **`correctPressure` reconstructs flux and velocity from the *unrelaxed* solved pressure** (`u = uHat - d grad(p_solved)`, physical p BCs): stored `p` may be relaxed while the velocity takes the full correction; there is no `cumulativeVelocityCorrection` flag and no ordering constraint (`docs/numerical.md` §修正与收敛判据).
 - **SIMPLE/PISO reuse the same predictor/corrector, and PISO must refresh the Rhie–Chow data between correctors**: `refreshUHat(pred, velocity)` before every corrector after the first; `solvePiso` rejects `nCorrectors < 2` (`docs/numerical.md` §Piso).
+- **Non-orthogonal/skewness corrections are on by default and are identically zero on orthogonal meshes**: diffusion cross-term `X = gamma*(k·G)` is RHS-only (matrix symmetry/SPD unchanged, no boundary correction); pressure uses `crossP = rho*(dUf*R.x*S.x + dVf*R.y*S.y)` with `nNonOrthogonalCorrectors+1` solves per corrector and only the final sub-iteration writing flux; skew correction applies only to Central convection and interior mass-flux interpolation; LSQ gradients supply correction gradients. Drivers warn above 70° and reject negative `nNonOrthogonalCorrectors` (`docs/numerical.md` §4.3c).
 
 ## Next Phase (Phase 4)
 
-Next in 4.3c: non-orthogonal correction + validation; 4.3b is complete (mesh input remains SU2-first, with a Gmsh reader as an optional later addition sharing the same `MeshInput` mapping). Application tests for the example cases are agreed in principle but not scheduled.
+Next: decide the G8 oblique NS cross-check option (A: revise boundary `C_b`; B: use a milder/non-tilted-p case; C: accept manufactured-solution validation and record the NS comparison as open), then optionally add a Gmsh reader sharing the `MeshInput` mapping. Application tests for the example cases are agreed in principle but not scheduled.
 Full roadmap: see README.md.

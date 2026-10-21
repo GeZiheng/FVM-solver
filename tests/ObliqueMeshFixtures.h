@@ -2,6 +2,8 @@
 
 #include "UnstructuredMesh.h"
 
+#include <string>
+
 namespace fvm::numerical
 {
 

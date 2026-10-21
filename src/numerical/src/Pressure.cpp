@@ -95,8 +95,7 @@ CorrectorResult correctPressure(const Mesh& mesh,
     // Explicit cross-pressure flux.  It does not overwrite the persistent
     // phiHbyA/massImbalance; the effective pressure-free flux enters only
     // through the assembled RHS and the matching final flux correction.
-    auto crossPressureOut = [&](const ScalarField& pField,
-                                bool updateFaceFlux)
+    auto crossPressureOut = [&](const ScalarField& pField)
     {
         Vector crossOut = Vector::Zero(nCells);
         if (!corrections.nonOrthogonalDiffusion)
@@ -133,15 +132,12 @@ CorrectorResult correctPressure(const Mesh& mesh,
 
             crossOut(o) += crossP;
             crossOut(n) -= crossP;
-            if (updateFaceFlux)
-            {
-                faceCrossP(f) = crossP;
-            }
+            faceCrossP(f) = crossP;
         }
         return crossOut;
     };
 
-    Vector crossOut = crossPressureOut(pressure, true);
+    Vector crossOut = crossPressureOut(pressure);
 
     for (Index f = 0; f < nFaces; ++f)
     {
@@ -351,7 +347,7 @@ CorrectorResult correctPressure(const Mesh& mesh,
             {
                 pIter.data() = pSol;
             }
-            crossOut = crossPressureOut(pIter, true);
+            crossOut = crossPressureOut(pIter);
             b = assembleRhs(crossOut);
         }
         pSol = pSolver.solve(pSys.A, b);

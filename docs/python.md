@@ -43,12 +43,13 @@ numerical：
 - 边界：`BoundaryField(mesh)` + `.set(patch, type, value)` / `.get(patch)` / `.patch_count()`；patch 常量 `BoundaryField.East/North/West/South` 只对应笛卡尔 patch 顺序，越界 patch 抛 `IndexError`；类型 `BCType.Dirichlet/Neumann`。默认全部 patch 零梯度 Neumann。
 - 枚举：`ConvectionScheme.Upwind/Central`、`TimeScheme.Euler/CrankNicolson`。
 - `SolverConfig`：`tolerance`（相对残差）/ `max_iterations` / `verbose`。
-- `solve_simple(mesh, rho, mu, bc_u, bc_v, bc_p, config, velocity, pressure, flux)` → `SimpleResult`（`converged` / `iterations` / `history`）；`SimpleConfig`：`max_iterations` / `tolerance` / `relaxation_u` / `relaxation_p` / `scheme` / `solver_config` / `verbose`。
-- `solve_piso(...)`（签名同上）→ `PisoResult`（`steps` / `history`）；`PisoConfig`：`dt` / `n_steps` / `n_correctors`（≥2）/ `time_scheme` / `scheme` / `solver_config` / `verbose`。
-- `solve_transport(mesh, flux, gamma, scheme, bc, solver_config=..., Sc=None, Sp=None)`：高层稳态输运（装配 + BiCGSTAB），返回 numpy 解向量；`solve_transient_transport(..., phi_old, dt, time_scheme, ...)` 为单个隐式 theta 时间步。
-- 通量工具：`interpolate_cell_velocity_flux(mesh, velocity, rho)`、`compute_mass_flux(...)`、`initialize_mass_flux(...)`、`check_flux_compatibility(flux, rel_tol=1e-10)`、`has_dirichlet_pressure(bc_p)`。
+- `CorrectionOptions`：`non_orthogonal_diffusion=True`、`skew_interpolation=True`、`n_non_orthogonal_correctors=0`。三项默认全开；正交网格上修正量恒为零，默认行为保持零数值变化。`n_non_orthogonal_correctors` 是压力求解子循环附加数（0 表示一次压力求解），负值会被拒绝。
+- `solve_simple(mesh, rho, mu, bc_u, bc_v, bc_p, config, velocity, pressure, flux)` → `SimpleResult`（`converged` / `iterations` / `history`）；`SimpleConfig`：`max_iterations` / `tolerance` / `relaxation_u` / `relaxation_p` / `scheme` / `solver_config` / `corrections` / `verbose`。
+- `solve_piso(...)`（签名同上）→ `PisoResult`（`steps` / `history`）；`PisoConfig`：`dt` / `n_steps` / `n_correctors`（≥2）/ `time_scheme` / `scheme` / `solver_config` / `corrections` / `verbose`。
+- `solve_transport(mesh, flux, gamma, scheme, bc, solver_config=..., Sc=None, Sp=None, phi_explicit=None, corrections=...)`：高层稳态输运（装配 + BiCGSTAB），返回 numpy 解向量。稳态交叉扩散需要 `phi_explicit` 提供冻结的显式场；未提供时该修正保持惰性。`solve_transient_transport(..., phi_old, dt, time_scheme, ..., corrections=...)` 为单个隐式 theta 时间步，`corrections` 沿用同一选项。
+- 通量工具：`interpolate_cell_velocity_flux(mesh, velocity, rho, corrections=...)`、`compute_mass_flux(..., corrections=...)`、`initialize_mass_flux(..., corrections=...)`、`check_flux_compatibility(flux, rel_tol=1e-10)`、`has_dirichlet_pressure(bc_p)`。
 
-上述求解器/通量工具的 Python 签名与 4.3a 之前保持不变；变化只在网格、场与 `BoundaryField` 的构造和索引方式。
+上述求解器与通量工具保持既有位置参数兼容；4.3c 只增加 `CorrectionOptions` 字段和 trailing 默认参数。
 
 io：
 
@@ -66,7 +67,9 @@ io：
 
 ## 示例
 
-三个 Python 算例的用途、参数与运行方式见 README.md 的“示例”。
+三个基础 Python 算例的用途、参数与运行方式见 README.md 的“示例”。
+
+`python/examples/piso_nonortho_channel.py` 是 4.3c 斜交算例：由 bilinear 映射生成 $16\times16$ 梯形收缩通道 SU2 网格（顶边收窄到 $[0.3,0.7]$），运行单步压力驱动 PISO，打印 $p(0,0)$、入口单位长度通量与连续性误差。默认开启修正并使用两个 PISO corrector；`--no-corrections` 关闭三项修正，`--correctors N` 覆盖 corrector 数。该脚本用于复现 `docs/numerical.md` “斜交网格对照（未决）”中的算例设置。
 
 ## 测试分工
 

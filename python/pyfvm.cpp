@@ -306,14 +306,22 @@ void initializeMassFlux(const Mesh& mesh,
     const BoundaryField& bcU,
     const BoundaryField& bcV,
     const BoundaryField& bcP,
-    FaceFluxField& flux)
+    FaceFluxField& flux,
+    const CorrectionOptions& corrections = {})
 {
     requireSameMesh(mesh, velocity, "velocity");
     requireSameMesh(mesh, flux, "flux");
     requireSameMesh(mesh, bcU, "bc_u");
     requireSameMesh(mesh, bcV, "bc_v");
     requireSameMesh(mesh, bcP, "bc_p");
-    numerical::initializeMassFlux(mesh, velocity, rho, bcU, bcV, bcP, flux);
+    numerical::initializeMassFlux(mesh,
+        velocity,
+        rho,
+        bcU,
+        bcV,
+        bcP,
+        flux,
+        corrections);
 }
 
 /// io::writeVti with Python dicts {name: field}.
@@ -662,7 +670,8 @@ void bindNumerical(py::module_& m)
         py::arg("corrections") = CorrectionOptions{});
     m.def("initialize_mass_flux", &initializeMassFlux,
         py::arg("mesh"), py::arg("velocity"), py::arg("rho"),
-        py::arg("bc_u"), py::arg("bc_v"), py::arg("bc_p"), py::arg("flux"));
+        py::arg("bc_u"), py::arg("bc_v"), py::arg("bc_p"), py::arg("flux"),
+        py::arg("corrections") = CorrectionOptions{});
     m.def("check_flux_compatibility", &numerical::checkFluxCompatibility,
         py::arg("flux"), py::arg("rel_tol") = 1e-10);
     m.def("has_dirichlet_pressure", &numerical::hasDirichletPressure,
