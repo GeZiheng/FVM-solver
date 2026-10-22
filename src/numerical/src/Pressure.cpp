@@ -221,15 +221,24 @@ CorrectorResult correctPressure(const Mesh& mesh,
             {
                 // Dirichlet-p: C_b scales (p_b - p_P) in the corrected flux.
                 // Derived once here; the correction after the solve reuses
-                // it.  The owner-outward delta replaces the old Cartesian
-                // half-cell distance.
+                // it.  Over-relaxed form: the implicit boundary gradient is
+                // (p_b - p_P) * S / (S.delta), so each component's mobility
+                // weighs its own S component; with dU = dV this reduces to
+                // rAU * |S|^2 / (S.delta), the same form as the diffusion
+                // boundary coefficient beta_f and OpenFOAM's nonOrthDeltaCoeffs
+                // boundary limit.  The denominator floor guards degenerate
+                // faces (S.delta <= 0.05 |S| |delta|).
                 const Point2 cO = mesh.cellCentroid(o);
                 const Point2 cF = mesh.faceCentroid(f);
                 const Scalar del = cF.x - cO.x;
                 const Scalar dey = cF.y - cO.y;
-                const Scalar dd = del * del + dey * dey;
-                const Scalar Cb
-                    = rho * (dU(o) * del * S.x + dV(o) * dey * S.y) / dd;
+                const Scalar sDotDelta = S.x * del + S.y * dey;
+                const Scalar sDeltaFloor = 0.05 * std::sqrt(
+                    (S.x * S.x + S.y * S.y) * (del * del + dey * dey));
+                const Scalar denominator
+                    = std::max(sDotDelta, sDeltaFloor);
+                const Scalar Cb = rho
+                    * (dU(o) * S.x * S.x + dV(o) * S.y * S.y) / denominator;
                 faceC(f) = Cb;
 
                 if (!isReference(o))

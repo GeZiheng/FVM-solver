@@ -13,6 +13,7 @@ import argparse
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import _path  # noqa: F401,E402
@@ -121,6 +122,14 @@ def main():
     print(f"p(0,0) = {pressure.to_numpy()[0]:.10e}")
     print(f"inlet phi/length = {abs(inlet_flux) / inlet_length:.10e}")
     print(f"continuity = {result.history[-1].continuity:.3e}")
+
+    suffix = "off" if args.no_corrections else "on"
+    output_dir = Path(__file__).resolve().parent / "output" / "nonortho_channel"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"nonortho_channel_nc{cfg.n_correctors}_{suffix}.vtu"
+    fvm.write_vtu(str(output_path), mesh,
+                  {"pressure": pressure}, {"velocity": velocity})
+    print(f"Wrote {output_path}")
 
 
 if __name__ == "__main__":

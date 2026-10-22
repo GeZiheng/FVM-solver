@@ -281,10 +281,10 @@ $$C_f=\rho \frac{\overline d^U_f d_x S_{f,x}+\overline d^V_f d_y S_{f,y}}{\mathb
 
 边界面与内部面**同源**，$\boldsymbol\delta=x_f-x_P$：
 
-$$C_b=\rho \frac{d_P^U\delta_x S_{f,x}+d_P^V\delta_y S_{f,y}}{\boldsymbol\delta\cdot\boldsymbol\delta},\qquad
+$$C_b=\rho \frac{d_P^U S_{f,x}^2+d_P^V S_{f,y}^2}{\max(\mathbf S_f\cdot\boldsymbol\delta,\ 0.05\lVert\mathbf S_f\rVert\lVert\boldsymbol\delta\rVert)},\qquad
 F_b = \rho (\hat{u}\cdot\mathbf S_f)_b - C_b (p_b - p_P)$$
 
-Dirichlet 压力 patch 使用上式；Neumann 压力 patch 不加压力项。笛卡尔网格上 $C_b$ 退化为 $\rho d_P S_f/d_{Pb}$。
+Dirichlet 压力 patch 使用上式；Neumann 压力 patch 不加压力项。$C_b$ 为 over-relaxed 形式（2026-10-22 采纳，此前为分量投影 minimum-correction 型，二者在正交面上恒等）：隐式边界梯度取 $(p_b-p_P)\,\mathbf S_f/(\mathbf S_f\cdot\boldsymbol\delta)$，与扩散边界系数 $\beta_f$ 同型、与 OpenFOAM 边界 `nonOrthDeltaCoeffs` 一致；分母下限防退化面。笛卡尔网格上 $C_b$ 退化为 $\rho d_P S_f/d_{Pb}$。
 
 速度分量 $(\hat u\cdot\mathbf S_f)_b$ 在 Dirichlet 速度边取给定值，否则取 $\hat{u}_P$（零梯度），保证壁面无穿透。
 
@@ -457,6 +457,7 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 - 先做**单步对比**（`end_time == dt`），检查 `p(0,0)` 与进口 `phi/S` 到求解器容差量级；
 - 一个目录一种配置（绝不以不同设置复用 case 目录）；
 - `nCorrectors = 1` 与 `= 2` 都要跑；
+- 非正交/斜交网格上，单步结论必须在 **corrector 收敛限度**下复核：不同隐式/显式 split（本项目 min-correction+crossP vs OF over-relaxed+corrected）通往同一不动点的迭代轨迹不同，NC=2 的双方都可能是未收敛中间态（见「斜交网格对照」节，2026-10-22）；
 - 绝不放宽测试容差来掩盖差异；
 - 结论（含证据与已排除的假设）记录在本文档，不写进 `AGENTS.md`。
 
@@ -484,7 +485,7 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 
 **瞬态验收**：突启 Couette $\max|u-u_{\text{exact}}|=2.0\times10^{-3}$（限值 $2\times10^{-2}$）、瞬态 Poiseuille 相对 $L_2$ 误差 $5.3\times10^{-3}$（限值 $8\times10^{-2}$）、$Q=0.08398\approx1/12$、连续性 $2.1\times10^{-16}$。
 
-### 斜交网格对照（未决，2026-10-21）
+### 斜交网格对照（已解决，2026-10-21 起 10-22 收口）
 
 4.3c 后 C++ doctest 为 99 个 test case（4.3c 前 85），`pyfvm_tests` 为 22 项（4.3c 前 19）。斜交修正的内部验收通过：线性场扩散通量精确；剪切三角形 manufactured 解在修正开启时收敛阶为 $1.7\sim2.3$，关闭时低于 $1.5$；LSQ 梯度对线性场精确；$\Delta t=0.002$ 时压力子迭代从 `sub=8` 到 `sub=16` 的 $p(0,0)$ 变化约 $2.4\times10^{-8}$，已到收敛平台。
 
@@ -496,15 +497,19 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 
 这确认网格、边界、物性和时间格式映射未因 4.3c 破坏。
 
-**梯形收缩通道 NS 对照仍未决**。算例为 bilinear 梯形（$16\times16$，壁面倾角约 $16.7^\circ$），OpenFOAM `blockMesh` 与本项目 SU2 同参数生成。$\Delta t=0.02$ 的冲击瞬态使算例刚化：OpenFOAM 自身 NC=1 与 NC=2 的 $p(0,0)$ 差达 $O(10)$，且 NC=2 十步发散（$p\to-5522$、Co$\to15$），因此它不是可靠对照区。$\Delta t=0.002$ 时场光滑，但对照仍保持约 $6\%$ 的 $L_2$ 差：
+**梯形收缩通道 NS 对照（2026-10-22 解决）**。算例为 bilinear 梯形（$16\times16$，壁面倾角约 $16.7^\circ$），OpenFOAM `blockMesh` 与本项目 SU2 同参数生成。结论分两段：
 
-| 配置（$\Delta t=0.002$） | $p(0,0)$ | 距 OF 的 $L_2$ |
+- $\Delta t=0.02$ 的冲击瞬态使算例刚化：OpenFOAM 自身 NC=1 与 NC=2 的 $p(0,0)$ 差达 $O(10)$，且 NC=2 十步发散（$p\to-5522$、Co$\to15$）——该参数区没有可靠参考解，不可用于对照。
+- $\Delta t=0.002$ 场光滑，但 NC=2 双方差约 $6\%$ 的 $L_2$。**根因是 corrector 滞后伪差，不是公式分歧**：两边用不同的隐式/显式 split（本项目 minimum-correction 隐式 + `crossP`，OpenFOAM over-relaxed 隐式 + corrected snGrad 显式项），显式项都用上一个 corrector 的场求值（滞后一步），因此通往同一不动点的迭代轨迹不同——NC=2 时双方都处于各自轨迹的未收敛中间态。提高 corrector 数让双方逼近共同不动点后差距消失：
+
+| 配置（$\Delta t=0.002$） | $p(0,0)$ | 距 OF(NC=8) 的 $L_2$ |
 |---|---:|---:|
-| OpenFOAM NC=2 | 0.9009 | — |
-| 本项目修正开启，`sub=8`（收敛） | 1.0048 | 0.058 |
-| 本项目修正关闭 | 0.9787 | 0.063 |
+| OpenFOAM NC=8 | 0.98522 | — |
+| 本项目修正开启 NC=8 | 0.98514 | **$4.5\times10^{-4}$** |
+| 本项目修正开启 NC=16 | 0.98499 | $1.2\times10^{-3}$ |
+| OpenFOAM NC=2 | 0.9009 | —（未收敛中间态） |
 
-关键事实是**关闭 4.3c 修正的旧路径同样差约 $6.3\%$**，差距主体先于本轮存在，不是新增修正引入。最强但未实验证实的嫌疑是倾斜 Dirichlet-p 边界的系数 $C_b$：本项目为分量投影 minimum-correction 型，OpenFOAM 为 over-relaxed 型 $r_{AU}\lVert\mathbf S\rVert^2/(\mathbf S\cdot\boldsymbol\delta)$；倾斜进出口面上二者约差 $\cos^2\theta\sim9\%$。改变该隐式形式超出已批准计划 D3，已按 fuse 规则停止。裁决选项为：（A）修订 D3 并改边界 $C_b$（或加边界交叉项）后复跑；（B）换速度驱动或更温和收缩的对照算例；（C）以 C++ manufactured 验证作为 4.3c 验收，并把 NS 斜交对照记为开口项。
+边界系数 $C_b$ 的 A/B（同 NC=8）：over-relaxed 形式 $L_2=4.5\times10^{-4}$，旧分量投影形式 $8.8\times10^{-4}$——它不是主因，但 over-relaxed 一致更近，且与扩散边界 $\beta_f$ 同型，已采纳（见上文 Pressure 节）；正交面上两形式恒等，正交回归不受影响。
 
 ### 已排除的假设（不要重复试错，2026-10）
 
