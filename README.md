@@ -9,7 +9,7 @@
 - 2D FVM：支持 structured 或 unstructured polygon mesh；dual mesh representations 隐藏在同一个接口之后。
 - mesh-generic numerical operators：核心数值装配代码只依赖抽象 `Mesh` 接口。
 - Eigen-backed sparse solvers：提供 sparse matrix assembly 和多种线性求解器后端。
-- incompressible Navier–Stokes：steady SIMPLE 与 transient PISO，基于 collocated grid 与 Rhie–Chow interpolation；斜交网格支持 non-orthogonal diffusion/pressure correction、skew-corrected interpolation 与 LSQ gradients。
+- incompressible Navier–Stokes：steady SIMPLE 与 transient PISO，基于 collocated grid 与 Rhie–Chow interpolation；斜交网格支持 non-orthogonal diffusion/pressure correction、可选择的内部 non-orthogonal split（minimum / over-relaxed）、skew-corrected interpolation 与 LSQ gradients。
 - transient scalar transport：隐式 theta-scheme。
 - flux-first 数据模型：持久化 `FaceFluxField`（`phi`）是 assembler 的唯一对流输入。
 - Python 算例脚本：通过可选 `pyfvm` bindings 编写；没有 C++ demo executable。
@@ -121,7 +121,7 @@ python python/examples/<name>.py
 
 1. ✅ **非定常项 + PISO** — 已完成：瞬态 theta scheme（时间精度已验证）、瞬态输运、共享的 `Momentum`/`Pressure`/`GridOperators` 原语与 `solvePiso`；`tests/test_piso.cpp` 已启用。交叉验证数值与已排除假设清单见 [`docs/numerical.md`](docs/numerical.md)。
 2. ✅ **`pyfvm` Python bindings** — 已完成：pybind11（vcpkg `python` feature、`FVM_BUILD_PYTHON=ON`、可选），覆盖 mesh/fields/BC/SIMPLE/PISO/transport/VTK 输出的 snake_case API 与 numpy 零拷贝视图；算例脚本在 `python/examples/`；绑定契约测试在 `python/tests/`（ctest 条目 `pyfvm_tests`）；C++ `fvm_solver` demo 可执行文件已移除——算例一律为 Python 脚本。细节见 [`docs/python.md`](docs/python.md)。
-3. ✅ **任意网格输入与非正交修正** — 4.3a（mesh abstraction、双网格表示、零数值变化）、4.3b（`readSu2`、`.vtu` writer `writeVtu`、`pyfvm.read_su2`）与 4.3c（non-orthogonal diffusion/pressure correction、skewness correction、LSQ gradients、`pyfvm.CorrectionOptions`）已完成：99 个 C++ test cases 与 22 项 `pyfvm_tests` 通过；正交单步 OpenFOAM 复验差 `1.8e-9`，斜交 manufactured 解达二阶，梯形 NS OpenFOAM 对照在收敛 corrector 数下通过（NC=8 时 L2 `4.5e-4`；NC=2 的差距是 corrector 滞后伪差，见 [`docs/numerical.md`](docs/numerical.md)）。格式决策为 SU2-first，Gmsh reader 为可选后续（共享 `MeshInput` 映射层）。
+3. ✅ **任意网格输入与非正交修正** — 4.3a（mesh abstraction、双网格表示、零数值变化）、4.3b（`readSu2`、`.vtu` writer `writeVtu`、`pyfvm.read_su2`）与 4.3c（non-orthogonal diffusion/pressure correction、内部 split 可选 minimum / over-relaxed、skewness correction、LSQ gradients、`pyfvm.CorrectionOptions`）已完成：100 个 C++ test cases 与 22 项 `pyfvm_tests` 通过；正交单步 OpenFOAM 复验差 `1.8e-9`，斜交 manufactured 解达二阶，梯形 NS OpenFOAM 对照在收敛 corrector 数下通过（NC=8 时 L2 `4.5e-4`；NC=2 的差距主要是 corrector 滞后，剩余一般场 split 依赖为 O(h²)，见 [`docs/numerical.md`](docs/numerical.md)）。格式决策为 SU2-first，Gmsh reader 为可选后续（共享 `MeshInput` 映射层）。
 4. **示例算例的 application tests** — 把 `python/examples/` 脚本作为独立测试层运行（与 unit tests 分开），例如注册为带标签的 ctest 条目。已原则同意，未排期。
 
 Deferred/rejected：`examples/` 下的 per-case 可执行文件（繁琐）、JSON case 配置（与 Python 脚本重复）、按模块拆分 CMakeLists/tests/docs（仅当模块被外部复用或构建时间恶化时再议）。AMGCL/Hypre 后端仍是更大网格的候选方案。

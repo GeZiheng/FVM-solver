@@ -18,17 +18,20 @@ using fvm::math::SparseMatrix;
 /// Assemble -div(gamma grad(phi)) into A*phi = b, accumulating into A and b
 /// (callers zero them first; A must not be finalized).
 ///
-/// Interior faces: D_f = gamma_f * alpha_f with alpha_f = (S.d)/(d.d) from
-/// MeshGeomCache (gamma_f = arithmetic mean; equals S_f/d_PN on orthogonal
-/// meshes).  Dirichlet (phi = phi_b): D_b = gamma_P * beta_f with
+/// Interior faces: D_f = gamma_f * alpha_f, where alpha_f follows
+/// `corrections.nonOrthSplit`: (S.d)/(d.d) for MinimumCorrection (default;
+/// equals S_f/d_PN on orthogonal meshes) or (S.S)/max(S.d, 0.05|S||d|) for
+/// OverRelaxed (gamma_f = arithmetic mean).  Dirichlet (phi = phi_b):
+/// D_b = gamma_P * beta_f with
 /// beta_f = (S.S)/(S.delta); A(P,P) += D_b, b(P) += D_b * phi_b.
 /// Neumann (d(phi)/dn = g, outward): b(P) += gamma_P * g * |S_f|.
 ///
 /// When `explicitPhi` is supplied and `corrections.nonOrthogonalDiffusion` is
-/// true, the interior minimum-correction cross-diffusion term is added to the
-/// RHS only.  It is a deferred correction: callers refresh it by re-assembling
-/// with the latest available iterate.  Boundary faces receive no correction,
-/// so A remains symmetric.
+/// true, the interior cross-diffusion term gamma_f*(k_f . G_f) is added to
+/// the RHS only, with k_f = S - alpha_f*d matching the selected split.  It
+/// is a deferred correction: callers refresh it by re-assembling with the
+/// latest available iterate.  Boundary faces receive no correction, so A
+/// remains symmetric.
 ///
 /// The matrix is symmetric positive semi-definite (definite with any Dirichlet).
 void assembleDiffusion(const Mesh& mesh,

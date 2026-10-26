@@ -400,6 +400,13 @@ TEST_CASE("Cartesian and unstructured mesh representations agree")
             {
                 CHECK(std::abs(leftGeometry.innerCoef(leftFace)
                     - rightGeometry.innerCoef(match)) <= 1.0e-12);
+                CHECK(std::abs(leftGeometry.innerCoefOverRelaxed(leftFace)
+                    - rightGeometry.innerCoefOverRelaxed(match))
+                    <= 1.0e-12);
+                CHECK(std::abs(leftGeometry.innerCoefOverRelaxed(leftFace)
+                    - leftGeometry.innerCoef(leftFace)) <= 1.0e-12);
+                CHECK(std::abs(rightGeometry.innerCoefOverRelaxed(match)
+                    - rightGeometry.innerCoef(match)) <= 1.0e-12);
 
                 const Point2 leftDelta = leftGeometry.innerDelta(leftFace);
                 const Point2 rightDelta = rightGeometry.innerDelta(match);
@@ -407,6 +414,17 @@ TEST_CASE("Cartesian and unstructured mesh representations agree")
                 CHECK(std::abs(leftDelta.y - rightDelta.y) <= 1.0e-12);
                 CHECK(leftGeometry.nonOrthogonality(leftFace) < 1.0e-9);
                 CHECK(rightGeometry.nonOrthogonality(match) < 1.0e-9);
+
+                const Point2 leftOverCorrection
+                    = leftGeometry.nonOrthCorrectionOverRelaxed(leftFace);
+                const Point2 rightOverCorrection
+                    = rightGeometry.nonOrthCorrectionOverRelaxed(match);
+                CHECK(std::sqrt(leftOverCorrection.x * leftOverCorrection.x
+                        + leftOverCorrection.y * leftOverCorrection.y)
+                    <= 1.0e-12);
+                CHECK(std::sqrt(rightOverCorrection.x * rightOverCorrection.x
+                        + rightOverCorrection.y * rightOverCorrection.y)
+                    <= 1.0e-12);
 
                 const Point2 leftSkew = leftGeometry.skewVector(leftFace);
                 const Point2 rightSkew = rightGeometry.skewVector(match);

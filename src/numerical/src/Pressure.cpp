@@ -116,16 +116,27 @@ CorrectorResult correctPressure(const Mesh& mesh,
             const Index n = mesh.faceNeighbour(f);
             const Scalar g = geom.interpWeight(f);
             const Point2 d = geom.innerDelta(f);
+            const Point2 area = mesh.faceAreaVector(f);
             const Point2 gradF{ g * gradients[o].x
                     + (1.0 - g) * gradients[n].x,
                 g * gradients[o].y + (1.0 - g) * gradients[n].y };
             const Scalar dd = d.x * d.x + d.y * d.y;
-            const Scalar projection = (gradF.x * d.x + gradF.y * d.y) / dd;
-            const Point2 residualGradient{ gradF.x - projection * d.x,
-                gradF.y - projection * d.y };
+            const bool overRelaxed = corrections.nonOrthSplit
+                == NonOrthSplit::OverRelaxed;
+            const Scalar denominator = overRelaxed
+                ? std::max(d.x * area.x + d.y * area.y,
+                    0.05 * std::sqrt(dd)
+                        * std::sqrt(area.x * area.x + area.y * area.y))
+                : dd;
+            const Scalar projection
+                = (gradF.x * d.x + gradF.y * d.y) / denominator;
+            const Point2 residualGradient = overRelaxed
+                ? Point2{ gradF.x - projection * area.x,
+                      gradF.y - projection * area.y }
+                : Point2{ gradF.x - projection * d.x,
+                      gradF.y - projection * d.y };
             const Scalar dUf = g * dU(o) + (1.0 - g) * dU(n);
             const Scalar dVf = g * dV(o) + (1.0 - g) * dV(n);
-            const Point2 area = mesh.faceAreaVector(f);
             const Scalar crossP = rho
                 * (dUf * residualGradient.x * area.x
                     + dVf * residualGradient.y * area.y);
@@ -167,7 +178,14 @@ CorrectorResult correctPressure(const Mesh& mesh,
 
             const Scalar dUf = g * dU(o) + (1.0 - g) * dU(n);
             const Scalar dVf = g * dV(o) + (1.0 - g) * dV(n);
-            const Scalar C = rho * (dUf * ddx * S.x + dVf * ddy * S.y) / dd;
+            const bool overRelaxed = corrections.nonOrthSplit
+                == NonOrthSplit::OverRelaxed;
+            const Scalar C = overRelaxed
+                ? rho * (dUf * S.x * S.x + dVf * S.y * S.y)
+                / std::max(ddx * S.x + ddy * S.y,
+                    0.05 * std::sqrt(dd)
+                        * std::sqrt(S.x * S.x + S.y * S.y))
+                : rho * (dUf * ddx * S.x + dVf * ddy * S.y) / dd;
 
             // Store phiHbyA (owner -> neighbour) and the pressure coefficient.
             flux[f] = F;

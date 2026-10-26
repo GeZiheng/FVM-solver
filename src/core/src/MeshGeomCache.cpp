@@ -32,9 +32,11 @@ MeshGeomCache::MeshGeomCache(const Mesh& mesh)
     , faceAreaVectors_(faceCount_)
     , interpWeights_(faceCount_, 1.0)
     , innerCoefficients_(faceCount_)
+    , innerCoefficientsOverRelaxed_(faceCount_)
     , innerDeltas_(faceCount_)
     , boundaryCoefficients_(faceCount_)
     , nonOrthCorrections_(faceCount_)
+    , nonOrthCorrectionsOverRelaxed_(faceCount_)
     , nonOrthAngles_(faceCount_)
     , skewVectors_(faceCount_)
 {
@@ -80,6 +82,18 @@ MeshGeomCache::MeshGeomCache(const Mesh& mesh)
         nonOrthCorrections_[face]
             = { areaVector.x - innerCoefficients_[face] * delta.x,
                   areaVector.y - innerCoefficients_[face] * delta.y };
+
+        const Scalar areaDistanceFloor = 0.05
+            * std::sqrt(dotProduct(areaVector, areaVector))
+            * std::sqrt(dotProduct(delta, delta));
+        innerCoefficientsOverRelaxed_[face]
+            = dotProduct(areaVector, areaVector)
+            / std::max(dotProduct(areaVector, delta), areaDistanceFloor);
+        nonOrthCorrectionsOverRelaxed_[face]
+            = { areaVector.x
+                  - innerCoefficientsOverRelaxed_[face] * delta.x,
+                areaVector.y
+                  - innerCoefficientsOverRelaxed_[face] * delta.y };
 
         const Scalar cosine
             = std::clamp(dotProduct(areaVector, delta)
@@ -142,6 +156,20 @@ Scalar MeshGeomCache::innerCoef(Index face) const
     return innerCoefficients_[face];
 }
 
+Scalar MeshGeomCache::innerCoefOverRelaxed(Index face) const
+{
+    if (face >= faceCount_)
+    {
+        throw std::out_of_range("Invalid face index");
+    }
+    if (faceNeighbours_[face] == Mesh::kInvalidCell)
+    {
+        throw std::invalid_argument(
+            "innerCoefOverRelaxed is valid for interior faces only");
+    }
+    return innerCoefficientsOverRelaxed_[face];
+}
+
 Scalar MeshGeomCache::boundaryCoef(Index face) const
 {
     if (face >= faceCount_)
@@ -168,6 +196,20 @@ Point2 MeshGeomCache::nonOrthCorrection(Index face) const
             "nonOrthCorrection is valid for interior faces only");
     }
     return nonOrthCorrections_[face];
+}
+
+Point2 MeshGeomCache::nonOrthCorrectionOverRelaxed(Index face) const
+{
+    if (face >= faceCount_)
+    {
+        throw std::out_of_range("Invalid face index");
+    }
+    if (faceNeighbours_[face] == Mesh::kInvalidCell)
+    {
+        throw std::invalid_argument(
+            "nonOrthCorrectionOverRelaxed is valid for interior faces only");
+    }
+    return nonOrthCorrectionsOverRelaxed_[face];
 }
 
 Scalar MeshGeomCache::nonOrthogonality(Index face) const

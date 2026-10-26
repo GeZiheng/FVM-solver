@@ -81,44 +81,49 @@ Scalar netBoundaryFlux(const Mesh& mesh, const FaceFluxField& flux)
 
 TEST_CASE("Simple channel on sheared mesh")
 {
-    const UnstructuredMesh mesh(makeShearedTriMesh(4));
-    const Mesh& base = mesh;
-    const Scalar rho = 1.0;
-    const Scalar mu = 0.01;
+    for (const NonOrthSplit split : { NonOrthSplit::MinimumCorrection,
+             NonOrthSplit::OverRelaxed })
+    {
+        const UnstructuredMesh mesh(makeShearedTriMesh(4));
+        const Mesh& base = mesh;
+        const Scalar rho = 1.0;
+        const Scalar mu = 0.01;
 
-    BoundaryField bcU(base);
-    BoundaryField bcV(base);
-    BoundaryField bcP(base);
-    setShearedChannelBCs(base, bcU, bcV, bcP);
+        BoundaryField bcU(base);
+        BoundaryField bcV(base);
+        BoundaryField bcP(base);
+        setShearedChannelBCs(base, bcU, bcV, bcP);
 
-    VectorField velocity(base, "velocity");
-    ScalarField pressure(base, "pressure");
-    FaceFluxField flux(base, "flux");
+        VectorField velocity(base, "velocity");
+        ScalarField pressure(base, "pressure");
+        FaceFluxField flux(base, "flux");
 
-    SimpleConfig config;
-    config.tolerance = 1.0e-6;
-    config.maxIterations = 5000;
-    config.relaxationU = 0.7;
-    config.relaxationP = 0.3;
-    config.scheme = ConvectionScheme::Upwind;
-    config.solverConfig.tolerance = 1.0e-10;
-    config.solverConfig.maxIterations = 5000;
+        SimpleConfig config;
+        config.tolerance = 1.0e-6;
+        config.maxIterations = 5000;
+        config.relaxationU = 0.7;
+        config.relaxationP = 0.3;
+        config.scheme = ConvectionScheme::Upwind;
+        config.corrections.nonOrthSplit = split;
+        config.solverConfig.tolerance = 1.0e-10;
+        config.solverConfig.maxIterations = 5000;
 
-    const SimpleResult result = solveSimple(base,
-        rho,
-        mu,
-        bcU,
-        bcV,
-        bcP,
-        config,
-        velocity,
-        pressure,
-        flux);
+        const SimpleResult result = solveSimple(base,
+            rho,
+            mu,
+            bcU,
+            bcV,
+            bcP,
+            config,
+            velocity,
+            pressure,
+            flux);
 
-    CHECK(result.converged);
-    REQUIRE(!result.history.empty());
-    CHECK(result.history.back().continuity <= 1.0e-6);
-    CHECK(std::abs(netBoundaryFlux(base, flux)) <= 1.0e-8);
+        CHECK(result.converged);
+        REQUIRE(!result.history.empty());
+        CHECK(result.history.back().continuity <= 1.0e-6);
+        CHECK(std::abs(netBoundaryFlux(base, flux)) <= 1.0e-8);
+    }
 }
 
 TEST_CASE("Simple non-orthogonal correctors are zero on Cartesian meshes")
@@ -158,13 +163,31 @@ TEST_CASE("Simple non-orthogonal correctors are zero on Cartesian meshes")
     noSubiterations.nNonOrthogonalCorrectors = 0;
     CorrectionOptions twoSubiterations;
     twoSubiterations.nNonOrthogonalCorrectors = 2;
+    CorrectionOptions overNoSubiterations = noSubiterations;
+    overNoSubiterations.nonOrthSplit = NonOrthSplit::OverRelaxed;
+    CorrectionOptions overTwoSubiterations = twoSubiterations;
+    overTwoSubiterations.nonOrthSplit = NonOrthSplit::OverRelaxed;
 
     const auto reference = run(noSubiterations);
     const auto corrected = run(twoSubiterations);
+    const auto overReference = run(overNoSubiterations);
+    const auto overCorrected = run(overTwoSubiterations);
     CHECK((corrected.first - reference.first).lpNorm<Eigen::Infinity>()
         <= 1.0e-12);
     CHECK((corrected.second - reference.second).lpNorm<Eigen::Infinity>()
         <= 1.0e-12);
+    CHECK((overCorrected.first - overReference.first)
+        .lpNorm<Eigen::Infinity>() <= 1.0e-12);
+    CHECK((overCorrected.second - overReference.second)
+        .lpNorm<Eigen::Infinity>() <= 1.0e-12);
+    CHECK((overReference.first - reference.first).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+    CHECK((overReference.second - reference.second)
+        .lpNorm<Eigen::Infinity>() <= 1.0e-12);
+    CHECK((overCorrected.first - corrected.first).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+    CHECK((overCorrected.second - corrected.second)
+        .lpNorm<Eigen::Infinity>() <= 1.0e-12);
 }
 
 TEST_CASE(

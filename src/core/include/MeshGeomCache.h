@@ -24,6 +24,11 @@ public:
     /// the owner centroid to the neighbour centroid.
     Scalar innerCoef(Index face) const;
 
+    /// Interior-face over-relaxed diffusion coefficient
+    /// (S.S)/max(S.d, 0.05*|S||d|). Interior faces only.  The floor mirrors
+    /// OpenFOAM's mesh-level nonOrthDeltaCoeffs guard against degenerate faces.
+    Scalar innerCoefOverRelaxed(Index face) const;
+
     /// Owner-to-neighbour centroid vector x_N - x_O. Interior faces only.
     Point2 innerDelta(Index face) const;
 
@@ -34,6 +39,9 @@ public:
     /// Interior-face non-orthogonal correction S - alpha*d.  It is zero when
     /// the face area vector is parallel to the owner-neighbour distance.
     Point2 nonOrthCorrection(Index face) const;
+
+    /// Interior-face over-relaxed correction vector S - alphaOr*d.
+    Point2 nonOrthCorrectionOverRelaxed(Index face) const;
 
     /// Interior-face non-orthogonality angle in degrees:
     /// acos(clamp((S.d)/(|S||d|))). Interior faces only.
@@ -63,9 +71,11 @@ private:
     std::vector<Point2> faceAreaVectors_;
     std::vector<Scalar> interpWeights_;
     std::vector<Scalar> innerCoefficients_;
+    std::vector<Scalar> innerCoefficientsOverRelaxed_;
     std::vector<Point2> innerDeltas_;
     std::vector<Scalar> boundaryCoefficients_;
     std::vector<Point2> nonOrthCorrections_;
+    std::vector<Point2> nonOrthCorrectionsOverRelaxed_;
     std::vector<Scalar> nonOrthAngles_;
     std::vector<Point2> skewVectors_;
     Scalar maxNonOrthogonality_ = 0.0;

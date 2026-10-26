@@ -149,6 +149,8 @@ class TestTransportBinding(unittest.TestCase):
         self.assertTrue(options.non_orthogonal_diffusion)
         self.assertTrue(options.skew_interpolation)
         self.assertEqual(options.n_non_orthogonal_correctors, 0)
+        self.assertEqual(options.non_orth_split,
+                         fvm.NonOrthSplit.MinimumCorrection)
 
         def run_channel_case(config):
             mesh = fvm.CartesianMesh(8, 4, 0.0, 0.0, 1.0, 1.0)
@@ -177,14 +179,18 @@ class TestTransportBinding(unittest.TestCase):
 
         enabled_config = fvm.SimpleConfig()
         enabled_config.corrections.n_non_orthogonal_correctors = 2
+        over_config = fvm.SimpleConfig()
+        over_config.corrections.non_orth_split = fvm.NonOrthSplit.OverRelaxed
         disabled_config = fvm.SimpleConfig()
         disabled_config.corrections.non_orthogonal_diffusion = False
         disabled_config.corrections.skew_interpolation = False
 
         enabled = run_channel_case(enabled_config)
+        over = run_channel_case(over_config)
         disabled = run_channel_case(disabled_config)
-        for on, off in zip(enabled, disabled):
-            self.assertTrue(np.allclose(on, off, atol=1e-12, rtol=0.0))
+        for reference in (enabled, over):
+            for on, off in zip(reference, disabled):
+                self.assertTrue(np.allclose(on, off, atol=1e-12, rtol=0.0))
 
     def test_solve_transport_corrections_zero_change_cartesian(self):
         n = 16

@@ -49,6 +49,7 @@ using fvm::numerical::BoundaryCondition;
 using fvm::numerical::BoundaryField;
 using fvm::numerical::ConvectionScheme;
 using fvm::numerical::CorrectionOptions;
+using fvm::numerical::NonOrthSplit;
 using fvm::numerical::PisoConfig;
 using fvm::numerical::PisoResult;
 using fvm::numerical::PisoStepInfo;
@@ -555,6 +556,11 @@ void bindNumerical(py::module_& m)
         .value("Central", ConvectionScheme::Central)
         .export_values();
 
+    py::enum_<NonOrthSplit>(m, "NonOrthSplit")
+        .value("MinimumCorrection", NonOrthSplit::MinimumCorrection)
+        .value("OverRelaxed", NonOrthSplit::OverRelaxed)
+        .export_values();
+
     py::enum_<TimeScheme>(m, "TimeScheme")
         .value("Euler", TimeScheme::Euler)
         .value("CrankNicolson", TimeScheme::CrankNicolson)
@@ -594,6 +600,7 @@ void bindNumerical(py::module_& m)
             "non_orthogonal_diffusion", &CorrectionOptions::nonOrthogonalDiffusion)
         .def_readwrite(
             "skew_interpolation", &CorrectionOptions::skewInterpolation)
+        .def_readwrite("non_orth_split", &CorrectionOptions::nonOrthSplit)
         .def_readwrite("n_non_orthogonal_correctors",
             &CorrectionOptions::nNonOrthogonalCorrectors);
 
