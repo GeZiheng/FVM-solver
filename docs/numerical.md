@@ -74,13 +74,14 @@ $$D_f=\gamma_f\alpha_{\mathrm{Sel}},\qquad
 X_f=\gamma_f\,(\mathbf k_{\mathrm{Sel}}\cdot\mathbf G_f),\qquad
 \mathbf k_{\mathrm{Sel}}=\mathbf S_f-\alpha_{\mathrm{Sel}}\mathbf d_f .$$
 
-minimum 使用既有 $\alpha_{\min}=(\mathbf S_f\cdot\mathbf d_f)/(\mathbf d_f\cdot\mathbf d_f)$ 和 `MeshGeomCache::nonOrthCorrection`。over 使用新访问器
+两种 split 的 $(\alpha,k)$ 由 `MeshGeomCache` 的**参数化访问器**给出（`NonOrthSplit` 枚举定义在 core，与访问器同处）：
 
-$$\mathtt{innerCoefOverRelaxed}=\frac{\mathbf S_f\cdot\mathbf S_f}
+$$\alpha_{\min}=\frac{\mathbf S_f\cdot\mathbf d_f}{\mathbf d_f\cdot\mathbf d_f},\qquad
+\alpha_{\mathrm{or}}=\frac{\mathbf S_f\cdot\mathbf S_f}
 {\max(\mathbf S_f\cdot\mathbf d_f,\ 0.05\lVert\mathbf S_f\rVert\lVert\mathbf d_f\rVert)},\qquad
-\mathtt{nonOrthCorrectionOverRelaxed}=\mathbf S_f-\alpha_{\mathrm{or}}\mathbf d_f .$$
+\mathbf k=\mathbf S_f-\alpha\,\mathbf d_f .$$
 
-分母下限沿用 OpenFOAM mesh 级退化面防护的先例，烘焙进几何 cache。$\mathbf G_f$ 来自调用方提供的冻结显式场 `explicitPhi`；该场未提供时 $X_f$ 保持惰性。$X_f$ 不进入矩阵，只进入右端：`b(O) += X_f`，neighbour 侧取相反符号。因此两种 split 的矩阵都是对称 Laplace 型，保持关闭显式修正时的正定性（纯 Neumann 时仍为半正定）。边界面不加交叉项：Dirichlet 的 over 型 $\beta_f$ 与 Neumann 通量公式在两种模式下都保持原状。正交网格上 $\mathbf k_{\mathrm{Sel}}=0$，$\alpha_{\min}=\alpha_{\mathrm{or}}$，从而 $X_f$ 恒为零。
+即 `innerCoef(face, split)` / `nonOrthCorrection(face, split)`（默认参数 `MinimumCorrection`）；装配时传入同一个 `split`，配对关系在结构上成立。系数从 cache 已存的 $\mathbf S_f,\mathbf d_f$ 现算（约十次浮点运算，远低于周边装配成本），不再单独存储。over 的分母下限沿用 OpenFOAM mesh 级退化面防护的先例。$\mathbf G_f$ 来自调用方提供的冻结显式场 `explicitPhi`；该场未提供时 $X_f$ 保持惰性。$X_f$ 不进入矩阵，只进入右端：`b(O) += X_f`，neighbour 侧取相反符号。因此两种 split 的矩阵都是对称 Laplace 型，保持关闭显式修正时的正定性（纯 Neumann 时仍为半正定）。边界面不加交叉项：Dirichlet 的 over 型 $\beta_f$ 与 Neumann 通量公式在两种模式下都保持原状。正交网格上 $\mathbf k_{\mathrm{Sel}}=0$，$\alpha_{\min}=\alpha_{\mathrm{or}}$，从而 $X_f$ 恒为零。
 
 ### 边界面
 

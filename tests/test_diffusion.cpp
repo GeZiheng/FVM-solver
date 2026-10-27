@@ -273,10 +273,8 @@ TEST_CASE("Diffusion: linear field exact on oblique pair")
                     + (1.0 - g) * gradients[neighbour].x,
                 g * gradients[owner].y
                     + (1.0 - g) * gradients[neighbour].y };
-            const Point2 correction = split
-                == NonOrthSplit::OverRelaxed
-                ? geometry.nonOrthCorrectionOverRelaxed(face)
-                : geometry.nonOrthCorrection(face);
+            const Point2 correction
+                = geometry.nonOrthCorrection(face, split);
             const Scalar flux
                 = correction.x * gradF.x + correction.y * gradF.y;
             expectedCorrection(owner) += flux;

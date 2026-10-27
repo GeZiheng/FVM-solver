@@ -31,12 +31,8 @@ MeshGeomCache::MeshGeomCache(const Mesh& mesh)
     , faceCentroids_(faceCount_)
     , faceAreaVectors_(faceCount_)
     , interpWeights_(faceCount_, 1.0)
-    , innerCoefficients_(faceCount_)
-    , innerCoefficientsOverRelaxed_(faceCount_)
     , innerDeltas_(faceCount_)
     , boundaryCoefficients_(faceCount_)
-    , nonOrthCorrections_(faceCount_)
-    , nonOrthCorrectionsOverRelaxed_(faceCount_)
     , nonOrthAngles_(faceCount_)
     , skewVectors_(faceCount_)
 {
@@ -76,24 +72,6 @@ MeshGeomCache::MeshGeomCache(const Mesh& mesh)
         const Scalar cellDistance
             = std::sqrt(squaredDistance(ownerCentroid, neighbourCentroid));
         interpWeights_[face] = neighbourDistance / cellDistance;
-
-        innerCoefficients_[face]
-            = dotProduct(areaVector, delta) / dotProduct(delta, delta);
-        nonOrthCorrections_[face]
-            = { areaVector.x - innerCoefficients_[face] * delta.x,
-                  areaVector.y - innerCoefficients_[face] * delta.y };
-
-        const Scalar areaDistanceFloor = 0.05
-            * std::sqrt(dotProduct(areaVector, areaVector))
-            * std::sqrt(dotProduct(delta, delta));
-        innerCoefficientsOverRelaxed_[face]
-            = dotProduct(areaVector, areaVector)
-            / std::max(dotProduct(areaVector, delta), areaDistanceFloor);
-        nonOrthCorrectionsOverRelaxed_[face]
-            = { areaVector.x
-                  - innerCoefficientsOverRelaxed_[face] * delta.x,
-                areaVector.y
-                  - innerCoefficientsOverRelaxed_[face] * delta.y };
 
         const Scalar cosine
             = std::clamp(dotProduct(areaVector, delta)
@@ -142,7 +120,7 @@ Scalar MeshGeomCache::interpWeight(Index face) const
     return interpWeights_[face];
 }
 
-Scalar MeshGeomCache::innerCoef(Index face) const
+Scalar MeshGeomCache::innerCoef(Index face, NonOrthSplit split) const
 {
     if (face >= faceCount_)
     {
@@ -153,21 +131,19 @@ Scalar MeshGeomCache::innerCoef(Index face) const
         throw std::
             invalid_argument("innerCoef is valid for interior faces only");
     }
-    return innerCoefficients_[face];
-}
 
-Scalar MeshGeomCache::innerCoefOverRelaxed(Index face) const
-{
-    if (face >= faceCount_)
+    const Point2& area = faceAreaVectors_[face];
+    const Point2& delta = innerDeltas_[face];
+    const Scalar areaDotArea = dotProduct(area, area);
+    const Scalar deltaDotDelta = dotProduct(delta, delta);
+    if (split == NonOrthSplit::OverRelaxed)
     {
-        throw std::out_of_range("Invalid face index");
+        const Scalar areaDistanceFloor = 0.05 * std::sqrt(areaDotArea)
+            * std::sqrt(deltaDotDelta);
+        return areaDotArea
+            / std::max(dotProduct(area, delta), areaDistanceFloor);
     }
-    if (faceNeighbours_[face] == Mesh::kInvalidCell)
-    {
-        throw std::invalid_argument(
-            "innerCoefOverRelaxed is valid for interior faces only");
-    }
-    return innerCoefficientsOverRelaxed_[face];
+    return dotProduct(area, delta) / deltaDotDelta;
 }
 
 Scalar MeshGeomCache::boundaryCoef(Index face) const
@@ -184,7 +160,7 @@ Scalar MeshGeomCache::boundaryCoef(Index face) const
     return boundaryCoefficients_[face];
 }
 
-Point2 MeshGeomCache::nonOrthCorrection(Index face) const
+Point2 MeshGeomCache::nonOrthCorrection(Index face, NonOrthSplit split) const
 {
     if (face >= faceCount_)
     {
@@ -195,21 +171,11 @@ Point2 MeshGeomCache::nonOrthCorrection(Index face) const
         throw std::invalid_argument(
             "nonOrthCorrection is valid for interior faces only");
     }
-    return nonOrthCorrections_[face];
-}
 
-Point2 MeshGeomCache::nonOrthCorrectionOverRelaxed(Index face) const
-{
-    if (face >= faceCount_)
-    {
-        throw std::out_of_range("Invalid face index");
-    }
-    if (faceNeighbours_[face] == Mesh::kInvalidCell)
-    {
-        throw std::invalid_argument(
-            "nonOrthCorrectionOverRelaxed is valid for interior faces only");
-    }
-    return nonOrthCorrectionsOverRelaxed_[face];
+    const Point2& area = faceAreaVectors_[face];
+    const Point2& delta = innerDeltas_[face];
+    const Scalar alpha = innerCoef(face, split);
+    return { area.x - alpha * delta.x, area.y - alpha * delta.y };
 }
 
 Scalar MeshGeomCache::nonOrthogonality(Index face) const

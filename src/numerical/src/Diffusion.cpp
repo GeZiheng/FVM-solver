@@ -33,11 +33,7 @@ void assembleDiffusion(const Mesh& mesh,
         {
             const Index neighbour = mesh.faceNeighbour(face);
             const Scalar gammaF = 0.5 * (gamma(owner) + gamma(neighbour));
-            const bool overRelaxed = corrections.nonOrthSplit
-                == NonOrthSplit::OverRelaxed;
-            const Scalar alpha = overRelaxed
-                ? geometry.innerCoefOverRelaxed(face)
-                : geometry.innerCoef(face);
+            const Scalar alpha = geometry.innerCoef(face, corrections.nonOrthSplit);
             const Scalar diffusion = gammaF * alpha;
 
             A.insert(owner, owner, diffusion);
@@ -52,9 +48,8 @@ void assembleDiffusion(const Mesh& mesh,
                         + (1.0 - g) * gradients[neighbour].x,
                     g * gradients[owner].y
                         + (1.0 - g) * gradients[neighbour].y };
-                const Point2 correction = overRelaxed
-                    ? geometry.nonOrthCorrectionOverRelaxed(face)
-                    : geometry.nonOrthCorrection(face);
+                const Point2 correction
+                    = geometry.nonOrthCorrection(face, corrections.nonOrthSplit);
                 const Scalar crossDiffusion = gammaF
                     * (correction.x * gradF.x + correction.y * gradF.y);
 

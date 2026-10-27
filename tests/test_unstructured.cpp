@@ -147,13 +147,13 @@ TEST_CASE("UnstructuredMesh triangle pair geometry")
 
     CHECK_THROWS_AS(geometry.innerCoef(southFace), std::invalid_argument);
     CHECK_THROWS_AS(geometry.nonOrthCorrection(southFace), std::invalid_argument);
-    CHECK_THROWS_AS(geometry.innerCoefOverRelaxed(southFace),
+    CHECK_THROWS_AS(geometry.innerCoef(southFace, NonOrthSplit::OverRelaxed),
         std::invalid_argument);
-    CHECK_THROWS_AS(geometry.nonOrthCorrectionOverRelaxed(southFace),
+    CHECK_THROWS_AS(geometry.nonOrthCorrection(southFace, NonOrthSplit::OverRelaxed),
         std::invalid_argument);
-    CHECK_THROWS_AS(geometry.innerCoefOverRelaxed(base.faceCount()),
+    CHECK_THROWS_AS(geometry.innerCoef(base.faceCount(), NonOrthSplit::OverRelaxed),
         std::out_of_range);
-    CHECK_THROWS_AS(geometry.nonOrthCorrectionOverRelaxed(base.faceCount()),
+    CHECK_THROWS_AS(geometry.nonOrthCorrection(base.faceCount(), NonOrthSplit::OverRelaxed),
         std::out_of_range);
     CHECK_THROWS_AS(geometry.boundaryCoef(interior), std::invalid_argument);
     CHECK_THROWS_AS(geometry.interpWeight(base.faceCount()), std::out_of_range);
@@ -206,12 +206,12 @@ TEST_CASE("UnstructuredMesh non-orthogonal triangle pair")
         == doctest::Approx(0.6519202405).epsilon(1.0e-9));
     CHECK(geometry.innerCoef(interior)
         == doctest::Approx(1.5).epsilon(1.0e-12));
-    CHECK(geometry.innerCoefOverRelaxed(interior)
+    CHECK(geometry.innerCoef(interior, NonOrthSplit::OverRelaxed)
         == doctest::Approx(3.0).epsilon(1.0e-12));
     CHECK(correction.x == doctest::Approx(-0.5).epsilon(1.0e-12));
     CHECK(correction.y == doctest::Approx(1.5).epsilon(1.0e-12));
-    const Point2 overCorrection = geometry.nonOrthCorrectionOverRelaxed(
-        interior);
+    const Point2 overCorrection = geometry.nonOrthCorrection(
+        interior, NonOrthSplit::OverRelaxed);
     CHECK(overCorrection.x == doctest::Approx(-2.0).epsilon(1.0e-12));
     CHECK(overCorrection.y == doctest::Approx(1.0).epsilon(1.0e-12));
     CHECK(geometry.nonOrthogonality(interior)
@@ -251,19 +251,19 @@ TEST_CASE("UnstructuredMesh non-orthogonal triangle pair")
     }
     REQUIRE(boundaryFace != base.faceCount());
     CHECK_THROWS_AS(geometry.innerDelta(boundaryFace), std::invalid_argument);
-    CHECK_THROWS_AS(geometry.innerCoefOverRelaxed(boundaryFace),
+    CHECK_THROWS_AS(geometry.innerCoef(boundaryFace, NonOrthSplit::OverRelaxed),
         std::invalid_argument);
     CHECK_THROWS_AS(geometry.nonOrthogonality(boundaryFace),
         std::invalid_argument);
-    CHECK_THROWS_AS(geometry.nonOrthCorrectionOverRelaxed(boundaryFace),
+    CHECK_THROWS_AS(geometry.nonOrthCorrection(boundaryFace, NonOrthSplit::OverRelaxed),
         std::invalid_argument);
     CHECK_THROWS_AS(geometry.skewVector(boundaryFace), std::invalid_argument);
     CHECK_THROWS_AS(geometry.innerDelta(base.faceCount()), std::out_of_range);
-    CHECK_THROWS_AS(geometry.innerCoefOverRelaxed(base.faceCount()),
+    CHECK_THROWS_AS(geometry.innerCoef(base.faceCount(), NonOrthSplit::OverRelaxed),
         std::out_of_range);
     CHECK_THROWS_AS(geometry.nonOrthogonality(base.faceCount()),
         std::out_of_range);
-    CHECK_THROWS_AS(geometry.nonOrthCorrectionOverRelaxed(base.faceCount()),
+    CHECK_THROWS_AS(geometry.nonOrthCorrection(base.faceCount(), NonOrthSplit::OverRelaxed),
         std::out_of_range);
     CHECK_THROWS_AS(geometry.skewVector(base.faceCount()), std::out_of_range);
 }

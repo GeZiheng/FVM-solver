@@ -400,13 +400,13 @@ TEST_CASE("Cartesian and unstructured mesh representations agree")
             {
                 CHECK(std::abs(leftGeometry.innerCoef(leftFace)
                     - rightGeometry.innerCoef(match)) <= 1.0e-12);
-                CHECK(std::abs(leftGeometry.innerCoefOverRelaxed(leftFace)
-                    - rightGeometry.innerCoefOverRelaxed(match))
+                CHECK(std::abs(leftGeometry.innerCoef(leftFace,
+                        NonOrthSplit::OverRelaxed)
+                    - rightGeometry.innerCoef(match,
+                        NonOrthSplit::OverRelaxed))
                     <= 1.0e-12);
-                CHECK(std::abs(leftGeometry.innerCoefOverRelaxed(leftFace)
-                    - leftGeometry.innerCoef(leftFace)) <= 1.0e-12);
-                CHECK(std::abs(rightGeometry.innerCoefOverRelaxed(match)
-                    - rightGeometry.innerCoef(match)) <= 1.0e-12);
+                CHECK(std::abs(leftGeometry.innerCoef(leftFace, NonOrthSplit::OverRelaxed) - leftGeometry.innerCoef(leftFace)) <= 1.0e-12);
+                CHECK(std::abs(rightGeometry.innerCoef(match, NonOrthSplit::OverRelaxed) - rightGeometry.innerCoef(match)) <= 1.0e-12);
 
                 const Point2 leftDelta = leftGeometry.innerDelta(leftFace);
                 const Point2 rightDelta = rightGeometry.innerDelta(match);
@@ -416,9 +416,9 @@ TEST_CASE("Cartesian and unstructured mesh representations agree")
                 CHECK(rightGeometry.nonOrthogonality(match) < 1.0e-9);
 
                 const Point2 leftOverCorrection
-                    = leftGeometry.nonOrthCorrectionOverRelaxed(leftFace);
+                    = leftGeometry.nonOrthCorrection(leftFace, NonOrthSplit::OverRelaxed);
                 const Point2 rightOverCorrection
-                    = rightGeometry.nonOrthCorrectionOverRelaxed(match);
+                    = rightGeometry.nonOrthCorrection(match, NonOrthSplit::OverRelaxed);
                 CHECK(std::sqrt(leftOverCorrection.x * leftOverCorrection.x
                         + leftOverCorrection.y * leftOverCorrection.y)
                     <= 1.0e-12);

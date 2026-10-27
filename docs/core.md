@@ -100,12 +100,11 @@ struct MeshInput {
 | 接口 | 定义 | 说明 |
 | ------ | ------ | ------ |
 | `interpWeight(face)` | $g_f=\lVert x_f-x_N\rVert/\lVert x_P-x_N\rVert$ | owner 到面/邻点的线性权重；边界面返回 1 |
-| `innerCoef(face)` | $\alpha_f=(\mathbf S_f\cdot\mathbf d)/(\mathbf d\cdot\mathbf d),\ \ \mathbf d=x_N-x_P$ | 内部扩散几何系数；边界面调用抛异常 |
+| `innerCoef(face, split)` | minimum（默认）：$\alpha_f=(\mathbf S_f\cdot\mathbf d)/(\mathbf d\cdot\mathbf d)$；over：$(\mathbf S_f\cdot\mathbf S_f)/\max(\mathbf S_f\cdot\mathbf d_f,\ 0.05\lVert\mathbf S_f\rVert\lVert\mathbf d_f\rVert)$，$\mathbf d=x_N-x_P$ | 内部扩散几何系数，按 `NonOrthSplit`（本类中定义）现算自缓存的 $\mathbf S_f,\mathbf d_f$；边界面调用抛异常 |
 | `innerDelta(face)` | $\mathbf d_f=x_N-x_O$ | owner 到 neighbour 的中心距向量；压力交叉通量的投影使用它；边界面调用抛异常 |
 | `boundaryCoef(face)` | $\beta_f=(\mathbf S_f\cdot\mathbf S_f)/(\mathbf S_f\cdot\boldsymbol\delta),\ \ \boldsymbol\delta=x_f-x_P$ | 边界扩散几何系数；内部面调用抛异常 |
-| `nonOrthCorrection(face)` | $\mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f$ | 内部面非正交部分（minimum-correction 分裂）；正交网格为零，边界面调用抛异常 |
-| `innerCoefOverRelaxed(face)` | $\alpha_f^{or}=(\mathbf S_f\cdot\mathbf S_f)/\max(\mathbf S_f\cdot\mathbf d_f,\ 0.05\lVert\mathbf S_f\rVert\lVert\mathbf d_f\rVert)$ | over-relaxed 分裂的内部扩散系数（`NonOrthSplit::OverRelaxed`）；分母下限照 OpenFOAM mesh 级先例防退化面；边界面调用抛异常 |
-| `nonOrthCorrectionOverRelaxed(face)` | $\mathbf k_f^{or}=\mathbf S_f-\alpha_f^{or}\mathbf d_f$ | over-relaxed 分裂的修正向量；与上一行配对使用（任意 $\alpha+\mathbf k=\mathbf S-\alpha\mathbf d$ 对在显式补全下同一通量）；边界面调用抛异常 |
+| `nonOrthCorrection(face, split)` | $\mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f$（$\alpha_f$ 同上一行所选 split） | 内部面非正交修正向量；与 `innerCoef` 传同一 `split` 使 $(\alpha,\mathbf k)$ 配对补全为全通量；正交网格为零，边界面调用抛异常 |
+
 | `nonOrthogonality(face)` | $\cos^{-1}\left((\mathbf S_f\cdot\mathbf d_f)/(\lVert\mathbf S_f\rVert\lVert\mathbf d_f\rVert)\right)$ | 逐内部面非正交角（度）；驱动端用于诊断/警告 |
 | `maxNonOrthogonality()` | $\max_f \cos^{-1}\left(\frac{\mathbf S_f\cdot\mathbf d_f}{\lVert\mathbf S_f\rVert \lVert\mathbf d_f\rVert}\right)$ | 以度为单位，仅统计内部面 |
 | `skewVector(face)` | $\mathbf s_f=x_f-(g_f x_O+(1-g_f)x_N)$ | 面心相对线性插值点的偏差；Convection 的 Central 对流面插值与质量通量构造使用 |
