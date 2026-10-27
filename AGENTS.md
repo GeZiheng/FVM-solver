@@ -29,7 +29,7 @@ The project parent uses `glm-5.3` (`.codex/config.toml`; the ZAI provider stays 
 
 **Delegation gates** — one round trip costs a measured floor of ~40 s and ~1k parent-side coordination tokens (`.agents/notes/fvm-implementer-benchmark.md`); the gates keep that off small work. The Phase 1 plan labels every step group's executor (parent / `fvm-implementer`) according to:
 
-- **Size gate** (initial values; re-tune after every 10 log entries): delegate only if the group touches >= 3 files, or >= 2 files with >= 100 changed lines, or applies one pattern at >= 3 call sites (porter class — the brief carries a worked before/after example).
+- **Size gate** (initial values; re-tune only with new benchmark data): delegate only if the group touches >= 3 files, or >= 2 files with >= 100 changed lines, or applies one pattern at >= 3 call sites (porter class — the brief carries a worked before/after example).
 - **Design gate**: formulas, sign/index conventions, boundary handling, and every call site are fixed by the plan; an uncovered detail is a stop-and-report question, not a child decision, and a paste-ready brief is pasted by the parent instead of delegated.
 - **Value gate**: delegation buys parallelism or parent-context relief, not latency — if the parent would only idle-wait on the child, it executes directly.
 
@@ -41,7 +41,7 @@ The parent may cross a gate either way with a one-line justification; `fvm-docs`
 
 **Reviewer rule** — `fvm-reviewer` is the ungated exception: exactly once per diff, on the whole diff, Phase 3 only. Phase-2 gate reviews are the parent's own quick pass, never delegated; a stalled group goes to the fuse rule (triage it yourself or via `fvm-test-triage`), never to a mid-Phase-2 reviewer or a pipelined per-group deep review.
 
-**Briefs, reports, logging** — log every delegation in `.agents/notes/delegation-log.md` (date, agent, group, brief/report chars, wall time, outcome, override note). Briefs carry scope files, interface/invariants, the call-site list, the validation instruction, and the trivial details the child may decide. Reports: <= 150 words — changed files, validation status, deviations, risks — never restating the plan; long material goes to a scratch file (`.agents/notes/<topic>.md`), the report returns summary plus path. Batching trial: up to 3 disjoint porter-class groups per message, one combined report; otherwise one brief per gate review.
+**Briefs, reports** — briefs carry scope files, interface/invariants, the call-site list, the validation instruction, and the trivial details the child may decide. Reports: <= 150 words — changed files, validation status, deviations, risks — never restating the plan; long material goes to a scratch file (`.agents/notes/<topic>.md`), the report returns summary plus path. Batching trial: up to 3 disjoint porter-class groups per message, one combined report; otherwise one brief per gate review.
 
 **Parent-owned work** — requirements analysis, decomposition, architecture, numerical design decisions, conflict resolution, final integration, and final review of solver-sensitive code (SIMPLE/PISO, pressure correction, Rhie–Chow, flux reconstruction, boundary flux logic); such slices stay delegable only with a design-complete brief (design gate). A flash child escalates ambiguity, repeated test failures, numerical-risk findings, or cross-module changes instead of deciding them; parallel children never edit overlapping files.
 
