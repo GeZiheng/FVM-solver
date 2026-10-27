@@ -14,8 +14,9 @@ using fvm::core::NonOrthSplit;
 struct CorrectionOptions
 {
     bool nonOrthogonalDiffusion = true;  ///< Gates the explicit cross terms
-                                         ///< only (the implicit alpha always
-                                         ///< follows nonOrthSplit).
+                                         ///< only: diffusion X and pressure
+                                         ///< crossP (the implicit alpha
+                                         ///< always follows nonOrthSplit).
     bool skewInterpolation = true;       ///< Skew-corrected linear interpolation.
     int nNonOrthogonalCorrectors = 0;    ///< Pressure solve sub-loop count.
     /// Interior (alpha, k) pair selection.  Both splits give the same

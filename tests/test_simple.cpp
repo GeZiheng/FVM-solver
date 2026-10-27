@@ -3,6 +3,8 @@
 #include "GridOperators.h"
 #include "LinearSolver.h"
 #include "CartesianMesh.h"
+#include "MeshGeomCache.h"
+#include "MeshQuality.h"
 #include "Momentum.h"
 #include "Simple.h"
 #include "TransportEquation.h"
@@ -10,6 +12,7 @@
 #include <cmath>
 #include <doctest/doctest.h>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 using namespace fvm::core;
@@ -78,6 +81,26 @@ Scalar netBoundaryFlux(const Mesh& mesh, const FaceFluxField& flux)
 }
 
 } // namespace
+
+TEST_CASE("meshQualityWarning reports thresholded mesh-quality metrics")
+{
+    const CartesianMesh cartesian(8, 6, 0.0, 0.0, 1.0, 1.0);
+    CHECK(meshQualityWarning(cartesian).empty());
+
+    const UnstructuredMesh sheared(makeShearedTriMesh(4));
+    const Mesh& base = sheared;
+    const MeshGeomCache geometry(base);
+    const std::string both = meshQualityWarning(base,
+        geometry.maxNonOrthogonality() - 1.0,
+        geometry.maxSkewness() - 0.01);
+    CHECK(both.find("non-orthogonality") != std::string::npos);
+    CHECK(both.find("skewness") != std::string::npos);
+
+    const std::string none = meshQualityWarning(base,
+        geometry.maxNonOrthogonality() + 1.0,
+        geometry.maxSkewness() + 0.01);
+    CHECK(none.empty());
+}
 
 TEST_CASE("Simple channel on sheared mesh")
 {

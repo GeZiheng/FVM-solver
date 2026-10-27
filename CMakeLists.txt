@@ -38,6 +38,7 @@ target_sources(fvm_core
         src/numerical/src/Diffusion.cpp
         src/numerical/src/Convection.cpp
         src/numerical/src/GridOperators.cpp
+        src/numerical/src/MeshQuality.cpp
         src/numerical/src/TransportEquation.cpp
         src/numerical/src/Simple.cpp
         src/numerical/src/Momentum.cpp

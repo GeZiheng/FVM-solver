@@ -1,6 +1,6 @@
 #include "Simple.h"
 #include "Convection.h"
-#include "MeshGeomCache.h"
+#include "MeshQuality.h"
 #include "Momentum.h"
 #include "Pressure.h"
 #include "TimeScheme.h"
@@ -8,16 +8,10 @@
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 
 namespace fvm::numerical
 {
-namespace
-{
-constexpr Scalar kMaxNonOrthWarnDeg = 70.0;
-}
-
-using fvm::core::MeshGeomCache;
-
 SimpleResult solveSimple(const Mesh& mesh,
     Scalar rho,
     Scalar mu,
@@ -39,10 +33,10 @@ SimpleResult solveSimple(const Mesh& mesh,
         throw std::invalid_argument(
             "solveSimple: nNonOrthogonalCorrectors must be non-negative");
     }
-    if (MeshGeomCache(mesh).maxNonOrthogonality() > kMaxNonOrthWarnDeg)
+    const std::string meshWarning = meshQualityWarning(mesh);
+    if (!meshWarning.empty())
     {
-        std::cerr << "warning: max non-orthogonality exceeds 70 degrees; "
-            "deferred corrections may converge slowly\n";
+        std::cerr << meshWarning;
     }
 
     const Index nCells = mesh.cellCount();

@@ -47,6 +47,8 @@ $$(\nabla \phi)_{P,d} = \frac{1}{V_P} \sum_f \sigma_{Pf} \phi_f S_{f,d},\qquad
 
 设计意图：把这类"任何 solver 都可能要用的网格算子"集中为公共接口（`include/`），后续如 `divergence` 等直接加入即可被其他 solver 复用。
 
+**GG 与 LSQ 的精度分工**（2026-10-27 登记）：GG 的精度命门是**偏斜**而非非正交——面值精确时 GG 对线性场在任何网格（含非正交）都精确（散度定理），但内部面值来自两心线性插值，面心偏离插值点 $\mathbf s_f$ 时面值误差为 $\nabla\phi\cdot\mathbf s_f$，偏斜比固定时随加密**不消失**（相对误差 $O(1)$）；零偏斜的均匀剪切网格上 GG 仍线性精确。LSQ 对线性场在任意网格（偏斜/非正交/非结构）精确，光滑场 $O(h)$。因此显式修正项全部用 LSQ；速度重构沿用 GG 是**刻意的对照合同**——OpenFOAM 的重构即 `U = HbyA - rAtU*fvc::grad(p)`（`correctPressure.C:116`）走 `gradSchemes`，本项目对照 case 用 `Gauss linear`。将来偏斜网格案例若显示重构滞后，可加 `GaussLinear|LeastSquares` 选项并重新对照取证（LSQ 的收益：偏斜网格上线性精确、与修正项口径统一；代价：偏离 OF 默认合同、边界稀疏 stencil 噪声、一次额外梯度扫）。
+
 ## Diffusion：扩散项装配
 
 装配算子 $-\nabla \cdot (\gamma \nabla \phi)$。
@@ -328,11 +330,17 @@ minimum 下 $C_f^{\min}$ 与 $\mathbf R_f^{\min}$ 共用 $\mathbf d_f\cdot\mathb
 
 $$\mathit{crossP}_f=\rho\left(\Delta u_f R_{f,x}S_{f,x}+\Delta v_f R_{f,y}S_{f,y}\right),$$
 
-其中 $\Delta u_f/\Delta v_f$ 是 Rhie–Chow 的面插值投影系数。`nonOrthogonalDiffusion` 只门控 `crossP` 和扩散 $X$，不改变 `nonOrthSplit` 选择的隐式系数。边界面不加交叉项；正交网格上两种 $\mathbf R_f$ 的相关投影为零，`crossP` 恒为零。
+其中 $\Delta u_f/\Delta v_f$ 是 Rhie–Chow 的面插值投影系数。`nonOrthogonalDiffusion` 只门控 `crossP` 和扩散 $X$，不改变 `nonOrthSplit` 选择的隐式系数。边界面不加交叉项。
+
+**「正交网格上 crossP 恒为零」的精确表述**（2026-10-27 登记推导）：正交（$\mathbf S_f=\alpha_f\mathbf d_f$）时两种 $\mathbf R_f$ 退化为同一向量且 $\mathbf R_f\cdot\mathbf d_f=0$，但 `crossP` 是**分量加权和**而非点积，利用 $\mathbf R_f\perp\mathbf d_f$ 可化简为
+
+$$\mathit{crossP}_f=\rho\,\alpha_f\,(\Delta v_f-\Delta u_f)\,R_{f,y}\,d_{f,y}.$$
+
+本项目迁移率按分量插值（$\Delta u_f\ne\Delta v_f$ 常见，如强单方向对流），因此**旋转正交**网格（$\mathbf d_f$ 两个分量都非零）上 `crossP` 非零：隐式项把标量 $\Delta p_f$ 乘以混合系数，u/v 分量间的分配在 $\Delta u_f\ne\Delta v_f$ 时是错的，`crossP` 正是把错配部分搬回正确方向的**各向异性补全项**；隐式 $C_f\Delta p_f$ 与 `crossP` 之和仍严格等于张量迁移率面通量 $\rho(\Delta u_f G_{f,x}S_{f,x}+\Delta v_f G_{f,y}S_{f,y})$（数值例：45° 旋转正交网格、$\nabla p=(0,g)$、$\Delta u_f=1$、$\Delta v_f=2$ 时隐式 $1.061g$ + 显式 $0.354g$ = 目标 $1.414g$）。`crossP` 仅在**笛卡尔**网格（每个面的 $\mathbf d_f$ 只有一个分量）或各向同性迁移率（$\Delta u_f=\Delta v_f$，即 OpenFOAM 的标量 $r_{AU}$）下恒为零。**工程警示**：不能按「maxNonOrthogonality≈0 即跳过」来优化压力 `crossP`；对扩散 $X$（$\mathbf k_f=0$）与 skew 修正（$\mathbf s_f=0$）这样做是安全的。
 
 `CorrectionOptions{nonOrthogonalDiffusion=true, skewInterpolation=true, nNonOrthogonalCorrectors=0, nonOrthSplit=NonOrthSplit::MinimumCorrection}` 是全装配函数与两个驱动的 trailing 默认参数；`nonOrthogonalDiffusion` 同时控制扩散 `X` 和压力 `crossP`。
 
-`nNonOrthogonalCorrectors = n` 时，每个 SIMPLE 压力修正或 PISO 压力修正内部做 $n+1$ 次压力求解：每次求解前刷新 $p_k$ 的 LSQ 梯度和 `crossP`，以有效通量 $F^{\hat u}_f-\mathit{crossP}_f$ 装配求解 $p_{k+1}$。只有最后一次子迭代把内部通量写回持久 `phi`；边界面仍按既有 Dirichlet/Neumann-p 规则处理。子循环全部结束后才做压力松弛（如有），速度重构继续使用未松弛的最终解与 GG 梯度。`n < 0` 被拒绝；驱动入口在最大非正交角超过 $70^\circ$ 时发出收敛性警告。
+`nNonOrthogonalCorrectors = n` 时，每个 SIMPLE 压力修正或 PISO 压力修正内部做 $n+1$ 次压力求解：每次求解前刷新 $p_k$ 的 LSQ 梯度和 `crossP`，以有效通量 $F^{\hat u}_f-\mathit{crossP}_f$ 装配求解 $p_{k+1}$。只有最后一次子迭代把内部通量写回持久 `phi`；边界面仍按既有 Dirichlet/Neumann-p 规则处理。子循环全部结束后才做压力松弛（如有），速度重构继续使用未松弛的最终解与 GG 梯度。`n < 0` 被拒绝；驱动入口经 `meshQualityWarning(mesh)`（`numerical/MeshQuality.h`，返回字符串便于测试）在最大非正交角超过 $70^\circ$ 或最大偏斜比 $\lVert\mathbf s_f\rVert/\lVert\mathbf d_f\rVert$ 超过 1 时向 stderr 输出建议性警告，阈值是带默认值的函数参数。
 
 装配规则：
 
@@ -570,7 +578,7 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 
 无下限公式之比 $\alpha_{min}/\alpha_{or}=\cos^2\theta$（$17^\circ$ 面上约差 $9\%$）。四条恒等性必须区分：
 
-1. **正交网格**：$\theta=0\Rightarrow\mathbf k\equiv0$、$\alpha_{min}=\alpha_{over}$——两套公式逐位相同（正交单步对照到求解器容差的原因）；
+1. **正交网格**：$\theta=0\Rightarrow\mathbf k\equiv0$、$\alpha_{min}=\alpha_{over}$——两套公式逐位相同（正交单步对照到求解器容差的原因；此为几何量 $\alpha,\mathbf k$ 层面的结论，压力 `crossP` 在旋转正交网格上仍含各向异性补全项，见「压力方程（绝对压力形式）」一节）；
 2. **不动点（有精确条件）**：两个内部 split 的解相同，当且仅当面梯度满足 $\mathbf G_f\cdot\mathbf d_f=\Delta\phi_f$。LSQ 对线性场精确，因此线性场两模式严格恒等；一般场的固定点差为
 
    $$\sum_f \gamma_f(\alpha_{or}-\alpha_{min})(\mathbf G_f\cdot\mathbf d_f-\Delta\phi_f),$$
@@ -580,6 +588,8 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 4. **内部面 vs 边界面**：内部面有显式补全项 $k\cdot G$，任意 $\alpha$ 与 $k=S-\alpha d$ 都只是把同一全梯度通量重新记账；边界面没有这个补全项（本项目与 OpenFOAM 的 `corrVecs` 均为零），$C_b/\beta_f$ 形式就是边界通量本身，因此两种形式的不动点不同。over 对纯法向梯度在任意倾斜面上精确；minimum 会把该法向通量乘 $\cos^2\theta$（$17^\circ$ 损失约 $8\%$，$70^\circ$ 损失约 $88\%$）且没有补全项补偿。over 加分母下限仍保证系数恒正并给锚定力保留下限；OpenFOAM 边界即 over，扩散 $\beta_f$ 与之同型。因此本项目的边界在两种 `nonOrthSplit` 下都保持 over；若将来要边界可选，必须先引入边界显式补全（$k_b\cdot\nabla\phi_b$ 的单侧边界梯度重构），这是已登记的后续题。
 
 第 3 条就是"斜交网格对照"一节 NC=2 差异的来源。实测（梯形网格、$\Delta t=0.002$）：NC=2 时双方距各自固定点基本等距（$L_2$ 7.1e-2 vs 7.4e-2），互距 9.6e-2；NC=8 时互距降到 4.5e-4。多步运行把每步迭代截断误差几何冲刷（我方 NC2−NC8 的 $L_2$：单步 7.1e-2 → 10 步 1.4e-3 → 200 步 2.5e-6，OpenFOAM 同样）；发展流阶段双方残余约 1e-2 的差属于两个二阶格式间的 $O(h^2)$ 正常距离，与迭代路径无关。
+**已登记后续题：修正限制器（limited correction，2026-10-27 登记、暂缓）**：deferred correction 的显式/隐式比约为 $\tan\theta$（$45^\circ\to1$、$70^\circ\to2.75$、$85^\circ\to11.4$），$\theta\gtrsim70^\circ$ 的病态网格上外迭代/正确子迭代可能极慢或发散；OpenFOAM 的 `limited` snGrad/laplacian 用 $l\in[0,1]$ 混合系数截断显式项换稳定（$l=1$ 全修正，$l=0$ 纯 over 隐式）。当前无此类网格（斜交梯形对照在 $l=1$ 下已收敛，$L_2$ 4.5e-4@NC=8），且已有 OverRelaxed split（隐式恒正）与 `nNonOrthogonalCorrectors`（刷新滞后）两个部分缓解，故不加；出现真实病态网格案例时再加，默认 $l=1$ 保持既有行为与全部测试不变。
+
 ### 数据结构与核心环节
 
 | 环节 | 本项目 | OpenFOAM |
