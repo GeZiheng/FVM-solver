@@ -116,4 +116,26 @@ if(FVM_BUILD_PYTHON)
     add_test(NAME pyfvm_tests
         COMMAND ${Python_EXECUTABLE} -m unittest discover
                 -s ${CMAKE_CURRENT_SOURCE_DIR}/python/tests)
+
+    # Application-level regression tests: full example cases with fixed
+    # accuracy thresholds against analytical or benchmark references
+    # (separate from the unit/binding layers; run with -L application).
+    function(fvm_add_application_test name script)
+        set(test_name pyfvm_app_${name})
+        add_test(NAME ${test_name}
+            COMMAND ${Python_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/python/examples/${script}.py
+                    ${ARGN})
+        set_tests_properties(${test_name} PROPERTIES
+            ENVIRONMENT "FVM_PYFVM_DIR=${CMAKE_BINARY_DIR}/python"
+            LABELS application
+            TIMEOUT 600)
+    endfunction()
+
+    fvm_add_application_test(cavity_re100 cavity --re 100 --test)
+    fvm_add_application_test(cavity_re400 cavity --re 400 --test)
+    fvm_add_application_test(cavity_re1000 cavity --re 1000 --test)
+    set_tests_properties(pyfvm_app_cavity_re1000 PROPERTIES TIMEOUT 900)
+    fvm_add_application_test(poiseuille poiseuille --test)
+    fvm_add_application_test(stokes_oscillating stokes_oscillating --test)
 endif()

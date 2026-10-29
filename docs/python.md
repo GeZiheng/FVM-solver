@@ -67,10 +67,18 @@ io：
 
 ## 示例
 
-三个基础 Python 算例的用途、参数与运行方式见 README.md 的“示例”。
+基础与解析基准 Python 算例的用途、参数与运行方式见 README.md 的“示例”。
+
+- `cavity.py` 支持 `--re {100,400,1000}`，用 Ghia et al. (1982) 中心线数据做 L∞/L2 对照，`--test` 启用精度断言。
+- `poiseuille.py` 检验平面 Poiseuille 的充分发展抛物线剖面与压降斜率。
+- `stokes_oscillating.py` 检验 Stokes 第二问题的周期稳态解。
 
 `python/examples/piso_nonortho_channel.py` 是 4.3c 斜交算例：由 bilinear 映射生成 $16\times16$ 梯形收缩通道 SU2 网格（顶边收窄到 $[0.3,0.7]$），运行单步压力驱动 PISO，打印 $p(0,0)$、入口单位长度通量与连续性误差。默认开启修正并使用两个 PISO corrector；`--no-corrections` 关闭三项修正，`--correctors N` 覆盖 corrector 数。该脚本用于复现 `docs/numerical.md` “斜交网格对照（未决）”中的算例设置。
 
+时间相关但空间均匀的壁面值，标准用法是在每个时间步先更新 `BoundaryField.set(...)`，再把 `PisoConfig.n_steps` 置为 1 并调用 `solve_piso`（Stokes 振荡平板示例）。逐步调用与一次长调用语义等价：Couette 100 步两种调用方式的终态最大差为 `7.7e-12`（判据 `1e-9`）。
+
 ## 测试分工
 
-`python/tests/test_pyfvm.py` 是**绑定契约测试**：numpy 零拷贝与索引顺序、网格几何、BC 默认值与非法参数、纯扩散线性精确解（`solve_transport` 全通路）、SIMPLE/PISO 粗网格冒烟、`write_vti` 冒烟。物理与数值正确性由 C++ doctest（`tests/`）独家负责，两侧不重复断言。算例级的持续验证（examples 作为 application tests）后续单独做，不混入 unit test。
+`python/tests/test_pyfvm.py` 是**绑定契约测试**：numpy 零拷贝与索引顺序、网格几何、BC 默认值与非法参数、纯扩散线性精确解（`solve_transport` 全通路）、SIMPLE/PISO 粗网格冒烟、`write_vti` 冒烟。
+
+application 层由 5 个带 `application` 标签的 ctest 条目组成（`pyfvm_app_cavity_re100` / `_re400` / `_re1000` / `pyfvm_app_poiseuille` / `pyfvm_app_stokes_oscillating`，用 `ctest -L application` 运行），负责整算例精度回归；精度阈值锁定在示例脚本中。阈值校准余量一般不小于 2×，Stokes 为 1.4×。该层不改变 `fvm_unit_tests` 与 `pyfvm_tests` 的语义。

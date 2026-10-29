@@ -92,6 +92,12 @@ cmake --build build/release-py
 ctest --test-dir build/release-py --output-on-failure
 ```
 
+其中 application 算例精度回归可用标签单独运行：
+
+```powershell
+ctest --test-dir build/release-py -L application --output-on-failure
+```
+
 binding 的 vcpkg feature、overlay port、解释器版本锁定与产物定位机制见 [`docs/python.md`](docs/python.md)。
 
 ### 运行算例
@@ -102,11 +108,13 @@ python python/examples/<name>.py
 
 ## 示例
 
-三个基础算例是原 C++ demo 与 PISO 测试的 Python 版，运行后 vti 写到 `python/examples/output/<算例名>/`，与当前工作目录无关：
+基础算例与解析基准算例运行后 vti 写到 `python/examples/output/<算例名>/`，与当前工作目录无关：
 
 - **convection_diffusion.py**：单位方域稳态对流-扩散。无散度回流速度场（流函数 ψ = sin(πx)·sin(πy) 派生），γ = 0.01（Pe ~ 100），西墙 T=1、东墙 T=0、南北绝热。演示 `solve_transport` 与 numpy 填场。
-- **cavity.py**：顶盖驱动方腔流 Re=100（64×64，SIMPLE，relaxation_u=0.7 / relaxation_p=0.3），约 1000 次外迭代收敛；输出 `cavity.vti` 可在 ParaView 看主涡与角隅二次涡。
+- **cavity.py**：顶盖驱动方腔流 `--re {100,400,1000}`（默认 100；Re≤400 用 64×64，Re=1000 用 128×128，SIMPLE + Central）；对照 Ghia et al. (1982) 中心线基准并报告 L∞/L2，`--test` 执行精度断言。输出 `cavity_re<Re>.vti` 可在 ParaView 看主涡与角隅二次涡。
 - **impulsive_couette.py**：瞬态 Couette 启动（PISO，ν=0.1，dt=0.005 × 100 步到 t=0.5），与精确 Fourier 级数解对比打印误差。
+- **poiseuille.py**：平面 Poiseuille 通道（L=10/H=1、Re=20、320×32，SIMPLE + Central；入口速度 Dirichlet、出口压力 Dirichlet 0），检验充分发展抛物线剖面与压降斜率。
+- **stokes_oscillating.py**：Stokes 第二问题振荡平板（顶板速度 `cos(ωt)`，PISO Euler），在周期稳态后对照半无限域解析剖面；附带逐步调用与长调用等价性检查。
 - **piso_nonortho_channel.py**：4.3c 梯形收缩通道单步 PISO 算例，用于复现非正交/skewness 修正对照；`--no-corrections` 关闭修正，`--correctors N` 调整 corrector 数。
 
 ## 依赖
@@ -121,8 +129,8 @@ python python/examples/<name>.py
 
 1. ✅ **非定常项 + PISO** — 已完成：瞬态 theta scheme（时间精度已验证）、瞬态输运、共享的 `Momentum`/`Pressure`/`GridOperators` 原语与 `solvePiso`；`tests/test_piso.cpp` 已启用。交叉验证数值与已排除假设清单见 [`docs/numerical.md`](docs/numerical.md)。
 2. ✅ **`pyfvm` Python bindings** — 已完成：pybind11（vcpkg `python` feature、`FVM_BUILD_PYTHON=ON`、可选），覆盖 mesh/fields/BC/SIMPLE/PISO/transport/VTK 输出的 snake_case API 与 numpy 零拷贝视图；算例脚本在 `python/examples/`；绑定契约测试在 `python/tests/`（ctest 条目 `pyfvm_tests`）；C++ `fvm_solver` demo 可执行文件已移除——算例一律为 Python 脚本。细节见 [`docs/python.md`](docs/python.md)。
-3. ✅ **任意网格输入与非正交修正** — 4.3a（mesh abstraction、双网格表示、零数值变化）、4.3b（`readSu2`、`.vtu` writer `writeVtu`、`pyfvm.read_su2`）与 4.3c（non-orthogonal diffusion/pressure correction、内部 split 可选 minimum / over-relaxed、skewness correction、LSQ gradients、`pyfvm.CorrectionOptions`）已完成：100 个 C++ test cases 与 22 项 `pyfvm_tests` 通过；正交单步 OpenFOAM 复验差 `1.8e-9`，斜交 manufactured 解达二阶，梯形 NS OpenFOAM 对照在收敛 corrector 数下通过（NC=8 时 L2 `4.5e-4`；NC=2 的差距主要是 corrector 滞后，剩余一般场 split 依赖为 O(h²)，见 [`docs/numerical.md`](docs/numerical.md)）。格式决策为 SU2-first，Gmsh reader 为可选后续（共享 `MeshInput` 映射层）。
-4. **示例算例的 application tests** — 把 `python/examples/` 脚本作为独立测试层运行（与 unit tests 分开），例如注册为带标签的 ctest 条目。已原则同意，未排期。
+3. ✅ **任意网格输入与非正交修正** — 4.3a（mesh abstraction、双网格表示、零数值变化）、4.3b（`readSu2`、`.vtu` writer `writeVtu`、`pyfvm.read_su2`）与 4.3c（non-orthogonal diffusion/pressure correction、内部 split 可选 minimum / over-relaxed、skewness correction、LSQ gradients、`pyfvm.CorrectionOptions`）已完成：100 个 C++ test cases 与 22 项 `pyfvm_tests` 通过；正交单步 OpenFOAM 复验差 `1.8e-9`，斜交 manufactured 解达二阶，梯形 NS OpenFOAM 对照在收敛 corrector 数下通过（NC=8 时 L2 `4.5e-4`；NC=2 的差距主要是 corrector 滞后，剩余一般场 split 依赖为 O(h²)，见 [`docs/numerical.md`](docs/numerical.md)）。格式决策为 SU2-first；Gmsh reader 搁置（2026-10-28：SU2 已满足需求，若将来重启仍共享 `MeshInput` 映射层）。
+4. ✅ **示例算例的 application tests（阶段 A）** — 已完成：新增 application ctest 层（`ctest -L application`，5 项），覆盖 cavity Re=100/400/1000 对照 Ghia、平面 Poiseuille 与 Stokes 振荡平板；cavity 采用 Central 格式，默认 Upwind 的数值扩散在 Re=400 会显著放大中心线误差。阶段 B（非结构网格：后向台阶 + 圆柱绕流）与 `BoundaryField` 逐面 Dirichlet 值（Option B，解锁 Taylor–Green 等空间变化壁面值）为下一阶段候选。
 
 Deferred/rejected：`examples/` 下的 per-case 可执行文件（繁琐）、JSON case 配置（与 Python 脚本重复）、按模块拆分 CMakeLists/tests/docs（仅当模块被外部复用或构建时间恶化时再议）。AMGCL/Hypre 后端仍是更大网格的候选方案。
 
