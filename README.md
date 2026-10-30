@@ -166,8 +166,8 @@ opencode.json               — OpenCode：skill 路径、同一组 MCP server�
 
 - `VCPKG_ROOT` 与 `Path` 中的 `ninja.exe` 必须在 agent 会话启动前就绪；前提与构建命令见上文“构建与测试”。
 - `FVM_OF_ALLOWED_ROOTS` 是冒号分隔的绝对 WSL 路径，用于扩大 `run_case` 允许的 `template`/`root` 根；候选路径在 WSL 内经 `realpath` 规范化，符号链接与 `..` 无法逃逸。该检查不是 TOCTOU-free 的；威胁模型是混淆的 agent，不是本地竞争者。
-- 工具副作用：`build_and_test` 写 `build/<config>-agent[-py]/`，`run_case` 在 WSL 中创建 case 目录并启动 `foamRun`，其余工具全部只读。ascii-only 限制见 [`AGENTS.md`](AGENTS.md) 的 MCP Servers 小节。
-- `build_and_test` 返回结构化 JSON：成功含 `ok`/`config`/`build_dir`/`stage`/`tests`/`report`；失败附 `first_error`（按 CMake > ninja `FAILED:` > MSVC `error C<n>` > `error:` > ctest 的优先级取首行）、截断的 `tail` 与 `log_path`——完整未截断 transcript 只写入构建目录的 `build_and_test.log`。
+- 工具副作用：`build_and_test` 写 `build/<config>-agent[-py]/`（异步模式另写 `ctest_async.log` 与 `mcp_ctest.json`），`run_case` 在 WSL 中创建 case 目录并启动 `foamRun`，其余工具全部只读。ascii-only 限制见 [`AGENTS.md`](AGENTS.md) 的 MCP Servers 小节。
+- `build_and_test` 返回结构化 JSON：成功含 `ok`/`config`/`build_dir`/`stage`/`tests`/`report`；失败附 `first_error`（按 CMake > ninja `FAILED:` > MSVC `error C<n>` > `error:` > ctest 的优先级取首行）、截断的 `tail` 与 `log_path`——完整未截断 transcript 只写入构建目录的 `build_and_test.log`。`run=application/all` 默认后台执行（`wait=false`，规避客户端 ~300s 工具调用超时）：立即返回 `stage=test-async`，随后轮询 `test_status` 直到 `finished`/`timeout`/`stale`，终态字段与同步路径同构。
 - `run_status` 的状态为 `running` / `finished` / `failed` / `stale` / `unknown`；`stale` 表示启动器进程已死且没有 `.exitcode`（例如 server 重启），需要重跑 case。启动器 PID 记录在 case 目录的 `.launcher_pid`（`kill -0` + `/proc/<pid>/cmdline` 含 case 路径双重校验，防 PID 复用）。
 - 审批模式记录在 `.codex/config.toml`：当前仅 `run_case` 需要审批；`build_and_test` 免批（副作用仅限仓库内 `build/` 与 vcpkg 缓存，且持久 implementer 工作流依赖无人工介入的中间编译检查），`openfoam` 的只读工具默认免批；三个只读子 agent（explorer/reviewer/test-triage）的 toml 另有"禁调 `build_and_test`/`run_case`"的指令。
 - openfoam 字段映射假定结构网格：`nx*ny` 必须等于网格单元数，`grid[j][i] = cell j*nx+i`，面通量从 OpenFOAM 的 owner→neighbour 约定转换到本项目的 `+x/+y` 约定。
@@ -177,10 +177,12 @@ opencode.json               — OpenCode：skill 路径、同一组 MCP server�
 harness 自身还没有自动化测试（计划覆盖字典解析器、`extract_fields` 重映射、`of_log_summary.py` fixture，以及一个 CI job）。当前手工验证：
 
 ```powershell
-python -m py_compile .agents\mcp\openfoam_server.py .agents\mcp\openfoam_fields.py
+python -m py_compile .agents\mcp\build_and_test_server.py .agents\mcp\openfoam_server.py .agents\mcp\openfoam_fields.py
 # 纯函数冒烟：直接导入模块，不需要 WSL
 python -c "import sys; sys.path.insert(0, r'.agents/mcp'); import openfoam_fields, openfoam_server; print('import ok')"
 ```
+
+build-and-test 的分层与异步路径（`run=unit` 同步、`run=application` 后台 + `test_status` 轮询、并发启动拒绝、未轮询句柄回收、`stale` 检测）通过 stdio JSON-RPC 驱动脚本手工验证，脚本不入库（位于 gitignored 的 `build/` 下）。
 
 真实数据回归：对一个已有 case（如 16x16 的 `mcptest_*`）以 `nx=ny=16` 运行 `extract_fields`，要求零警告。
 

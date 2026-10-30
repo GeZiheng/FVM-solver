@@ -2,9 +2,9 @@
 """Stdio MCP server exposing this project's build-and-test workflow.
 
 Speaks just enough of the Model Context Protocol (newline-delimited
-JSON-RPC 2.0 over stdin/stdout) to expose one tool, ``build_and_test``.
-It uses only the Python standard library, so it runs without installing
-an MCP SDK or reaching the network.
+JSON-RPC 2.0 over stdin/stdout) to expose two tools, ``build_and_test``
+and ``test_status``. It uses only the Python standard library, so it
+runs without installing an MCP SDK or reaching the network.
 
 Shared by Codex (registered in ``.codex/config.toml``) and opencode
 (reached through the ``mcp`` block in ``opencode.json``), so both agents
@@ -12,7 +12,9 @@ drive the same implementation. The tool configures with CMake + Ninja into
 ``build/<config>-agent``, builds ``fvm_tests``, then optionally runs ctest.
 With ``python=true`` it configures ``-DFVM_BUILD_PYTHON=ON`` into
 ``build/<config>-agent-py`` instead, which adds the ``pyfvm`` extension
-target and the ``pyfvm_tests`` ctest entry.
+target and the ``pyfvm_tests`` ctest entry. ``run`` selects the ctest
+layer (none / unit / application / all); the slow layers default to a
+background ctest polled through ``test_status``.
 """
 
 from __future__ import annotations
@@ -23,10 +25,11 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
 
 MAX_OUTPUT_CHARS = 8000
 SERVER_NAME = "build-and-test"
-SERVER_VERSION = "1.3.0"
+SERVER_VERSION = "1.4.0"
 # Used only when the client does not request a version; otherwise the
 # requested version is echoed back so the client keeps the negotiation.
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
@@ -35,6 +38,14 @@ CONFIGURE_TIMEOUT = 1800
 BUILD_TIMEOUT = 1800
 RUN_TIMEOUT = 1800
 ENV_TIMEOUT = 300
+ASYNC_TEST_TIMEOUT = 3600
+
+RUN_MODES = ("none", "unit", "application", "all")
+
+# In-memory handle for the background ctest started with wait=false; see
+# _start_async_ctest()/test_status(). A marker file next to the log covers
+# the "server died mid-run" case (test_status then reports stale).
+_ACTIVE_CTEST: dict | None = None
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -53,6 +64,15 @@ TOOL_DESCRIPTION = (
     "python=true, the pyfvm extension, then optionally run ctest (which "
     "includes the pyfvm_tests Python binding tests when python=true). Use "
     "this instead of invoking cmake/ctest/ninja directly for project builds. "
+    "run selects the ctest layer: unit (fvm_unit_tests + pyfvm_tests, "
+    "excludes the application label, fast), application (only the labeled "
+    "application tests; requires python=true), all (everything; the old "
+    "value 'tests' is accepted as an alias). "
+    "application and all exceed the client's ~300s tool-call timeout, so "
+    "they default to wait=false: ctest starts in the background and the call "
+    "returns immediately; poll the separate test_status tool until the run "
+    "reaches a terminal state. Pass wait=true to force synchronous "
+    "execution (the client may then time out even though ctest completes). "
     "Returns structured JSON. Failures include first_error, tail and "
     "log_path, and the complete untruncated transcript is written to "
     "build_and_test.log in the build directory. "
@@ -60,7 +80,7 @@ TOOL_DESCRIPTION = (
     "(config, target, run, python) with the user first unless they already "
     "stated them. "
     "When building as part of a code modification workflow, proceed with the "
-    "defaults (config=Release, target=all, run=tests, python=false). "
+    "defaults (config=Release, target=all, run=unit, python=false). "
     "Success reports are compact by default (quiet=true). Failures return "
     "first_error, a bounded tail and log_path; quiet=false keeps a bounded "
     "sectioned transcript in report. The only untruncated transcript is "
@@ -87,11 +107,25 @@ TOOL_SCHEMA = {
         },
         "run": {
             "type": "string",
-            "enum": ["none", "tests"],
-            "default": "tests",
+            "enum": ["none", "unit", "application", "all"],
+            "default": "unit",
             "description": (
-                "What to run after a successful build: none or tests "
-                "(ctest; includes pyfvm_tests when python=true). Default tests."
+                "What to run after a successful build: none; unit (ctest "
+                "-LE application: fvm_unit_tests + pyfvm_tests, fast); "
+                "application (ctest -L application: the labeled application "
+                "tests, requires python=true); all (every registered test). "
+                "application/all default to asynchronous execution with "
+                "wait=false because they exceed the client tool-call "
+                "timeout; poll test_status for the result."
+            ),
+        },
+        "wait": {
+            "type": "boolean",
+            "description": (
+                "Wait for ctest to finish inside the call (true) or start it "
+                "in the background and return immediately (false). Defaults "
+                "to the run mode: synchronous for none/unit, asynchronous "
+                "for application/all. Only meaningful with run != none."
             ),
         },
         "python": {
@@ -114,6 +148,24 @@ TOOL_SCHEMA = {
             ),
         },
     },
+    "required": [],
+    "additionalProperties": False,
+}
+
+TEST_STATUS_DESCRIPTION = (
+    "Poll the background ctest run started by build_and_test with "
+    "wait=false (the default for run=application/all). Returns "
+    "state=running with an elapsed time and a bounded log tail, or the "
+    "terminal result parsed exactly like the synchronous path "
+    "(ok/tests/summary/failed/log_path). A run older than "
+    f"{ASYNC_TEST_TIMEOUT}s is killed and reported as failed. state=stale "
+    "means the marker file survives but the server process holding the "
+    "handle is gone (e.g. the session restarted mid-run): rerun the tests."
+)
+
+TEST_STATUS_SCHEMA = {
+    "type": "object",
+    "properties": {},
     "required": [],
     "additionalProperties": False,
 }
@@ -408,12 +460,284 @@ def _msvc_environment() -> tuple[dict[str, str] | None, str]:
     return environment, str(install)
 
 
+def _write_marker(marker: pathlib.Path, state: str, **extra) -> None:
+    """Persist the async-run state; failures stay silent (best effort)."""
+    data = {"state": state}
+    data.update(extra)
+    try:
+        marker.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _find_running_marker() -> pathlib.Path | None:
+    """Return a leftover 'running' marker from a dead server, if any."""
+    build_root = REPO_ROOT / "build"
+    if not build_root.exists():
+        return None
+    for marker in sorted(build_root.glob("*-agent*/mcp_ctest.json")):
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("state") == "running":
+            return marker
+    return None
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill ctest together with its child test processes.
+
+    Popen.kill() only terminates ctest itself; on Windows the python
+    test processes would survive as orphans, so ask taskkill to take the
+    whole process tree down. Both variants are best effort.
+    """
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True,
+            check=False,
+        )
+    else:
+        proc.kill()
+
+
+def _finalize_ctest(handle: dict, code: int, timed_out: bool = False):
+    """Close a terminal background run and persist its state.
+
+    Shared by test_status (normal completion) and _start_async_ctest
+    (reaping a finished-but-unpolled run before a new start). Returns
+    ``(tests, output)`` for payload construction; all I/O is best effort.
+    """
+    try:
+        handle["stream"].close()
+    except OSError:
+        pass
+    try:
+        output = handle["log_file"].read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        output = ""
+    tests = _parse_ctest(output)
+    _write_marker(
+        handle["marker"],
+        "timeout" if timed_out else "finished",
+        exit_code=code,
+        run=handle["run"],
+        summary=tests["summary"],
+    )
+    result_line = (
+        f"RESULT: FAILED (async ctest, exit code {code}"
+        + (", killed after timeout" if timed_out else "")
+        + ")"
+    )
+    try:
+        with handle["build_log"].open(
+            "a", encoding="utf-8", newline="\n"
+        ) as log:
+            log.write("\n$ " + " ".join(handle["cmd"]) + "\n")
+            log.write(output + "\n" + result_line + "\n")
+    except OSError:
+        pass
+    return tests, output, result_line
+
+
+def _start_async_ctest(
+    test_cmd: list[str],
+    build_dir: pathlib.Path,
+    build_env: dict[str, str] | None,
+    config: str,
+    run: str,
+    python: bool,
+    quiet: bool,
+) -> tuple[str, bool]:
+    """Start ctest in the background and return immediately."""
+    global _ACTIVE_CTEST
+    if _ACTIVE_CTEST is not None:
+        code = _ACTIVE_CTEST["proc"].poll()
+        if code is None:
+            return (
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": (
+                            "a background ctest is already running; poll "
+                            "test_status until it finishes before starting "
+                            "another one"
+                        ),
+                    },
+                    indent=2,
+                ),
+                False,
+            )
+        # Finished but never polled: reap it (close the stream, persist the
+        # marker, append the log) instead of leaking the handle.
+        _finalize_ctest(_ACTIVE_CTEST, code)
+        _ACTIVE_CTEST = None
+
+    log_file = build_dir / "ctest_async.log"
+    marker = build_dir / "mcp_ctest.json"
+    try:
+        stream = log_file.open("w", encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return (
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": f"cannot open {log_file} for ctest output: {exc}",
+                },
+                indent=2,
+            ),
+            False,
+        )
+    try:
+        proc = subprocess.Popen(
+            test_cmd,
+            cwd=str(REPO_ROOT),
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            env=build_env,
+        )
+    except OSError as exc:
+        stream.close()
+        return (
+            json.dumps({"ok": False, "error": f"failed to start ctest: {exc}"}),
+            False,
+        )
+
+    _ACTIVE_CTEST = {
+        "proc": proc,
+        "stream": stream,
+        "cmd": test_cmd,
+        "log_file": log_file,
+        "marker": marker,
+        "build_log": build_dir / "build_and_test.log",
+        "config": config,
+        "run": run,
+        "python": python,
+        "quiet": quiet,
+        "started_mono": time.monotonic(),
+    }
+    _write_marker(
+        marker,
+        "running",
+        pid=proc.pid,
+        run=run,
+        config=config,
+        started=time.time(),
+        log=log_file.relative_to(REPO_ROOT).as_posix(),
+    )
+    payload = {
+        "ok": True,
+        "state": "running",
+        "stage": "test-async",
+        "config": config,
+        "run": run,
+        "python": python,
+        "build_dir": str(build_dir),
+        "async_log": log_file.relative_to(REPO_ROOT).as_posix(),
+        "report": (
+            "ctest started in the background; poll the test_status tool "
+            "until it reports a terminal state"
+        ),
+    }
+    return json.dumps(payload, indent=2), True
+
+
+def test_status() -> tuple[str, bool]:
+    """Report on the background ctest run; see TEST_STATUS_DESCRIPTION."""
+    global _ACTIVE_CTEST
+    if _ACTIVE_CTEST is None:
+        stale = _find_running_marker()
+        if stale is not None:
+            return (
+                json.dumps(
+                    {
+                        "ok": False,
+                        "state": "stale",
+                        "marker": str(stale),
+                        "error": (
+                            "the marker says a ctest is running but this "
+                            "server process has no handle to it (the server "
+                            "restarted mid-run); rerun the tests"
+                        ),
+                    },
+                    indent=2,
+                ),
+                False,
+            )
+        return (
+            json.dumps(
+                {"ok": False, "error": "no background test run is active"},
+                indent=2,
+            ),
+            False,
+        )
+
+    handle = _ACTIVE_CTEST
+    elapsed = time.monotonic() - handle["started_mono"]
+    code = handle["proc"].poll()
+    timed_out = False
+    if code is None and elapsed > ASYNC_TEST_TIMEOUT:
+        _kill_tree(handle["proc"])
+        code = handle["proc"].wait()
+        timed_out = True
+
+    if code is None:
+        try:
+            tail = handle["log_file"].read_text(
+                encoding="utf-8", errors="replace"
+            )[-2000:]
+        except OSError:
+            tail = ""
+        payload = {
+            "ok": True,
+            "state": "running",
+            "elapsed_s": round(elapsed, 1),
+            "run": handle["run"],
+            "build_dir": str(handle["log_file"].parent),
+            "tail": tail,
+        }
+        return json.dumps(payload, indent=2), True
+
+    # Terminal state: close the log stream, parse, persist, report.
+    _ACTIVE_CTEST = None
+    tests, output, result_line = _finalize_ctest(handle, code, timed_out)
+    failed = code != 0
+    report = (
+        result_line
+        if failed
+        else f"RESULT: SUCCESS (async, {tests['summary']})"
+    )
+    if not handle["quiet"]:
+        report += "\n" + _tail(output)
+
+    payload = {
+        "ok": not failed,
+        "state": "timeout" if timed_out else "finished",
+        "elapsed_s": round(elapsed, 1),
+        "config": handle["config"],
+        "run": handle["run"],
+        "python": handle["python"],
+        "build_dir": str(handle["log_file"].parent),
+        "tests": tests,
+        "report": report,
+    }
+    if failed:
+        payload["first_error"] = _first_error(output)
+        payload["tail"] = _tail(output)
+    payload["log_path"] = handle["build_log"].relative_to(REPO_ROOT).as_posix()
+    return json.dumps(payload, indent=2), not failed
+
+
 def build_and_test(
     config: str = "Release",
     target: str = "all",
-    run: str = "tests",
+    run: str = "unit",
     python: bool = False,
     quiet: bool = True,
+    wait: bool | None = None,
 ) -> tuple[str, bool]:
     """Configure, build and optionally run the project.
 
@@ -446,12 +770,32 @@ def build_and_test(
             ),
             False,
         )
-    if run not in ("none", "tests"):
+    if run == "tests":  # deprecated alias from the pre-layering protocol
+        run = "all"
+    if run not in RUN_MODES:
         return (
             json.dumps(
                 {
                     "ok": False,
-                    "error": f"invalid run {run!r}: expected none or tests",
+                    "error": (
+                        f"invalid run {run!r}: expected none, unit, "
+                        "application or all"
+                    ),
+                },
+                indent=2,
+            ),
+            False,
+        )
+    if run == "application" and not python:
+        return (
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": (
+                        "invalid combination: run=application requires "
+                        "python=true (the application tests are registered "
+                        "in the FVM_BUILD_PYTHON block)"
+                    ),
                 },
                 indent=2,
             ),
@@ -465,6 +809,20 @@ def build_and_test(
                     "error": (
                         "invalid combination: target=pyfvm requires "
                         "python=true"
+                    ),
+                },
+                indent=2,
+            ),
+            False,
+        )
+    if wait is not None and not isinstance(wait, bool):
+        return (
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": (
+                        f"invalid wait {wait!r}: expected true, false or "
+                        "omitted"
                     ),
                 },
                 indent=2,
@@ -623,9 +981,9 @@ def build_and_test(
         return json.dumps(payload, indent=2), False
     sections.append(f"\nBUILD SUCCEEDED ({config}, target: {target})")
 
-    stage = "test" if run == "tests" and target != "pyfvm" else "done"
+    stage = "test" if run != "none" and target != "pyfvm" else "done"
     # --- Run ---
-    if run == "tests":
+    if run != "none":
         if target == "pyfvm":
             sections.append(
                 f"\nSKIPPED tests: fvm_tests was not built (target={target})"
@@ -639,8 +997,28 @@ def build_and_test(
                 "-C",
                 config,
             ]
+            if run == "unit":
+                test_cmd += ["-LE", "application"]
+            elif run == "application":
+                test_cmd += ["-L", "application"]
             sections.append("\n$ " + " ".join(test_cmd))
             transcript.append("\n$ " + " ".join(test_cmd))
+
+            sync = wait if wait is not None else run in ("none", "unit")
+            if not sync:
+                sections.append(
+                    "\nctest runs in the background (wait=false); poll the "
+                    "test_status tool for the result"
+                )
+                transcript.append(
+                    "\n$ ctest launched in the background; see "
+                    "ctest_async.log / test_status"
+                )
+                write_log()
+                return _start_async_ctest(
+                    test_cmd, build_dir, build_env, config, run, python, quiet
+                )
+
             code, output = _run(test_cmd, RUN_TIMEOUT, build_env)
             sections.append(_tail(output))
             transcript.append(output)
@@ -748,13 +1126,18 @@ def _handle(message: dict) -> None:
                         "name": "build_and_test",
                         "description": TOOL_DESCRIPTION,
                         "inputSchema": TOOL_SCHEMA,
-                    }
+                    },
+                    {
+                        "name": "test_status",
+                        "description": TEST_STATUS_DESCRIPTION,
+                        "inputSchema": TEST_STATUS_SCHEMA,
+                    },
                 ]
             },
         )
     elif method == "tools/call":
         name = params.get("name")
-        if name != "build_and_test":
+        if name not in ("build_and_test", "test_status"):
             _reply(
                 request_id,
                 error={"code": -32602, "message": f"unknown tool: {name}"},
@@ -762,15 +1145,19 @@ def _handle(message: dict) -> None:
             return
         arguments = params.get("arguments") or {}
         try:
-            text, ok = build_and_test(
-                config=arguments.get("config") or "Release",
-                target=arguments.get("target") or "all",
-                run=arguments.get("run") or "tests",
-                python=bool(arguments.get("python")),
-                quiet=bool(arguments.get("quiet", True)),
-            )
+            if name == "test_status":
+                text, ok = test_status()
+            else:
+                text, ok = build_and_test(
+                    config=arguments.get("config") or "Release",
+                    target=arguments.get("target") or "all",
+                    run=arguments.get("run") or "unit",
+                    python=bool(arguments.get("python")),
+                    quiet=bool(arguments.get("quiet", True)),
+                    wait=arguments.get("wait"),
+                )
         except Exception as exc:  # never take the server down
-            text, ok = f"build_and_test crashed: {exc!r}", False
+            text, ok = f"{name} crashed: {exc!r}", False
         _reply(
             request_id,
             {"content": [{"type": "text", "text": text}], "isError": not ok},
