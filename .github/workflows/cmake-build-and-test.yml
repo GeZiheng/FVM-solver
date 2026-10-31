@@ -70,6 +70,12 @@ jobs:
       with:
         python-version: '3.12'
 
+    # The pinned interpreter is bare; the binding tests and example scripts
+    # need numpy at runtime (pyfvm converts through the numpy C API).
+    - name: Install Python runtime dependencies
+      if: matrix.python
+      run: python -m pip install -r python/requirements.txt
+
     # Binary cache: stores the packages vcpkg built for vcpkg.json, so an
     # unchanged dependency set is downloaded instead of compiled again.
     # Keyed per OS because the archives are platform and compiler specific.

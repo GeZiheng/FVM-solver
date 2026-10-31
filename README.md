@@ -94,6 +94,8 @@ cmake --build build/release-py
 ctest --test-dir build/release-py --output-on-failure
 ```
 
+pyfvm 测试与算例脚本运行时依赖 numpy：`python -m pip install -r python/requirements.txt`。
+
 其中 application 算例精度回归可用标签单独运行：
 
 ```powershell

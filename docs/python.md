@@ -17,6 +17,8 @@ python/
 
 默认关闭，需要用 `-DFVM_BUILD_PYTHON=ON` 显式开启；完整的 configure/build/CTest 命令以 README.md 的“构建与测试”为 canonical 出处。
 
+测试与算例脚本的 Python 运行时依赖（目前仅 numpy）声明在 `python/requirements.txt`，CI 与本地共用该文件。
+
 机制要点：
 
 - **vcpkg feature**：`pybind11` 声明在 `vcpkg.json` 的 `"python"` feature 里；`-DFVM_BUILD_PYTHON=ON` 会在 `project()` 之前自动设置 `VCPKG_MANIFEST_FEATURES=python`，默认构建不拉取 pybind11。
