@@ -120,6 +120,11 @@ if(FVM_BUILD_PYTHON)
     add_test(NAME pyfvm_tests
         COMMAND ${Python_EXECUTABLE} -m unittest discover
                 -s ${CMAKE_CURRENT_SOURCE_DIR}/python/tests)
+    # _path.py only scans build/*/python (nested build trees); CI configures
+    # straight into build/, so point the test at the real output directory,
+    # exactly like the application tests below.
+    set_tests_properties(pyfvm_tests PROPERTIES
+        ENVIRONMENT "FVM_PYFVM_DIR=${CMAKE_BINARY_DIR}/python")
 
     # Application-level regression tests: full example cases with fixed
     # accuracy thresholds against analytical or benchmark references
