@@ -1,16 +1,17 @@
 #include "Piso.h"
 #include "Convection.h"
+#include "MeshQuality.h"
 #include "Momentum.h"
 #include "Pressure.h"
 
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 
 namespace fvm::numerical
 {
-
-PisoResult solvePiso(const CartesianMesh& mesh,
+PisoResult solvePiso(const Mesh& mesh,
     Scalar rho,
     Scalar mu,
     const BoundaryField& bcU,
@@ -36,13 +37,39 @@ PisoResult solvePiso(const CartesianMesh& mesh,
             "PISO loop reaches its own fixed point after one sweep and "
             "diverges (see docs/numerical.md)");
     }
+    if (config.corrections.nNonOrthogonalCorrectors < 0)
+    {
+        throw std::invalid_argument(
+            "solvePiso: nNonOrthogonalCorrectors must be non-negative");
+    }
+    const std::string meshWarning = meshQualityWarning(mesh);
+    if (!meshWarning.empty())
+    {
+        std::cerr << meshWarning;
+    }
 
     const Index nCells = mesh.cellCount();
+    // Mesh-independent reference length: sqrt(mean cell volume).  On a
+    // uniform Cartesian mesh with square cells this equals
+    // dx = dy = 0.5 * (dx + dy), the historical scale.
+    Scalar totalVolume = 0.0;
+    for (Index P = 0; P < nCells; ++P)
+    {
+        totalVolume += mesh.cellVolume(P);
+    }
+    const Scalar hRef = std::sqrt(totalVolume / static_cast<Scalar>(nCells));
 
     // Initialize the persistent flux from the velocity field and its BCs
     // (OpenFOAM createPhi), failing fast on a closed domain whose boundary
     // fluxes do not balance (OpenFOAM adjustPhi).
-    initializeMassFlux(mesh, velocity, rho, bcU, bcV, bcP, flux);
+    initializeMassFlux(mesh,
+        velocity,
+        rho,
+        bcU,
+        bcV,
+        bcP,
+        flux,
+        config.corrections);
 
     auto momSolver = fvm::math::createEigenBiCGSTAB(config.solverConfig);
     auto pSolver = fvm::math::createEigenCG(config.solverConfig);
@@ -51,8 +78,6 @@ PisoResult solvePiso(const CartesianMesh& mesh,
     time.rho = rho;
     time.dt = config.dt;
     time.scheme = config.timeScheme;
-
-    const Scalar hRef = 0.5 * (mesh.dx() + mesh.dy());
 
     PisoResult result;
     Scalar t = 0.0;
@@ -72,7 +97,8 @@ PisoResult solvePiso(const CartesianMesh& mesh,
             bcP,
             1.0,
             time,
-            *momSolver);
+            *momSolver,
+            config.corrections);
 
         // Several pressure correctors; correctPressure rebuilds the velocity
         // from the absolute pressure, so repeated calls accumulate.
@@ -100,7 +126,8 @@ PisoResult solvePiso(const CartesianMesh& mesh,
                 1.0,
                 velocity,
                 pressure,
-                flux);
+                flux,
+                config.corrections);
         }
 
         t += config.dt;

@@ -8,6 +8,9 @@ coverage, ASCII compliance, documentation impact, and consistency with the
 approved plan.  Cite concrete files and lines for every finding.  Separate
 blocking issues from suggestions.  Do not make final numerical-method decisions
 and do not edit files.
+Never call the MCP tools `build_and_test` or `run_case`: both write outside
+your read-only scope (the build directory, WSL case directories).  If your
+review needs them, state that in the report and let the parent run them.
 """
 model = "glm-5.3-flash"
 sandbox_mode = "read-only"

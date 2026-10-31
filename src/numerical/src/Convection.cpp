@@ -1,130 +1,156 @@
 #include "Convection.h"
+#include "GridOperators.h"
+#include "MeshGeomCache.h"
 
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace fvm::numerical
 {
+using fvm::core::MeshGeomCache;
+using fvm::core::Point2;
 
-namespace
-{
-
-// Fill the flux field: interior faces use the arithmetic mean of the
-// adjacent cell velocities, boundary faces the adjacent cell velocity.
-void interpolateVelocityIntoFlux(const CartesianMesh& mesh,
+FaceFluxField interpolateCellVelocityFlux(const Mesh& mesh,
     const VectorField& velocity,
     Scalar rho,
-    FaceFluxField& flux)
-{
-    const Index nx = mesh.nx();
-    const Index ny = mesh.ny();
-    const Scalar Sx = mesh.faceArea(BoundaryField::East);
-    const Scalar Sy = mesh.faceArea(BoundaryField::North);
-
-    for (Index j = 0; j < ny; ++j)
-    {
-        for (Index i = 0; i <= nx; ++i)
-        {
-            Scalar uf;
-            if (i == 0)
-                uf = velocity.u()(0, j);
-            else if (i == nx)
-                uf = velocity.u()(nx - 1, j);
-            else
-                uf = 0.5 * (velocity.u()(i - 1, j) + velocity.u()(i, j));
-            flux.x(i, j) = rho * uf * Sx;
-        }
-    }
-    for (Index j = 0; j <= ny; ++j)
-    {
-        for (Index i = 0; i < nx; ++i)
-        {
-            Scalar vf;
-            if (j == 0)
-                vf = velocity.v()(i, 0);
-            else if (j == ny)
-                vf = velocity.v()(i, ny - 1);
-            else
-                vf = 0.5 * (velocity.v()(i, j - 1) + velocity.v()(i, j));
-            flux.y(i, j) = rho * vf * Sy;
-        }
-    }
-}
-
-} // namespace
-
-FaceFluxField interpolateCellVelocityFlux(const CartesianMesh& mesh,
-    const VectorField& velocity,
-    Scalar rho)
+    const CorrectionOptions& corrections)
 {
     FaceFluxField flux(mesh, "phi");
-    interpolateVelocityIntoFlux(mesh, velocity, rho, flux);
+    const MeshGeomCache geometry(mesh);
+    const std::vector<Point2> uGradients
+        = corrections.skewInterpolation
+        ? leastSquaresGradients(mesh,
+            velocity.u(),
+            BoundaryField(mesh))
+        : std::vector<Point2>();
+    const std::vector<Point2> vGradients
+        = corrections.skewInterpolation
+        ? leastSquaresGradients(mesh,
+            velocity.v(),
+            BoundaryField(mesh))
+        : std::vector<Point2>();
+
+    for (Index face = 0; face < mesh.faceCount(); ++face)
+    {
+        const Point2 area = mesh.faceAreaVector(face);
+
+        if (mesh.isBoundaryFace(face))
+        {
+            const auto [u, v] = velocity(mesh.faceOwner(face));
+            flux[face] = rho * (u * area.x + v * area.y);
+        }
+        else
+        {
+            const Scalar g = geometry.interpWeight(face);
+            const Index owner = mesh.faceOwner(face);
+            const Index neighbour = mesh.faceNeighbour(face);
+            const auto [uOwner, vOwner] = velocity(owner);
+            const auto [uNeighbour, vNeighbour] = velocity(neighbour);
+            const Scalar uf = g * uOwner + (1.0 - g) * uNeighbour;
+            const Scalar vf = g * vOwner + (1.0 - g) * vNeighbour;
+            Scalar uFace = uf;
+            Scalar vFace = vf;
+            if (corrections.skewInterpolation)
+            {
+                const Point2 skew = geometry.skewVector(face);
+                const Point2 uFGrad{ g * uGradients[owner].x
+                        + (1.0 - g) * uGradients[neighbour].x,
+                    g * uGradients[owner].y
+                        + (1.0 - g) * uGradients[neighbour].y };
+                const Point2 vFGrad{ g * vGradients[owner].x
+                        + (1.0 - g) * vGradients[neighbour].x,
+                    g * vGradients[owner].y
+                        + (1.0 - g) * vGradients[neighbour].y };
+                uFace += uFGrad.x * skew.x + uFGrad.y * skew.y;
+                vFace += vFGrad.x * skew.x + vFGrad.y * skew.y;
+            }
+            flux[face] = rho * (uFace * area.x + vFace * area.y);
+        }
+    }
+
     return flux;
 }
 
-void computeMassFlux(const CartesianMesh& mesh,
+void computeMassFlux(const Mesh& mesh,
     const VectorField& velocity,
     Scalar rho,
     const BoundaryField& bcU,
     const BoundaryField& bcV,
-    FaceFluxField& flux)
+    FaceFluxField& flux,
+    const CorrectionOptions& corrections)
 {
-    interpolateVelocityIntoFlux(mesh, velocity, rho, flux);
-    const Index nx = mesh.nx();
-    const Index ny = mesh.ny();
-    const Scalar Sx = mesh.faceArea(BoundaryField::East);
-    const Scalar Sy = mesh.faceArea(BoundaryField::North);
+    const MeshGeomCache geometry(mesh);
+    const std::vector<Point2> uGradients
+        = corrections.skewInterpolation
+        ? leastSquaresGradients(mesh, velocity.u(), bcU)
+        : std::vector<Point2>();
+    const std::vector<Point2> vGradients
+        = corrections.skewInterpolation
+        ? leastSquaresGradients(mesh, velocity.v(), bcV)
+        : std::vector<Point2>();
 
-    // Boundary faces with a Dirichlet velocity BC take the prescribed
-    // value for the normal component.
-    const BoundaryCondition& west = bcU.get(BoundaryField::West);
-    const BoundaryCondition& east = bcU.get(BoundaryField::East);
-    if (west.type == BCType::Dirichlet || east.type == BCType::Dirichlet)
+    for (Index face = 0; face < mesh.faceCount(); ++face)
     {
-        for (Index j = 0; j < ny; ++j)
+        const Point2 area = mesh.faceAreaVector(face);
+        const Index owner = mesh.faceOwner(face);
+        Scalar uf;
+        Scalar vf;
+
+        if (mesh.isBoundaryFace(face))
         {
-            if (west.type == BCType::Dirichlet)
-                flux.x(0, j) = rho * west.value * Sx;
-            if (east.type == BCType::Dirichlet)
-                flux.x(nx, j) = rho * east.value * Sx;
+            const auto patch = mesh.facePatch(face);
+            const auto [uOwner, vOwner] = velocity(owner);
+
+            const BoundaryCondition& uCond = bcU.get(patch);
+            uf = (uCond.type == BCType::Dirichlet) ? uCond.value : uOwner;
+            const BoundaryCondition& vCond = bcV.get(patch);
+            vf = (vCond.type == BCType::Dirichlet) ? vCond.value : vOwner;
         }
-    }
-    const BoundaryCondition& south = bcV.get(BoundaryField::South);
-    const BoundaryCondition& north = bcV.get(BoundaryField::North);
-    if (south.type == BCType::Dirichlet || north.type == BCType::Dirichlet)
-    {
-        for (Index i = 0; i < nx; ++i)
+        else
         {
-            if (south.type == BCType::Dirichlet)
-                flux.y(i, 0) = rho * south.value * Sy;
-            if (north.type == BCType::Dirichlet)
-                flux.y(i, ny) = rho * north.value * Sy;
+            const Scalar g = geometry.interpWeight(face);
+            const Index neighbour = mesh.faceNeighbour(face);
+            const auto [uOwner, vOwner] = velocity(owner);
+            const auto [uNeighbour, vNeighbour] = velocity(neighbour);
+            uf = g * uOwner + (1.0 - g) * uNeighbour;
+            vf = g * vOwner + (1.0 - g) * vNeighbour;
+
+            if (corrections.skewInterpolation)
+            {
+                const Point2 skew = geometry.skewVector(face);
+                const Point2 uFGrad{ g * uGradients[owner].x
+                        + (1.0 - g) * uGradients[neighbour].x,
+                    g * uGradients[owner].y
+                        + (1.0 - g) * uGradients[neighbour].y };
+                const Point2 vFGrad{ g * vGradients[owner].x
+                        + (1.0 - g) * vGradients[neighbour].x,
+                    g * vGradients[owner].y
+                        + (1.0 - g) * vGradients[neighbour].y };
+                uf += uFGrad.x * skew.x + uFGrad.y * skew.y;
+                vf += vFGrad.x * skew.x + vFGrad.y * skew.y;
+            }
         }
+
+        flux[face] = rho * (uf * area.x + vf * area.y);
     }
 }
 
 void checkFluxCompatibility(const FaceFluxField& flux, Scalar relTol)
 {
-    const CartesianMesh& mesh = flux.mesh();
-    const Index nx = mesh.nx();
-    const Index ny = mesh.ny();
-
+    const Mesh& mesh = flux.mesh();
     Scalar net = 0.0;
     Scalar scale = 0.0;
-    for (Index j = 0; j < ny; ++j)
+
+    for (Index face = 0; face < mesh.faceCount(); ++face)
     {
-        const Scalar wOut = -flux.x(0, j);
-        const Scalar eOut = flux.x(nx, j);
-        net += wOut + eOut;
-        scale += std::abs(wOut) + std::abs(eOut);
-    }
-    for (Index i = 0; i < nx; ++i)
-    {
-        const Scalar sOut = -flux.y(i, 0);
-        const Scalar nOut = flux.y(i, ny);
-        net += sOut + nOut;
-        scale += std::abs(sOut) + std::abs(nOut);
+        if (!mesh.isBoundaryFace(face))
+            continue;
+
+        const Scalar outward = flux[face];
+        net += outward;
+        scale += std::abs(outward);
     }
 
     if (std::abs(net) > relTol * scale)
@@ -136,29 +162,30 @@ void checkFluxCompatibility(const FaceFluxField& flux, Scalar relTol)
             + std::to_string(scale)
             + "); the pressure-correction equation is incompatible. "
               "Check that the velocity boundary conditions balance "
-              "(e.g. inlet flux = outlet flux).");
+            + "(e.g. inlet flux = outlet flux).");
     }
 }
 
 bool hasDirichletPressure(const BoundaryField& bcP)
 {
-    for (int side = 0; side < 4; ++side)
+    for (Index patch = 0; patch < bcP.patchCount(); ++patch)
     {
-        if (bcP.get(side).type == BCType::Dirichlet)
+        if (bcP.get(patch).type == BCType::Dirichlet)
             return true;
     }
     return false;
 }
 
-void initializeMassFlux(const CartesianMesh& mesh,
+void initializeMassFlux(const Mesh& mesh,
     const VectorField& velocity,
     Scalar rho,
     const BoundaryField& bcU,
     const BoundaryField& bcV,
     const BoundaryField& bcP,
-    FaceFluxField& flux)
+    FaceFluxField& flux,
+    const CorrectionOptions& corrections)
 {
-    computeMassFlux(mesh, velocity, rho, bcU, bcV, flux);
+    computeMassFlux(mesh, velocity, rho, bcU, bcV, flux, corrections);
 
     // Pure-Neumann p is only compatible when the boundary fluxes balance;
     // catch unbalanced velocity BCs here instead of solving an inconsistent
@@ -167,78 +194,82 @@ void initializeMassFlux(const CartesianMesh& mesh,
         checkFluxCompatibility(flux);
 }
 
-void assembleConvection(const CartesianMesh& mesh,
+void assembleConvection(const Mesh& mesh,
     const FaceFluxField& flux,
     ConvectionScheme scheme,
     const BoundaryField& bc,
     SparseMatrix& A,
-    Vector& b)
+    Vector& b,
+    const ScalarField* explicitPhi,
+    const CorrectionOptions& corrections)
 {
-    const Index nCells = mesh.cellCount();
+    const MeshGeomCache geometry(mesh);
+    const bool applySkew = explicitPhi != nullptr
+        && corrections.skewInterpolation
+        && scheme == ConvectionScheme::Central;
+    const std::vector<Point2> gradients = applySkew
+        ? leastSquaresGradients(mesh, *explicitPhi, bc)
+        : std::vector<Point2>();
 
-    for (Index P = 0; P < nCells; ++P)
+    for (Index face = 0; face < mesh.faceCount(); ++face)
     {
-        const auto [iP, jP] = mesh.cellIJ(P);
-        for (int face = 0; face < 4; ++face)
+        const Index owner = mesh.faceOwner(face);
+        const Scalar F = flux[face];
+
+        if (!mesh.isBoundaryFace(face))
         {
-            const Index N = mesh.neighbor(P, face);
+            const Index neighbour = mesh.faceNeighbour(face);
+            const Scalar g = geometry.interpWeight(face);
 
-            if (N != nCells)
+            if (scheme == ConvectionScheme::Upwind)
             {
-                // Interior face: process only east/north to avoid double
-                // counting. F is positive from P to N (stored convention).
-                if (face != BoundaryField::East && face != BoundaryField::North)
-                    continue;
-
-                const Scalar F = (face == BoundaryField::East)
-                                     ? flux.x(iP + 1, jP)
-                                     : flux.y(iP, jP + 1);
-
-                if (scheme == ConvectionScheme::Upwind)
-                {
-                    if (F > 0.0)
-                    { // flow P -> N: face value = phi_P
-                        A.insert(P, P, F);
-                        A.insert(N, P, -F);
-                    }
-                    else
-                    { // flow N -> P: face value = phi_N
-                        A.insert(N, N, -F);
-                        A.insert(P, N, F);
-                    }
+                if (F >= 0.0)
+                { // flow owner -> neighbour: face value = phi_owner
+                    A.insert(owner, owner, F);
+                    A.insert(neighbour, owner, -F);
                 }
                 else
-                { // Central: face value = 0.5 * (phi_P + phi_N)
-                    const Scalar h = 0.5 * F;
-                    A.insert(P, P, h);
-                    A.insert(P, N, h);
-                    A.insert(N, P, -h);
-                    A.insert(N, N, -h);
+                { // flow neighbour -> owner: face value = phi_neighbour
+                    A.insert(owner, neighbour, F);
+                    A.insert(neighbour, neighbour, -F);
                 }
             }
             else
-            {
-                // Boundary face: outward flux from the field.
-                const Scalar Fb = flux.outwardFlux(P, face);
+            { // Central: face value = g*phi_o + (1-g)*phi_n
+                A.insert(owner, owner, F * g);
+                A.insert(owner, neighbour, F * (1.0 - g));
+                A.insert(neighbour, owner, -F * g);
+                A.insert(neighbour, neighbour, -F * (1.0 - g));
 
-                if (Fb > 0.0)
+                if (applySkew)
                 {
-                    // Outflow: extrapolate cell value (upwind).
-                    A.insert(P, P, Fb);
+                    const Point2 skew = geometry.skewVector(face);
+                    const Point2 gradF{ g * gradients[owner].x
+                            + (1.0 - g) * gradients[neighbour].x,
+                        g * gradients[owner].y
+                            + (1.0 - g) * gradients[neighbour].y };
+                    const Scalar correction
+                        = gradF.x * skew.x + gradF.y * skew.y;
+                    b(owner) -= F * correction;
+                    b(neighbour) += F * correction;
                 }
-                else
-                {
-                    // Inflow.
-                    const BoundaryCondition& cond = bc.get(face);
-                    if (cond.type == BCType::Dirichlet)
-                    {
-                        b(P) -= Fb * cond.value; // known incoming flux -> RHS
-                    }
-                    else
-                    {
-                        A.insert(P, P, Fb); // zero-gradient: phi_face = phi_P
-                    }
-                }
+            }
+        }
+        else if (F >= 0.0)
+        {
+            // Outflow: extrapolate the owner value (upwind).
+            A.insert(owner, owner, F);
+        }
+        else
+        {
+            const BoundaryCondition& cond = bc.get(mesh.facePatch(face));
+            if (cond.type == BCType::Dirichlet)
+            {
+                b(owner) -= F * cond.value; // known incoming flux -> RHS
+            }
+            else
+            {
+                A.insert(owner, owner, F); // zero-gradient: phi_face = phi_P
             }
         }
     }

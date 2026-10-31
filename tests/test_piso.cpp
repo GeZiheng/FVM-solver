@@ -1,9 +1,12 @@
 #include "Field.h"
 #include "FluxField.h"
-#include "Mesh.h"
+#include "CartesianMesh.h"
+#include "ObliqueMeshFixtures.h"
 #include "Piso.h"
+#include "UnstructuredMesh.h"
 #include <cmath>
 #include <doctest/doctest.h>
+#include <utility>
 
 using namespace fvm::core;
 using namespace fvm::numerical;
@@ -12,6 +15,49 @@ namespace
 {
 
 constexpr Scalar kPi = 3.14159265358979323846;
+
+void setShearedChannelBCs(const Mesh& mesh,
+    BoundaryField& bcU,
+    BoundaryField& bcV,
+    BoundaryField& bcP)
+{
+    for (Index patch = 0; patch < mesh.patchCount(); ++patch)
+    {
+        const Index face = mesh.patchFaces(patch)[0];
+        const Point2 centroid = mesh.faceCentroid(face);
+        if (centroid.x < 1.0e-9)
+        {
+            bcU.set(patch, BCType::Dirichlet, 1.0);
+            bcV.set(patch, BCType::Dirichlet, 0.0);
+            bcP.set(patch, BCType::Neumann, 0.0);
+        }
+        else if (centroid.x > 1.0 - 1.0e-9)
+        {
+            bcU.set(patch, BCType::Neumann, 0.0);
+            bcV.set(patch, BCType::Dirichlet, 0.0);
+            bcP.set(patch, BCType::Dirichlet, 0.0);
+        }
+        else
+        {
+            bcU.set(patch, BCType::Dirichlet, 0.0);
+            bcV.set(patch, BCType::Dirichlet, 0.0);
+            bcP.set(patch, BCType::Neumann, 0.0);
+        }
+    }
+}
+
+Scalar netBoundaryFlux(const Mesh& mesh, const FaceFluxField& flux)
+{
+    Scalar net = 0.0;
+    for (Index patch = 0; patch < mesh.patchCount(); ++patch)
+    {
+        for (const Index face : mesh.patchFaces(patch))
+        {
+            net += flux[face];
+        }
+    }
+    return net;
+}
 
 // Exact solution of the impulsive start of Couette flow between y = 0
 // (fixed) and y = 1 (moving with u = 1), no-slip walls, u(y, 0) = 0:
@@ -30,6 +76,114 @@ Scalar exactCouette(Scalar y, Scalar t, Scalar nu)
 
 } // namespace
 
+TEST_CASE("PISO single step on sheared mesh")
+{
+    for (const NonOrthSplit split : { NonOrthSplit::MinimumCorrection,
+             NonOrthSplit::OverRelaxed })
+    {
+        const UnstructuredMesh mesh(makeShearedTriMesh(4));
+        const Mesh& base = mesh;
+
+        BoundaryField bcU(base);
+        BoundaryField bcV(base);
+        BoundaryField bcP(base);
+        setShearedChannelBCs(base, bcU, bcV, bcP);
+
+        VectorField velocity(base, "velocity");
+        ScalarField pressure(base, "pressure");
+        FaceFluxField flux(base, "flux");
+
+        PisoConfig config;
+        config.dt = 0.01;
+        config.nSteps = 1;
+        config.nCorrectors = 2;
+        config.scheme = ConvectionScheme::Upwind;
+        config.corrections.nonOrthSplit = split;
+        config.solverConfig.tolerance = 1.0e-11;
+        config.solverConfig.maxIterations = 10000;
+
+        const PisoResult result = solvePiso(base,
+            1.0,
+            0.01,
+            bcU,
+            bcV,
+            bcP,
+            config,
+            velocity,
+            pressure,
+            flux);
+
+        REQUIRE(result.history.size() == 1);
+        CHECK(result.history[0].continuity <= 1.0e-8);
+        CHECK(std::abs(netBoundaryFlux(base, flux)) <= 1.0e-8);
+    }
+}
+
+TEST_CASE("PISO non-orthogonal correctors are zero on Cartesian meshes")
+{
+    auto run = [](CorrectionOptions corrections)
+    {
+        CartesianMesh mesh(12, 10, 0.0, 0.0, 1.0, 1.0);
+        BoundaryField bcU(mesh);
+        BoundaryField bcV(mesh);
+        BoundaryField bcP(mesh);
+        setShearedChannelBCs(mesh, bcU, bcV, bcP);
+
+        VectorField velocity(mesh, "velocity");
+        ScalarField pressure(mesh, "pressure");
+        FaceFluxField flux(mesh, "flux");
+
+        PisoConfig config;
+        config.dt = 0.01;
+        config.nSteps = 1;
+        config.nCorrectors = 2;
+        config.corrections = corrections;
+        config.solverConfig.tolerance = 1.0e-11;
+        config.solverConfig.maxIterations = 10000;
+        solvePiso(mesh,
+            1.0,
+            0.01,
+            bcU,
+            bcV,
+            bcP,
+            config,
+            velocity,
+            pressure,
+            flux);
+        return std::make_pair(velocity.u().data(), pressure.data());
+    };
+
+    CorrectionOptions noSubiterations;
+    noSubiterations.nNonOrthogonalCorrectors = 0;
+    CorrectionOptions twoSubiterations;
+    twoSubiterations.nNonOrthogonalCorrectors = 2;
+    CorrectionOptions overNoSubiterations = noSubiterations;
+    overNoSubiterations.nonOrthSplit = NonOrthSplit::OverRelaxed;
+    CorrectionOptions overTwoSubiterations = twoSubiterations;
+    overTwoSubiterations.nonOrthSplit = NonOrthSplit::OverRelaxed;
+
+    const auto reference = run(noSubiterations);
+    const auto corrected = run(twoSubiterations);
+    const auto overReference = run(overNoSubiterations);
+    const auto overCorrected = run(overTwoSubiterations);
+    CHECK((corrected.first - reference.first).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+    CHECK((corrected.second - reference.second).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+    CHECK((overCorrected.first - overReference.first)
+        .lpNorm<Eigen::Infinity>() <= 1.0e-12);
+    CHECK((overCorrected.second - overReference.second)
+        .lpNorm<Eigen::Infinity>() <= 1.0e-12);
+    CHECK((overReference.first - reference.first).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+    CHECK((overReference.second - reference.second)
+        .lpNorm<Eigen::Infinity>() <= 1.0e-12);
+    CHECK((overCorrected.first - corrected.first).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+    CHECK((overCorrected.second - corrected.second)
+        .lpNorm<Eigen::Infinity>() <= 1.0e-12);
+}
+
 TEST_CASE("PISO: impulsive Couette start matches the exact series")
 {
     // The flow is x-independent (zero-gradient side walls), so the exact
@@ -41,17 +195,17 @@ TEST_CASE("PISO: impulsive Couette start matches the exact series")
     const Scalar mu = 0.1; // nu = mu / rho = 0.1
     const Scalar nu = mu / rho;
 
-    BoundaryField bcU; // top lid drives; west/east zero-gradient (default)
+    BoundaryField bcU(mesh); // top lid drives; west/east zero-gradient (default)
     bcU.set(BoundaryField::North, BCType::Dirichlet, 1.0);
     bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcV; // no penetration on all sides
+    BoundaryField bcV(mesh); // no penetration on all sides
     bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcP; // zero-gradient everywhere (closed domain)
+    BoundaryField bcP(mesh); // zero-gradient everywhere (closed domain)
 
     VectorField velocity(mesh, "u");
     ScalarField pressure(mesh, "p");
@@ -104,7 +258,7 @@ TEST_CASE("PISO: impulsive Couette start matches the exact series")
     // The profile is bracketed by the wall speeds.
     for (Index j = 0; j < n; ++j)
     {
-        const Scalar u = velocity.u()(0, j);
+        const Scalar u = velocity.u()(mesh.cellIndex(0, j));
         CHECK(u >= -1e-6);
         CHECK(u <= 1.0 + 1e-6);
     }
@@ -119,15 +273,15 @@ TEST_CASE("PISO: transient pressure-driven channel reaches Poiseuille flow")
     const Scalar rho = 1.0;
     const Scalar mu = 1.0;
 
-    BoundaryField bcU; // west/east zero-gradient (default)
+    BoundaryField bcU(mesh); // west/east zero-gradient (default)
     bcU.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcV;
+    BoundaryField bcV(mesh);
     bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcP;
+    BoundaryField bcP(mesh);
     bcP.set(BoundaryField::West, BCType::Dirichlet, 1.0);
     bcP.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 

@@ -1,9 +1,10 @@
 #include "Convection.h"
 #include "Field.h"
 #include "FluxField.h"
-#include "Mesh.h"
+#include "CartesianMesh.h"
 #include "Simple.h"
 #include "SparseMatrix.h"
+
 #include <cmath>
 #include <doctest/doctest.h>
 
@@ -16,18 +17,17 @@ TEST_CASE("FluxField: face counts and indexing on a 3x2 mesh")
     CartesianMesh mesh(3, 2, 0.0, 0.0, 3.0, 2.0);
     FaceFluxField flux(mesh, "phi");
 
-    CHECK(flux.xFaceCount() == 4 * 2);
-    CHECK(flux.yFaceCount() == 3 * 3);
+    CHECK(flux.faceCount() == mesh.faceCount());
 
     // Distinct (i, j) faces map to distinct storage entries.
-    flux.x(0, 0) = 1.0;
-    flux.x(3, 1) = 2.0;
-    flux.y(0, 0) = 3.0;
-    flux.y(2, 2) = 4.0;
-    CHECK(flux.x(0, 0) == 1.0);
-    CHECK(flux.x(3, 1) == 2.0);
-    CHECK(flux.y(0, 0) == 3.0);
-    CHECK(flux.y(2, 2) == 4.0);
+    flux[mesh.xFace(0, 0)] = 1.0;
+    flux[mesh.xFace(3, 1)] = 2.0;
+    flux[mesh.yFace(0, 0)] = 3.0;
+    flux[mesh.yFace(2, 2)] = 4.0;
+    CHECK(flux[mesh.xFace(0, 0)] == 1.0);
+    CHECK(flux[mesh.xFace(3, 1)] == 2.0);
+    CHECK(flux[mesh.yFace(0, 0)] == 3.0);
+    CHECK(flux[mesh.yFace(2, 2)] == 4.0);
 }
 
 TEST_CASE(
@@ -39,16 +39,19 @@ TEST_CASE(
 
     // Interior cell (1, 0): east +x(2,0), west -x(1,0),
     //                       north +y(1,1), south -y(1,0).
+    // Interior faces store the owner->neighbour flux; the south boundary
+    // face stores the owner-outward flux directly (negative here = inflow).
     const Index cell = mesh.cellIndex(1, 0);
-    flux.x(2, 0) = 10.0;
-    flux.x(1, 0) = 20.0;
-    flux.y(1, 1) = 30.0;
-    flux.y(1, 0) = 40.0;
+    const IndexSpan faces = mesh.cellFaces(cell);
+    flux[mesh.xFace(2, 0)] = 10.0;
+    flux[mesh.xFace(1, 0)] = 20.0;
+    flux[mesh.yFace(1, 1)] = 30.0;
+    flux[mesh.yFace(1, 0)] = -40.0;
 
-    CHECK(flux.outwardFlux(cell, 0) == doctest::Approx(10.0));  // east
-    CHECK(flux.outwardFlux(cell, 1) == doctest::Approx(30.0));  // north
-    CHECK(flux.outwardFlux(cell, 2) == doctest::Approx(-20.0)); // west
-    CHECK(flux.outwardFlux(cell, 3) == doctest::Approx(-40.0)); // south
+    CHECK(flux.outwardFlux(cell, faces[0]) == doctest::Approx(10.0));  // east
+    CHECK(flux.outwardFlux(cell, faces[1]) == doctest::Approx(30.0));  // north
+    CHECK(flux.outwardFlux(cell, faces[2]) == doctest::Approx(-20.0)); // west
+    CHECK(flux.outwardFlux(cell, faces[3]) == doctest::Approx(-40.0)); // south
 }
 
 TEST_CASE("FluxField: cellImbalance sums the signed outward fluxes")
@@ -57,17 +60,17 @@ TEST_CASE("FluxField: cellImbalance sums the signed outward fluxes")
     FaceFluxField flux(mesh, "phi");
 
     // Interior cell (1, 1): inflow 2 from west, 3 from south,
-    // outflow 4 east, 1 north -> imbalance = 4 - (-2) ... computed as
+    // outflow 4 east, 1 north, computed as
     // x(2,1) - x(1,1) + y(1,2) - y(1,1) = 4 - 2 + 1 - 3 = 0.
-    flux.x(1, 1) = 2.0; // west face: +x flux INTO the cell
-    flux.x(2, 1) = 4.0; // east face: outflow
-    flux.y(1, 1) = 3.0; // south face: +y flux INTO the cell
-    flux.y(1, 2) = 1.0; // north face: outflow
+    flux[mesh.xFace(1, 1)] = 2.0;  // west face: cell sees -2 (inflow)
+    flux[mesh.xFace(2, 1)] = 4.0;  // east face: outflow
+    flux[mesh.yFace(1, 1)] = 3.0;  // south face: cell sees -3 (inflow)
+    flux[mesh.yFace(1, 2)] = 1.0;  // north face: outflow
 
     const Index cell = mesh.cellIndex(1, 1);
     CHECK(flux.cellImbalance(cell) == doctest::Approx(0.0));
 
-    flux.y(1, 2) = 2.0; // one extra unit out -> imbalance 1
+    flux[mesh.yFace(1, 2)] = 2.0; // one extra unit out -> imbalance 1
     CHECK(flux.cellImbalance(cell) == doctest::Approx(1.0));
 }
 
@@ -85,9 +88,9 @@ TEST_CASE(
         velocity.v()(c) = -2.0 + 0.2 * c;
     }
 
-    BoundaryField bcU; // west Dirichlet, rest zero-gradient
+    BoundaryField bcU(mesh); // west Dirichlet, rest zero-gradient
     bcU.set(BoundaryField::West, BCType::Dirichlet, 7.0);
-    BoundaryField bcV; // north Dirichlet
+    BoundaryField bcV(mesh); // north Dirichlet
     bcV.set(BoundaryField::North, BCType::Dirichlet, -5.0);
 
     FaceFluxField flux(mesh, "phi");
@@ -98,30 +101,32 @@ TEST_CASE(
     // Interior x-face between cells (1,1) and (2,1): arithmetic mean.
     const Index c11 = mesh.cellIndex(1, 1);
     const Index c21 = mesh.cellIndex(2, 1);
-    CHECK(flux.x(2, 1)
+    CHECK(flux[mesh.xFace(2, 1)]
           == doctest::Approx(rho * 0.5 * (velocity.u()(c11) + velocity.u()(c21))
                              * dy));
 
     // West boundary: Dirichlet value everywhere.
     for (Index j = 0; j < mesh.ny(); ++j)
     {
-        CHECK(flux.x(0, j) == doctest::Approx(rho * 7.0 * dy));
+        CHECK(flux[mesh.xFace(0, j)] == doctest::Approx(-rho * 7.0 * dy));
     }
     // East boundary: zero-gradient -> adjacent cell velocity.
     for (Index j = 0; j < mesh.ny(); ++j)
     {
-        CHECK(flux.x(mesh.nx(), j)
-              == doctest::Approx(rho * velocity.u()(mesh.nx() - 1, j) * dy));
+        CHECK(flux[mesh.xFace(mesh.nx(), j)]
+              == doctest::Approx(rho * velocity.u()(mesh.cellIndex(mesh.nx() - 1, j)) * dy));
     }
     // North boundary: Dirichlet v.
     for (Index i = 0; i < mesh.nx(); ++i)
     {
-        CHECK(flux.y(i, mesh.ny()) == doctest::Approx(rho * -5.0 * dx));
+        CHECK(flux[mesh.yFace(i, mesh.ny())] == doctest::Approx(rho * -5.0 * dx));
     }
     // South boundary: zero-gradient -> adjacent cell velocity.
     for (Index i = 0; i < mesh.nx(); ++i)
     {
-        CHECK(flux.y(i, 0) == doctest::Approx(rho * velocity.v()(i, 0) * dx));
+        CHECK(flux[mesh.yFace(i, 0)]
+              == doctest::Approx(
+                  -rho * velocity.v()(mesh.cellIndex(i, 0)) * dx));
     }
 }
 
@@ -134,9 +139,9 @@ TEST_CASE(
     // all boundary fluxes are zero (no boundary contributions).
     CartesianMesh mesh(2, 1, 0.0, 0.0, 2.0, 1.0);
     FaceFluxField flux(mesh, "phi");
-    flux.x(1, 0) = 2.0;
+    flux[mesh.xFace(1, 0)] = 2.0;
 
-    BoundaryField bc;
+    BoundaryField bc(mesh);
     const Index n = mesh.cellCount();
 
     {
@@ -175,17 +180,17 @@ TEST_CASE(
     const Index n = 8;
     CartesianMesh mesh(n, n, 0.0, 0.0, 1.0, 1.0);
 
-    BoundaryField bcU;
+    BoundaryField bcU(mesh);
     bcU.set(BoundaryField::North, BCType::Dirichlet, 1.0);
     bcU.set(BoundaryField::East, BCType::Dirichlet, 0.0);
     bcU.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
-    BoundaryField bcV;
+    BoundaryField bcV(mesh);
     bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::East, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
-    BoundaryField bcP; // zero-gradient everywhere (pure Neumann)
+    BoundaryField bcP(mesh); // zero-gradient everywhere (pure Neumann)
 
     VectorField velocity(mesh, "u");
     ScalarField pressure(mesh, "p");
@@ -220,12 +225,12 @@ TEST_CASE(
 
     for (Index j = 0; j < mesh.ny(); ++j)
     {
-        CHECK(std::abs(flux.x(0, j)) == doctest::Approx(0.0).epsilon(1e-15));
-        CHECK(std::abs(flux.x(n, j)) == doctest::Approx(0.0).epsilon(1e-15));
+        CHECK(std::abs(flux[mesh.xFace(0, j)]) == doctest::Approx(0.0).epsilon(1e-15));
+        CHECK(std::abs(flux[mesh.xFace(n, j)]) == doctest::Approx(0.0).epsilon(1e-15));
     }
     for (Index i = 0; i < mesh.nx(); ++i)
     {
-        CHECK(std::abs(flux.y(i, 0)) == doctest::Approx(0.0).epsilon(1e-15));
-        CHECK(std::abs(flux.y(i, n)) == doctest::Approx(0.0).epsilon(1e-15));
+        CHECK(std::abs(flux[mesh.yFace(i, 0)]) == doctest::Approx(0.0).epsilon(1e-15));
+        CHECK(std::abs(flux[mesh.yFace(i, n)]) == doctest::Approx(0.0).epsilon(1e-15));
     }
 }

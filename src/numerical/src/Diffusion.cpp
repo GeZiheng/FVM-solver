@@ -1,76 +1,79 @@
 #include "Diffusion.h"
+#include "GridOperators.h"
+#include "MeshGeomCache.h"
+
+#include <cmath>
+#include <vector>
 
 namespace fvm::numerical
 {
+using fvm::core::MeshGeomCache;
+using fvm::core::Point2;
 
-namespace
-{
-
-// Handle a boundary face of cell P on the given side.
-void applyBoundaryFace(const CartesianMesh& mesh,
-    const ScalarField& gamma,
-    const BoundaryField& bc,
-    Index P,
-    int face,
-    SparseMatrix& A,
-    Vector& b)
-{
-    const BoundaryCondition& cond = bc.get(face);
-    const Scalar Sf = mesh.faceArea(face);
-    const Scalar gP = gamma(P);
-
-    if (cond.type == BCType::Dirichlet)
-    {
-        // Diffusive flux through boundary face: D_b * (phi_P - phi_b)
-        const Scalar Db = gP * Sf / mesh.cellToFaceDistance(face);
-        A.insert(P, P, Db);
-        b(P) += Db * cond.value;
-    }
-    else
-    {
-        // Neumann: -gamma * d(phi)/dn * S_f is a known flux -> move to RHS.
-        // cond.value is the outward-normal derivative g.
-        b(P) += gP * cond.value * Sf;
-    }
-}
-
-} // namespace
-
-void assembleDiffusion(const CartesianMesh& mesh,
+void assembleDiffusion(const Mesh& mesh,
     const ScalarField& gamma,
     const BoundaryField& bc,
     SparseMatrix& A,
-    Vector& b)
+    Vector& b,
+    const ScalarField* explicitPhi,
+    const CorrectionOptions& corrections)
 {
-    const Index nCells = mesh.cellCount();
+    const MeshGeomCache geometry(mesh);
+    const bool applyCrossDiffusion
+        = explicitPhi != nullptr && corrections.nonOrthogonalDiffusion;
+    const std::vector<Point2> gradients = applyCrossDiffusion
+        ? leastSquaresGradients(mesh, *explicitPhi, bc)
+        : std::vector<Point2>();
 
-    for (Index P = 0; P < nCells; ++P)
+    for (Index face = 0; face < mesh.faceCount(); ++face)
     {
-        for (int face = 0; face < 4; ++face)
+        const Index owner = mesh.faceOwner(face);
+
+        if (!mesh.isBoundaryFace(face))
         {
-            const Index N = mesh.neighbor(P, face);
+            const Index neighbour = mesh.faceNeighbour(face);
+            const Scalar gammaF = 0.5 * (gamma(owner) + gamma(neighbour));
+            const Scalar alpha = geometry.innerCoef(face, corrections.nonOrthSplit);
+            const Scalar diffusion = gammaF * alpha;
 
-            if (N != nCells)
+            A.insert(owner, owner, diffusion);
+            A.insert(neighbour, neighbour, diffusion);
+            A.insert(owner, neighbour, -diffusion);
+            A.insert(neighbour, owner, -diffusion);
+
+            if (applyCrossDiffusion)
             {
-                // Interior face: process only east/north to avoid double
-                // counting.
-                if (face != BoundaryField::East && face != BoundaryField::North)
-                    continue;
+                const Scalar g = geometry.interpWeight(face);
+                const Point2 gradF{ g * gradients[owner].x
+                        + (1.0 - g) * gradients[neighbour].x,
+                    g * gradients[owner].y
+                        + (1.0 - g) * gradients[neighbour].y };
+                const Point2 correction
+                    = geometry.nonOrthCorrection(face, corrections.nonOrthSplit);
+                const Scalar crossDiffusion = gammaF
+                    * (correction.x * gradF.x + correction.y * gradF.y);
 
-                const Scalar gf = 0.5 * (gamma(P) + gamma(N));
-                const Scalar Df = gf * mesh.faceArea(face)
-                                  / mesh.cellToCellDistance(P, face);
+                b(owner) += crossDiffusion;
+                b(neighbour) -= crossDiffusion;
+            }
+        }
+        else
+        {
+            const BoundaryCondition& cond = bc.get(mesh.facePatch(face));
 
-                A.insert(P, P, Df);
-                A.insert(N, N, Df);
-                A.insert(P, N, -Df);
-                A.insert(N, P, -Df);
+            if (cond.type == BCType::Dirichlet)
+            {
+                const Scalar diffusion
+                    = gamma(owner) * geometry.boundaryCoef(face);
+                A.insert(owner, owner, diffusion);
+                b(owner) += diffusion * cond.value;
             }
             else
             {
-                // Boundary face (west/south handled here since they are not
-                // reached from any other cell).
-                applyBoundaryFace(mesh, gamma, bc, P, face, A, b);
+                const Point2 area = mesh.faceAreaVector(face);
+                const Scalar faceArea
+                    = std::sqrt(area.x * area.x + area.y * area.y);
+                b(owner) += gamma(owner) * cond.value * faceArea;
             }
         }
     }

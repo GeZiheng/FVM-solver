@@ -10,6 +10,9 @@ evidence, dependencies, and any uncertainty.  Do not return raw file dumps.
 
 Never edit files or run builds or tests unless the orchestrating parent
 explicitly asks for a read-only diagnostic command.
+Never call the MCP tools `build_and_test` or `run_case`: both write outside
+your read-only scope (the build directory, WSL case directories).  If a
+finding needs them, say so in your report and let the parent run them.
 """
 model = "glm-5.3-flash"
 sandbox_mode = "read-only"

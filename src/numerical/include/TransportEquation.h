@@ -2,6 +2,7 @@
 
 #include "BoundaryCondition.h"
 #include "Convection.h"
+#include "CorrectionOptions.h"
 #include "Diffusion.h"
 #include "Field.h"
 #include "Mesh.h"
@@ -11,8 +12,8 @@
 
 namespace fvm::numerical
 {
-using fvm::core::CartesianMesh;
 using fvm::core::Index;
+using fvm::core::Mesh;
 using fvm::core::Scalar;
 using fvm::core::ScalarField;
 using fvm::core::Vector;
@@ -40,13 +41,18 @@ struct EquationSystem
 ///
 /// Patankar source linearization: Sp must be <= 0 and goes to the diagonal
 /// implicitly; a positive Sp is rejected with an exception.
-EquationSystem assembleTransport(const CartesianMesh& mesh,
+///
+/// `explicitPhi` is the field frozen for deferred non-orthogonal diffusion;
+/// callers pass the latest iteration for Newton/Picard refreshes.
+EquationSystem assembleTransport(const Mesh& mesh,
     const FaceFluxField& flux,
     const ScalarField& gamma,
     ConvectionScheme scheme,
     const BoundaryField& bc,
     const ScalarField* Sc = nullptr,
-    const ScalarField* Sp = nullptr);
+    const ScalarField* Sp = nullptr,
+    const ScalarField* explicitPhi = nullptr,
+    const CorrectionOptions& corrections = {});
 
 /// Assemble one implicit theta-scheme time step of the scalar transport
 /// equation, reusing the steady assembly (A_sp, b_sp) and adding (V/dt) I:
@@ -54,7 +60,9 @@ EquationSystem assembleTransport(const CartesianMesh& mesh,
 ///       = (V/dt) phi^n - (1 - theta) A_sp phi^n + b_sp
 /// theta = 1 is backward Euler, theta = 1/2 Crank-Nicolson.  The convecting
 /// flux is frozen over the step, as are the source terms.
-EquationSystem assembleTransientTransport(const CartesianMesh& mesh,
+/// `explicitPhi` is likewise frozen: use the last iteration or previous time
+/// layer as appropriate to the caller.
+EquationSystem assembleTransientTransport(const Mesh& mesh,
     const FaceFluxField& flux,
     const ScalarField& gamma,
     ConvectionScheme scheme,
@@ -63,6 +71,8 @@ EquationSystem assembleTransientTransport(const CartesianMesh& mesh,
     Scalar dt,
     TimeScheme timeScheme,
     const ScalarField* Sc = nullptr,
-    const ScalarField* Sp = nullptr);
+    const ScalarField* Sp = nullptr,
+    const ScalarField* explicitPhi = nullptr,
+    const CorrectionOptions& corrections = {});
 
 } // namespace fvm::numerical

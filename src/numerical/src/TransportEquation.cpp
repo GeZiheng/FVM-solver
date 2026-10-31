@@ -1,30 +1,44 @@
 #include "TransportEquation.h"
+
 #include <stdexcept>
 
 namespace fvm::numerical
 {
 
-EquationSystem assembleTransport(const CartesianMesh& mesh,
+EquationSystem assembleTransport(const Mesh& mesh,
     const FaceFluxField& flux,
     const ScalarField& gamma,
     ConvectionScheme scheme,
     const BoundaryField& bc,
     const ScalarField* Sc,
-    const ScalarField* Sp)
+    const ScalarField* Sp,
+    const ScalarField* explicitPhi,
+    const CorrectionOptions& corrections)
 {
     EquationSystem sys(mesh.cellCount());
 
-    assembleDiffusion(mesh, gamma, bc, sys.A, sys.b);
-    assembleConvection(mesh, flux, scheme, bc, sys.A, sys.b);
+    assembleDiffusion(mesh,
+        gamma,
+        bc,
+        sys.A,
+        sys.b,
+        explicitPhi,
+        corrections);
+    assembleConvection(mesh,
+        flux,
+        scheme,
+        bc,
+        sys.A,
+        sys.b,
+        explicitPhi,
+        corrections);
 
     const Index nCells = mesh.cellCount();
-    const Scalar vol = mesh.cellVolume(0);
-
     if (Sc)
     {
         for (Index c = 0; c < nCells; ++c)
         {
-            sys.b(c) += (*Sc)(c)*vol;
+            sys.b(c) += (*Sc)(c)*mesh.cellVolume(c);
         }
     }
 
@@ -38,14 +52,14 @@ EquationSystem assembleTransport(const CartesianMesh& mesh,
                     "assembleTransport: Sp must be non-positive (Patankar "
                     "linearization)");
             }
-            sys.A.insert(c, c, -(*Sp)(c)*vol);
+            sys.A.insert(c, c, -(*Sp)(c)*mesh.cellVolume(c));
         }
     }
 
     return sys;
 }
 
-EquationSystem assembleTransientTransport(const CartesianMesh& mesh,
+EquationSystem assembleTransientTransport(const Mesh& mesh,
     const FaceFluxField& flux,
     const ScalarField& gamma,
     ConvectionScheme scheme,
@@ -54,24 +68,33 @@ EquationSystem assembleTransientTransport(const CartesianMesh& mesh,
     Scalar dt,
     TimeScheme timeScheme,
     const ScalarField* Sc,
-    const ScalarField* Sp)
+    const ScalarField* Sp,
+    const ScalarField* explicitPhi,
+    const CorrectionOptions& corrections)
 {
     if (dt <= 0.0)
     {
-        throw std::invalid_argument(
-            "assembleTransientTransport: dt must be positive");
+        throw std::
+            invalid_argument("assembleTransientTransport: dt must be positive");
     }
 
     const Index nCells = mesh.cellCount();
-    const Scalar vol = mesh.cellVolume(0);
     const Scalar theta = thetaOf(timeScheme);
     const Scalar invDt = 1.0 / dt;
 
     // Full spatial operator (unscaled), reused for the explicit part.
     EquationSystem sys
-        = assembleTransport(mesh, flux, gamma, scheme, bc, Sc, Sp);
+        = assembleTransport(mesh,
+            flux,
+            gamma,
+            scheme,
+            bc,
+            Sc,
+            Sp,
+            explicitPhi,
+            corrections);
 
-    SparseMatrix spatial = sys.A; // copy of the accumulated triplets
+    SparseMatrix spatial = sys.A;  // copy of the accumulated triplets
     const Vector bSpatial = sys.b; // full spatial right-hand side
     spatial.finalize();
     const Vector AphiOld = spatial.native() * phiOld.data();
@@ -80,12 +103,21 @@ EquationSystem assembleTransientTransport(const CartesianMesh& mesh,
     sys.A.scale(theta);
     for (Index c = 0; c < nCells; ++c)
     {
+        const Scalar vol = mesh.cellVolume(c);
         sys.A.insert(c, c, vol * invDt);
     }
 
     // Right-hand side:
     //   (V/dt) phi^n - (1 - theta) A_spatial phi^n + b_spatial.
-    sys.b = (vol * invDt) * phiOld.data() - (1.0 - theta) * AphiOld + bSpatial;
+    sys.b = bSpatial;
+    for (Index c = 0; c < nCells; ++c)
+    {
+        sys.b(c) += mesh.cellVolume(c) * invDt * phiOld(c);
+        if (theta < 1.0)
+        {
+            sys.b(c) -= (1.0 - theta) * AphiOld(c);
+        }
+    }
 
     return sys;
 }

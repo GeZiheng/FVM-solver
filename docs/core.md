@@ -1,80 +1,135 @@
 # core 模块说明
 
-`fvm::core` 命名空间，提供整个求解器的基础数据结构与几何描述：标量/索引类型别名、二维均匀笛卡尔网格、单元中心场。本模块不依赖其他 fvm 模块，是依赖关系的最底层。
+`fvm::core` 命名空间，提供求解器的基础数据结构与网格描述：抽象二维有限体积网格接口、结构化/非结构化两套实现、单元中心场与面通量场。本模块不依赖其他 fvm 模块，是依赖关系的最底层。
 
-## Types.h：类型别名
+## Types.h：基础类型
 
 ```cpp
 using Scalar = double;
 using Index  = std::size_t;
 using Vector = Eigen::VectorXd;
+
+struct Point2 { Scalar x; Scalar y; };       // 二维点/向量
+struct IndexSpan;                            // C++17 下的非拥有索引区间
 ```
 
-全项目统一使用 `fvm::core::Scalar` 表示浮点数、`Index` 表示网格索引、`Vector` 表示稠密向量（底层为 Eigen）。其他模块通过 `using` 声明引入这些别名，保证精度与索引类型可在一处全局切换。
+全项目统一使用 `fvm::core::Scalar` 表示浮点数、`Index` 表示网格索引、`Vector` 表示稠密向量。`IndexSpan` 只暴露 `begin/end/size/empty/operator[]`，用于 `cellFaces`、`patchFaces` 这类连续存储的只读视图。
+
+## Mesh：抽象网格接口
+
+`Mesh`（`include/Mesh.h`）是所有数值代码可见的唯一网格接口，描述面优先的二维 FVM 拓扑：
+
+| 接口 | 说明 |
+| ------ | ------ |
+| `cellCount()` / `faceCount()` | 单元数；内部面与边界面使用同一套全局面编号 |
+| `faceOwner(face)` / `faceNeighbour(face)` | 面的 owner/neighbour；边界面返回 `Mesh::kInvalidCell` |
+| `isBoundaryFace(face)` | 边界面判定 |
+| `cellFaces(cell)` | 单元相邻面列表（`IndexSpan`） |
+| `cellVolume(cell)` / `cellCentroid(cell)` | 单元体积与面积加权中心 |
+| `faceCentroid(face)` / `faceAreaVector(face)` | 面中心与面积向量 $\mathbf S_f$ |
+| `patchCount()` / `patchName(patch)` / `patchFaces(patch)` | 边界 patch 拓扑 |
+| `facePatch(face)` | 边界面所属 patch（仅边界面有效） |
+
+### 全局符号约定
+
+这些约定对所有实现一致，数值装配不得自行假设坐标方向：
+
+- $\mathbf S_f$ 相对 owner 向外；内部面因此从 owner 指向 neighbour；
+- `FaceFluxField` 的内部面通量 $\phi_f > 0$ 表示 owner → neighbour；
+- 边界面通量为 owner 的外法向通量，出流为正。
 
 ## CartesianMesh：二维均匀笛卡尔网格
 
 ### 设计思路
 
-- **均匀网格**：$\Delta x = (x_{max}-x_{min})/n_x$，$\Delta y = (y_{max}-y_{min})/n_y$ 全局恒定，因此单元体积、面面积、中心距等几何量无需逐单元存储，全部由 `dx_`、`dy_` 即时计算，内存开销为 O(1)。
-- **单元中心（cell-centered）**：未知量存储在单元中心，边界面上无网格点。这是有限体积法的标准布局，天然保证守恒性。
-- **行优先线性索引**：$\text{cell} = j \cdot n_x + i$（$i$ 沿 $x$ 方向，$j$ 沿 $y$ 方向）。线性索引是场数据存储和稀疏矩阵行号的基础。
-- **面索引约定**（全项目统一，边界条件、通量装配均依赖此约定）：
+- **继承 `Mesh`，保留结构化便捷层**：`nx/ny/dx/dy/bounds/cellIndex/cellIJ/cellCenter` 服务于测试与 Python 绑定；数值代码仍只应使用 `const Mesh&`。
+- **单元中心（cell-centered）**：未知量存储在单元中心，线性索引仍为 $\text{cell}=j n_x+i$。
+- **全局面编号**：
 
-  | face | 方向 | 外法向 |
-  |------|------|--------|
-  | 0 | east 东 | (+1, 0) |
-  | 1 | north 北 | (0, +1) |
-  | 2 | west 西 | (−1, 0) |
-  | 3 | south 南 | (0, −1) |
+  $$
+  x_f(i,j)=j (n_x+1)+i,\quad i\in[0,n_x],\ j\in[0,n_y);
+  $$
+  $$
+  y_f(i,j)=(n_x+1) n_y+j n_x+i,\quad i\in[0,n_x),\ j\in[0,n_y].
+  $$
 
-- **边界哨兵值**：`neighbor(cell, face)` 在面位于计算域边界时返回 `cellCount()`（越界索引）作为哨兵，`isBoundaryFace` 即据此判断。装配循环据此区分内部面与边界面。
+  总面数 $(n_x+1)n_y+n_x(n_y+1)$。内部面 owner 取西/南单元，owner → neighbour 为 $+x/+y$；边界面 owner 是唯一相邻单元。
+- **单元面顺序**：`cellFaces(cell)` 按 `[east, north, west, south]` 返回；旧局部罗盘查询接口（`neighbor`、`faceArea(int)`、`faceNormal`、`cellToCellDistance`、`cellToFaceDistance`、`isBoundaryFace(cell,int)`）已移除。
+- **patch 顺序**：名称与索引固定为 `east/north/west/south`，对应 $0/1/2/3$。
 
-### 关键函数
+构造函数校验 `nx`、`ny` 非零，否则抛 `std::invalid_argument`。
+
+### 结构化便捷接口
 
 | 函数 | 说明 / 公式 |
-|------|------------|
-| `cellCenter(i, j)` | 单元中心坐标：$x = x_{min} + (i + \tfrac{1}{2})\,\Delta x$，$y = y_{min} + (j + \tfrac{1}{2})\,\Delta y$ |
-| `cellIndex(i, j)` / `cellIJ(cell)` | 线性索引与 $(i, j)$ 互转：$\text{cell} = j\,n_x + i$；$i = \text{cell} \bmod n_x$，$j = \lfloor \text{cell} / n_x \rfloor$ |
-| `neighbor(cell, face)` | 越过指定面的邻居单元索引；边界面返回 `cellCount()`；非法 face 抛 `std::invalid_argument` |
-| `faceArea(face)` | 2D 中面面积即边长：东/西面为 `dy`，北/南面为 `dx` |
-| `cellToCellDistance(cell, face)` | 相邻单元中心距：东西向 `dx`，南北向 `dy` |
-| `cellToFaceDistance(face)` | 单元中心到面中心距离：`dx/2` 或 `dy/2` |
-| `cellVolume(cell)` | 单元体积：$\Delta x\, \Delta y$（构造时预计算为 `volume_`） |
+| ------ | ------------ |
+| `cellCenter(i, j)` | $x=x_{\min}+(i+\tfrac12)\Delta x,\ \ y=y_{\min}+(j+\tfrac12)\Delta y$ |
+| `cellIndex(i, j)` / `cellIJ(cell)` | $\text{cell}=j n_x+i$ 及其逆映射 |
+| `xFace(i, j)` / `yFace(i, j)` | 上述全局 x/y 面编号 |
+| `cellVolume(cell)` | $\Delta x \Delta y$ |
+| `xMin/yMin/xMax/yMax` | 计算域边界 |
 
-构造函数会校验 `nx`、`ny` 非零，否则抛 `std::invalid_argument`。
+## UnstructuredMesh：多边形非结构网格
+
+`UnstructuredMesh` 采用面优先存储，由 `MeshInput` 构造：
+
+```cpp
+struct MeshInput {
+    std::vector<Point2> points;
+    std::vector<std::vector<Index>> cells;   // 每个单元为顶点环
+    std::vector<PatchInput> patches;          // patch 由顶点对表示边
+};
+```
+
+构造过程：
+
+1. 顶点环按逆时针规范化；顺时针输入也被接受并自动反转；
+2. 按排序后的顶点对匹配边并建立面；owner 为首次遍历该边的单元，owner 的逆时针走向自动给出 owner 外向 $\mathbf S_f$；
+3. 预计算单元体积（shoelace）、面积加权单元中心、边中点面中心与 $\mathbf S_f=(\Delta y,-\Delta x)$；
+4. 建立 `cellFaces` / `patchFaces` 的 CSR 存储；
+5. 校验顶点范围、每单元至少 3 个顶点、正面积、流形且方向一致的边连接、patch 恰好覆盖全部边界边，以及每单元 $\sum_f\mathbf S_f=0$（相对容差 `1e-9`）。不满足则抛异常。
+
+`makeStructuredMesh(nx, ny, xMin, yMin, xMax, yMax)` 用非结构路径生成与 `CartesianMesh` 相同的结构网格：单元按 j-major 创建，因此单元编号同为 `cellIndex(i,j)`，patch 也保持 east/north/west/south 顺序。它是双实现回归测试的基准，不用于替代日常结构网格。
+
+`UnstructuredMesh` 保留 `MeshInput` 输入点，并暴露 `pointCount()` / `point(i)` / `cellNodeCount(c)` / `cellNode(c, local)`。单元顶点访问按构造时逆时针规范化后的环序返回；该 CCW 约定与 owner 外向面积向量的推导一致。
+
+## MeshGeomCache：派生几何系数缓存
+
+`MeshGeomCache(const Mesh&)` 预计算所有面相关的几何系数，避免装配循环重复求距离和点积：
+
+| 接口 | 定义 | 说明 |
+| ------ | ------ | ------ |
+| `interpWeight(face)` | $g_f=\lVert x_f-x_N\rVert/\lVert x_P-x_N\rVert$ | owner 到面/邻点的线性权重；边界面返回 1 |
+| `innerCoef(face, split)` | minimum（默认）：$\alpha_f=(\mathbf S_f\cdot\mathbf d)/(\mathbf d\cdot\mathbf d)$；over：$(\mathbf S_f\cdot\mathbf S_f)/\max(\mathbf S_f\cdot\mathbf d_f,\ 0.05\lVert\mathbf S_f\rVert\lVert\mathbf d_f\rVert)$，$\mathbf d=x_N-x_P$ | 内部扩散几何系数，按 `NonOrthSplit`（本类中定义）现算自缓存的 $\mathbf S_f,\mathbf d_f$；边界面调用抛异常 |
+| `innerDelta(face)` | $\mathbf d_f=x_N-x_O$ | owner 到 neighbour 的中心距向量；压力交叉通量的投影使用它；边界面调用抛异常 |
+| `boundaryCoef(face)` | $\beta_f=(\mathbf S_f\cdot\mathbf S_f)/(\mathbf S_f\cdot\boldsymbol\delta),\ \ \boldsymbol\delta=x_f-x_P$ | 边界扩散几何系数；内部面调用抛异常 |
+| `nonOrthCorrection(face, split)` | $\mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f$（$\alpha_f$ 同上一行所选 split） | 内部面非正交修正向量；与 `innerCoef` 传同一 `split` 使 $(\alpha,\mathbf k)$ 配对补全为全通量；正交网格为零，边界面调用抛异常 |
+
+| `nonOrthogonality(face)` | $\cos^{-1}\left((\mathbf S_f\cdot\mathbf d_f)/(\lVert\mathbf S_f\rVert\lVert\mathbf d_f\rVert)\right)$ | 逐内部面非正交角（度）；驱动端用于诊断/警告 |
+| `maxNonOrthogonality()` | $\max_f \cos^{-1}\left(\frac{\mathbf S_f\cdot\mathbf d_f}{\lVert\mathbf S_f\rVert \lVert\mathbf d_f\rVert}\right)$ | 以度为单位，仅统计内部面 |
+| `skewVector(face)` | $\mathbf s_f=x_f-(g_f x_O+(1-g_f)x_N)$ | 面心相对线性插值点的偏差；Convection 的 Central 对流面插值与质量通量构造使用 |
+| `maxSkewness()` | $\max_f \lVert\mathbf s_f\rVert/\lVert\mathbf d_f\rVert$ | 仅统计内部面；无内部面时为 0 |
 
 ## ScalarField / VectorField：单元中心场
 
-### 设计思路
-
-- **场绑定网格**：`ScalarField` 持有 `const CartesianMesh&`，构造时按 `mesh.cellCount()` 分配数据并置零。场的生命周期必须覆盖网格的生命周期（注意悬挂引用）。
-- **存储即一个 `Vector`**：数据是长度为 `cellCount` 的 `Eigen::VectorXd`，与网格线性索引一一对应。这使场可以直接参与 Eigen 向量运算（如 `field.data() = solver.solve(...)`）。
-- **双索引访问**：`operator()` 同时支持线性索引 `(cell)` 和二维索引 `(i, j)`，后者内部经 `cellIndex` 转换，便于写逐点初始化循环。
-- **VectorField = 两个 ScalarField**：2D 向量场由 `u_`（x 分量）和 `v_`（y 分量）两个标量场组成，名称自动加 `_u` / `_v` 后缀（供 VTK 输出区分）。分量场可独立访问，便于分别施加边界条件或输出。
-
-### 关键接口
-
-- `field(cell)` / `field(i, j)`：可读写引用。
-- `field.data()`：返回底层 `Vector&`，用于整体赋值或与线性求解器对接。
-- `setZero()` / `setConstant(value)`：整体初始化。
-- `VectorField::u()` / `v()`：返回分量标量场引用。
-- `VectorField::size()` / `setConstant(value)`：与 `ScalarField` 对应；`size()` 返回单元数，`setConstant(value)` 同时设置 `u`、`v` 两个分量为同一值。
-- `VectorField::operator()(cell)`：返回 `{u, v}` 值对（只读）。
+- 场持有 `const Mesh&`，按 `mesh.cellCount()` 分配并置零；生命周期必须覆盖网格。
+- 数据是一个 `Vector`，与全局单元编号一一对应，可直接交给 Eigen 求解。
+- `ScalarField` 只支持单元编号访问 `field(cell)`；二维 $(i,j)$ 重载已移除，结构网格需先经 `CartesianMesh::cellIndex(i,j)` 转换。
+- `VectorField` 由 `u()` / `v()` 两个 `ScalarField` 组成；`operator()(cell)` 返回只读 `{u,v}`，`setConstant(value)` 同时设置两个分量。
 
 ## FaceFluxField：面通量场
 
-OpenFOAM 风格 `surfaceScalarField` 的对应物：把标量通量（通常是质量通量 $\rho\,\mathbf{u}\cdot\mathbf{n}\,S$）直接存储在**面**上（含边界面），供对流装配、SIMPLE 迭代与守恒性检查共用（见 [numerical.md](numerical.md)）。
+OpenFOAM `surfaceScalarField` 的对应物：一个长度为 `mesh.faceCount()` 的 `Vector` 同时覆盖内部面与边界面。
 
-### 存储布局与符号约定
+- `operator[](face)` / `data()`：按全局面编号读写；
+- 旧的 `x()/y()` 与 `xData()/yData()` 分量存储接口已移除；
+- 内部面 $\phi_f>0$ 表示 owner → neighbour；边界面存储 owner 外向通量；
+- `outwardFlux(cell, face)`：若该单元是面 owner 则返回 `+phi[face]`，否则返回 `-phi[face]`；
+- `cellImbalance(cell)`：遍历 `cellFaces(cell)` 求净流出量，守恒场在求解精度内为零；
+- `setZero()` 整体清零。
 
-- x 向面 $(n_x+1)\,n_y$ 个 + y 向面 $n_x\,(n_y+1)$ 个，各存为一个 `Vector`；
-- 通量**沿坐标正方向为正**：`x(i, j)` 是穿过 x 面 $i$（单元 $i-1$ 与单元 $i$ 之间）沿 $+x$ 的通量，$i \in [0, n_x]$，$j \in [0, n_y)$；`y(i, j)` 同理（$j \in [0, n_y]$）；
-- 单元的出流通量带符号：东/北面取 $+$，西/南面取 $-$，由 `outwardFlux(cell, face)` 给出（face 遵循 0=E, 1=N, 2=W, 3=S 的全局约定）；
-- `cellImbalance(cell)` $= x_{i+1,j} - x_{i,j} + y_{i,j+1} - y_{i,j}$，即单元净流出量；守恒通量场中该值在求解器精度内为零。
+类持有 `const Mesh&`，不可拷贝赋值；需要覆盖写时使用 numerical 模块的原地填充接口（如 `computeMassFlux`）。
 
-### 实现要点
+## VTK 输出
 
-- 与 `ScalarField` 一样持有 `const CartesianMesh&`（同样需注意悬挂引用；也因此**不可拷贝赋值**，需要覆盖写时使用 `computeMassFlux` 这类原地填充接口，见 numerical 模块）；
-- header-only（`src/FluxField.cpp` 为空文件，保持构建结构一致）。
-
+`writeVti` 保持结构网格 `.vti` ImageData 路径，仅接受 `CartesianMesh`；`writeVtu` 输出 `UnstructuredMesh` 的 `.vtu` UnstructuredGrid。文件结构与格式细节见 `docs/io.md`。

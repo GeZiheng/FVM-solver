@@ -28,33 +28,19 @@
 model = "glm-5.3"
 model_reasoning_effort = "high"
 
+# build_and_test is auto-approved: its writes stay inside the repository
+# (build/<config>-agent[-py]) and the vcpkg cache, and the persistent
+# implementer workflow depends on unattended intermediate compile checks.
 [mcp_servers.build-and-test]
 command = "python"
 args = ['.agents/mcp/build_and_test_server.py']
-
-[mcp_servers.build-and-test.tools.build_and_test]
-approval_mode = "approve"
 
 [mcp_servers.openfoam]
 command = "python"
 args = ['.agents/mcp/openfoam_server.py']
 
-# run_case creates a directory and runs foamRun; summarize_log / list_cases are
-# read-only and need no entry.
+# run_case creates a directory and runs foamRun, so it needs approval; the
+# read-only tools (run_status, summarize_log, extract_fields, find_source,
+# read_source, list_cases) have no entry and are therefore auto-approved.
 [mcp_servers.openfoam.tools.run_case]
-approval_mode = "approve"
-
-[mcp_servers.openfoam.tools.find_source]
-approval_mode = "approve"
-
-[mcp_servers.openfoam.tools.read_source]
-approval_mode = "approve"
-
-[mcp_servers.openfoam.tools.run_status]
-approval_mode = "approve"
-
-[mcp_servers.openfoam.tools.summarize_log]
-approval_mode = "approve"
-
-[mcp_servers.openfoam.tools.extract_fields]
 approval_mode = "approve"

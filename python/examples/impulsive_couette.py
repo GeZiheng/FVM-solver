@@ -32,16 +32,16 @@ def main():
     mesh = fvm.CartesianMesh(n, n, 0.0, 0.0, 1.0, 1.0)
     rho, mu = 1.0, 0.1  # nu = 0.1
 
-    bc_u = fvm.BoundaryField()  # top lid drives; west/east zero-gradient
+    bc_u = fvm.BoundaryField(mesh)  # top lid drives; west/east zero-gradient
     bc_u.set(fvm.BoundaryField.North, fvm.BCType.Dirichlet, 1.0)
     bc_u.set(fvm.BoundaryField.South, fvm.BCType.Dirichlet, 0.0)
 
-    bc_v = fvm.BoundaryField()  # no penetration on all sides
+    bc_v = fvm.BoundaryField(mesh)  # no penetration on all sides
     for side in (fvm.BoundaryField.North, fvm.BoundaryField.East,
                  fvm.BoundaryField.West, fvm.BoundaryField.South):
         bc_v.set(side, fvm.BCType.Dirichlet, 0.0)
 
-    bc_p = fvm.BoundaryField()  # zero-gradient everywhere (closed domain)
+    bc_p = fvm.BoundaryField(mesh)  # zero-gradient everywhere (closed domain)
 
     velocity = fvm.VectorField(mesh, "u")
     pressure = fvm.ScalarField(mesh, "p")

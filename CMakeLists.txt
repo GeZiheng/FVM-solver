@@ -26,15 +26,19 @@ add_library(fvm_core STATIC)
 
 target_sources(fvm_core
     PRIVATE
-        src/core/src/Mesh.cpp
+        src/core/src/CartesianMesh.cpp
+        src/core/src/UnstructuredMesh.cpp
+        src/core/src/MeshGeomCache.cpp
         src/core/src/Field.cpp
         src/core/src/FluxField.cpp
         src/math/src/SparseMatrix.cpp
         src/math/src/LinearSolver.cpp
         src/io/src/VtkWriter.cpp
+        src/io/src/Su2Reader.cpp
         src/numerical/src/Diffusion.cpp
         src/numerical/src/Convection.cpp
         src/numerical/src/GridOperators.cpp
+        src/numerical/src/MeshQuality.cpp
         src/numerical/src/TransportEquation.cpp
         src/numerical/src/Simple.cpp
         src/numerical/src/Momentum.cpp
@@ -55,6 +59,10 @@ target_link_libraries(fvm_core
         Eigen3::Eigen
 )
 
+# The static library is linked into the pyfvm shared module, so it must be
+# built as position-independent code on Linux (MSVC ignores this property).
+set_target_properties(fvm_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # Tests
 enable_testing()
 add_executable(fvm_tests)
@@ -62,9 +70,14 @@ add_executable(fvm_tests)
 target_sources(fvm_tests
     PRIVATE
         tests/test_mesh.cpp
+        tests/test_unstructured.cpp
+        tests/test_su2_reader.cpp
+        tests/test_vtk_writer.cpp
+        tests/test_mesh_dual.cpp
         tests/test_linalg.cpp
         tests/test_field.cpp
         tests/test_flux.cpp
+        tests/test_gradients.cpp
         tests/test_diffusion.cpp
         tests/test_convection.cpp
         tests/test_transport.cpp
@@ -107,4 +120,47 @@ if(FVM_BUILD_PYTHON)
     add_test(NAME pyfvm_tests
         COMMAND ${Python_EXECUTABLE} -m unittest discover
                 -s ${CMAKE_CURRENT_SOURCE_DIR}/python/tests)
+    # _path.py only scans build/*/python (nested build trees); CI configures
+    # straight into build/, so point the test at the real output directory,
+    # exactly like the application tests below.
+    set_tests_properties(pyfvm_tests PROPERTIES
+        ENVIRONMENT "FVM_PYFVM_DIR=${CMAKE_BINARY_DIR}/python")
+
+    # Application-level regression tests: full example cases with fixed
+    # accuracy thresholds against analytical or benchmark references
+    # (separate from the unit/binding layers; run with -L application).
+    function(fvm_add_application_test name script)
+        set(test_name pyfvm_app_${name})
+        add_test(NAME ${test_name}
+            COMMAND ${Python_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/python/examples/${script}.py
+                    ${ARGN})
+        set_tests_properties(${test_name} PROPERTIES
+            ENVIRONMENT "FVM_PYFVM_DIR=${CMAKE_BINARY_DIR}/python"
+            LABELS application
+            TIMEOUT 600)
+    endfunction()
+
+    fvm_add_application_test(cavity_re100 cavity --re 100 --test)
+    fvm_add_application_test(cavity_re400 cavity --re 400 --test)
+    fvm_add_application_test(cavity_re1000 cavity --re 1000 --test)
+    set_tests_properties(pyfvm_app_cavity_re1000 PROPERTIES TIMEOUT 900)
+    fvm_add_application_test(poiseuille poiseuille --test)
+    fvm_add_application_test(stokes_oscillating stokes_oscillating --test)
+    fvm_add_application_test(backward_step backward_facing_step --test)
+    fvm_add_application_test(cylinder_re40 cylinder --re 40 --test)
+    fvm_add_application_test(cylinder_re20 cylinder --re 20 --test)
+
+    # The CI workflow (pull requests) and the build-and-test MCP server run
+    # this labelled subset by default (`ctest -L application_default`): one
+    # entry per physics family / code path, about 7 minutes cold instead of
+    # the ~27 minute full layer.  The full layer stays available explicitly
+    # (workflow_dispatch run_full=true / full=true).  Keep the labels in
+    # sync with the reasoning in docs/python.md (application layer).
+    set_tests_properties(pyfvm_app_cavity_re100
+                         pyfvm_app_stokes_oscillating
+                         pyfvm_app_backward_step
+                         pyfvm_app_cylinder_re40
+                         pyfvm_app_cylinder_re20
+                         PROPERTIES LABELS "application;application_default")
 endif()

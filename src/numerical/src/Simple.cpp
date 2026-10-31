@@ -1,5 +1,6 @@
 #include "Simple.h"
 #include "Convection.h"
+#include "MeshQuality.h"
 #include "Momentum.h"
 #include "Pressure.h"
 #include "TimeScheme.h"
@@ -7,11 +8,11 @@
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 
 namespace fvm::numerical
 {
-
-SimpleResult solveSimple(const CartesianMesh& mesh,
+SimpleResult solveSimple(const Mesh& mesh,
     Scalar rho,
     Scalar mu,
     const BoundaryField& bcU,
@@ -27,13 +28,40 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
         throw std::
             invalid_argument("solveSimple: relaxationP must be in (0, 1]");
     }
+    if (config.corrections.nNonOrthogonalCorrectors < 0)
+    {
+        throw std::invalid_argument(
+            "solveSimple: nNonOrthogonalCorrectors must be non-negative");
+    }
+    const std::string meshWarning = meshQualityWarning(mesh);
+    if (!meshWarning.empty())
+    {
+        std::cerr << meshWarning;
+    }
 
     const Index nCells = mesh.cellCount();
+
+    // Mesh-independent reference length for the scaled residuals:
+    // sqrt(mean cell volume).  On a uniform Cartesian mesh with square cells
+    // this equals dx = dy = 0.5 * (dx + dy), the historical scale.
+    Scalar totalVolume = 0.0;
+    for (Index P = 0; P < nCells; ++P)
+    {
+        totalVolume += mesh.cellVolume(P);
+    }
+    const Scalar hRef = std::sqrt(totalVolume / static_cast<Scalar>(nCells));
 
     // Initialize the persistent flux field from the velocity field and its
     // BCs (OpenFOAM createPhi) and fail fast on a closed domain whose
     // boundary fluxes do not balance (OpenFOAM adjustPhi).
-    initializeMassFlux(mesh, velocity, rho, bcU, bcV, bcP, flux);
+    initializeMassFlux(mesh,
+        velocity,
+        rho,
+        bcU,
+        bcV,
+        bcP,
+        flux,
+        config.corrections);
 
     auto momSolver = createEigenBiCGSTAB(config.solverConfig);
     auto pSolver = createEigenCG(config.solverConfig);
@@ -53,7 +81,8 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
             bcP,
             config.relaxationU,
             TimeTerm{},
-            *momSolver);
+            *momSolver,
+            config.corrections);
 
         CorrectorResult corr;
         try
@@ -68,7 +97,8 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
                 config.relaxationP,
                 velocity,
                 pressure,
-                flux);
+                flux,
+                config.corrections);
         }
         catch (const std::exception& e)
         {
@@ -88,7 +118,7 @@ SimpleResult solveSimple(const CartesianMesh& mesh,
                 std::hypot(velocity.u()(P), velocity.v()(P)));
         }
         const Scalar fRef
-            = std::max(rho * maxSpeed * 0.5 * (mesh.dx() + mesh.dy()), 1e-30);
+            = std::max(rho * maxSpeed * hRef, 1e-30);
         const Scalar uRef = std::max(maxSpeed, 1e-30);
 
         SimpleResiduals res;

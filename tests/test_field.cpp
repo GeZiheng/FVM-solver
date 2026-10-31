@@ -1,5 +1,5 @@
 #include "Field.h"
-#include "Mesh.h"
+#include "CartesianMesh.h"
 #include <doctest/doctest.h>
 
 using namespace fvm::core;
@@ -12,7 +12,7 @@ TEST_CASE("ScalarField construction and access")
     CHECK(phi.size() == mesh.cellCount());
     CHECK(phi.name() == "phi");
 
-    phi(1, 2) = 3.14;
+    phi(mesh.cellIndex(1, 2)) = 3.14;
     CHECK(phi(mesh.cellIndex(1, 2)) == doctest::Approx(3.14));
 }
 
@@ -42,8 +42,8 @@ TEST_CASE("VectorField construction and access")
     CHECK(vel.u().size() == mesh.cellCount());
     CHECK(vel.v().size() == mesh.cellCount());
 
-    vel.u()(1, 1) = 1.0;
-    vel.v()(1, 1) = 2.0;
+    vel.u()(mesh.cellIndex(1, 1)) = 1.0;
+    vel.v()(mesh.cellIndex(1, 1)) = 2.0;
 
     auto [u, v] = vel(mesh.cellIndex(1, 1));
     CHECK(u == doctest::Approx(1.0));

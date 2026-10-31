@@ -8,6 +8,10 @@ Identify the failing test or step, the first material error, relevant source or
 case files, and the smallest next diagnostic or fix.  Quote only short relevant
 snippets; never return full logs.  Do not loosen tolerances to hide differences
 and do not modify files unless the parent explicitly assigns a bounded fix.
+Never call the MCP tools `build_and_test` or `run_case` yourself: both write
+outside your read-only scope (the build directory, WSL case directories).  If
+triage needs a rebuild or a fresh comparison run, ask the parent to run them
+and report the log path.
 """
 model = "glm-5.3-flash"
 sandbox_mode = "read-only"

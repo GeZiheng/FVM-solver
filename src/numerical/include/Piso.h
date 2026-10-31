@@ -2,6 +2,7 @@
 
 #include "BoundaryCondition.h"
 #include "Convection.h"
+#include "CorrectionOptions.h"
 #include "Field.h"
 #include "FluxField.h"
 #include "LinearSolver.h"
@@ -13,7 +14,7 @@
 
 namespace fvm::numerical
 {
-using fvm::core::CartesianMesh;
+using fvm::core::Mesh;
 using fvm::core::FaceFluxField;
 using fvm::core::Index;
 using fvm::core::Scalar;
@@ -30,6 +31,7 @@ struct PisoConfig
     TimeScheme timeScheme = TimeScheme::Euler; ///< ddt scheme.
     ConvectionScheme scheme = ConvectionScheme::Upwind;
     fvm::math::SolverConfig solverConfig = {};
+    CorrectionOptions corrections;
     bool verbose = false;
 };
 
@@ -61,7 +63,7 @@ struct PisoResult
 /// is conservative to the pressure solver's accuracy.  Closed domains
 /// (pure-Neumann pressure) are supported via reference-cell elimination and the
 /// entry flux-compatibility check.
-PisoResult solvePiso(const CartesianMesh& mesh,
+PisoResult solvePiso(const Mesh& mesh,
     Scalar rho,
     Scalar mu,
     const BoundaryField& bcU,

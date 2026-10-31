@@ -33,7 +33,7 @@ def main():
     velocity.u.to_numpy()[:] = np.ravel(np.pi * np.sin(np.pi * X) * np.cos(np.pi * Y))
     velocity.v.to_numpy()[:] = np.ravel(-np.pi * np.cos(np.pi * X) * np.sin(np.pi * Y))
 
-    bc = fvm.BoundaryField()  # north/south default to zero-flux (adiabatic)
+    bc = fvm.BoundaryField(mesh)  # north/south default to zero-flux (adiabatic)
     bc.set(fvm.BoundaryField.West, fvm.BCType.Dirichlet, 1.0)
     bc.set(fvm.BoundaryField.East, fvm.BCType.Dirichlet, 0.0)
 

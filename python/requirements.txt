@@ -1,0 +1,4 @@
+# Runtime dependencies for the pyfvm binding tests and example scripts.
+# The extension itself converts arrays through the numpy C API, so numpy is
+# required by every python-enabled ctest entry.  CI installs this file too.
+numpy

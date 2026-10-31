@@ -57,9 +57,13 @@ import shlex
 import subprocess
 import sys
 
+# Sibling module (same directory): importable because the server script's
+# own directory is sys.path[0] when launched as a script.
+import openfoam_fields as of_fields
+
 MAX_OUTPUT_CHARS = 8000
 SERVER_NAME = "openfoam"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
 MAX_TIMEOUT = 3600
@@ -70,6 +74,11 @@ OF_SCRIPTS = REPO_ROOT / ".agents" / "mcp" / "openfoam"
 # Bash expression, not a literal path: it must expand inside WSL.
 DEFAULT_ROOT_BASH = '"$HOME/OpenFOAM/gzh1057-14/run"'
 DEFAULT_SOLVER = "incompressibleFluid"
+
+# Extra case roots run_case may read templates from and write cases to
+# (":"-separated absolute WSL paths); the default run root above is always
+# allowed.  Escape hatch for humans, confinement boundary for agents.
+ALLOWED_ROOTS_ENV = "FVM_OF_ALLOWED_ROOTS"
 
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 SOLVER_RE = re.compile(r"^[A-Za-z0-9_]+$")
@@ -85,8 +94,9 @@ RUN_CASE_DESCRIPTION = (
     "Create a fresh OpenFOAM case in WSL from an existing template, patch its "
     "dictionaries (endTime/deltaT/writeInterval, nCorrectors) and start "
     "foamRun in the background. Returns immediately with case_dir, log_path "
-    "and status='running'; poll run_status until state is 'finished', then "
-    "read the fields with extract_fields. Each configuration gets its own "
+    "and status='running'; poll run_status until the state is terminal "
+    "('finished', 'failed' or 'stale'), then read the fields with "
+    "extract_fields. Each configuration gets its own "
     "timestamped directory with the configuration baked into the name; "
     "nothing is overwritten. For a cross-check: compare a single step first "
     "(end_time = dt) and run both nCorrectors = 1 and 2."
@@ -97,7 +107,9 @@ RUN_CASE_SCHEMA = {
     "properties": {
         "template": {
             "type": "string",
-            "description": "Existing case directory to copy (WSL path).",
+            "description": "Existing case directory to copy (WSL path; must "
+            "stay inside an allowed OpenFOAM root - the default run root "
+            "plus FVM_OF_ALLOWED_ROOTS entries).",
         },
         "name": {
             "type": "string",
@@ -121,7 +133,9 @@ RUN_CASE_SCHEMA = {
         },
         "root": {
             "type": "string",
-            "description": "Case root (WSL path; default ~/OpenFOAM/gzh1057-14/run).",
+            "description": "Case root (WSL path; default "
+            "~/OpenFOAM/gzh1057-14/run). A non-default root must stay inside "
+            "an allowed root (default run root plus FVM_OF_ALLOWED_ROOTS).",
         },
         "timeout_s": {
             "type": "integer",
@@ -135,10 +149,11 @@ RUN_CASE_SCHEMA = {
 
 RUN_STATUS_DESCRIPTION = (
     "Poll a background run started by run_case. Reports state ('running', "
-    "'finished', 'failed' or 'unknown') from the case's .exitcode marker and "
-    "the log, and includes a per-step summary of log.run (partial while "
-    "running) when the log exists. dt/dx default to the values recorded in "
-    "the case's mcp_run file at launch."
+    "'finished', 'failed', 'stale' or 'unknown') from the case's .exitcode "
+    "marker and the log; 'stale' means the launcher died before writing "
+    ".exitcode, e.g. after a server restart. Includes a per-step summary of "
+    "log.run (partial while running) when the log exists. dt/dx default to "
+    "the values recorded in the case's mcp_run file at launch."
 )
 
 RUN_STATUS_SCHEMA = {
@@ -286,6 +301,69 @@ def _check_root(root: str | None) -> str | None:
         return f"root must be an absolute WSL path, got: {root}"
     if "\n" in root or "\r" in root:
         return "root must not contain newlines"
+    if root != root.strip():
+        return "root must not have leading/trailing whitespace"
+    return None
+
+
+def _within_allowed(resolved_path: str, resolved_roots: list[str]) -> bool:
+    """True when ``resolved_path`` equals a root or lies below it."""
+    return any(
+        root == "/"
+        or (root and (resolved_path == root or resolved_path.startswith(root + "/")))
+        for root in resolved_roots
+    )
+
+
+def _extra_allowed_roots() -> list[str]:
+    """Absolute WSL paths from FVM_OF_ALLOWED_ROOTS (others are ignored)."""
+    return [
+        path
+        for path in os.environ.get(ALLOWED_ROOTS_ENV, "").split(":")
+        if path.startswith("/") and "\n" not in path and "\r" not in path
+    ]
+
+
+def _confine_run_paths(template: str, root: str | None) -> str | None:
+    """Confine run_case's template/root to the allowed OpenFOAM roots.
+
+    Candidate and allowed paths are canonicalised with ``realpath -m`` inside
+    WSL (so symlinks and ``..`` cannot escape), because the default root is
+    only meaningful there.  Returns an error string, or None when every
+    caller-provided path stays inside an allowed root.
+
+    Not TOCTOU-free: the filesystem could change between this check and the
+    case setup; the threat model is a confused agent, not a local racer.
+    """
+    extra = _extra_allowed_roots()
+    kinds = (["root"] if root is not None else []) + ["template"]
+    candidates = ([root] if root is not None else []) + [template]
+    command = "realpath -m -- " + " ".join(
+        [DEFAULT_ROOT_BASH] + [shlex.quote(path) for path in extra + candidates]
+    )
+    code, output, wsl_stderr = _run_parts(
+        ["wsl.exe", "-e", "bash", "-lc", command], 30
+    )
+    if code is None:
+        return f"could not resolve paths in WSL: {wsl_stderr}"
+    if code != 0:
+        return f"realpath failed: {_tail(_combine(output, wsl_stderr))}"
+    resolved = [line.strip() for line in output.splitlines() if line.strip()]
+    expected = 1 + len(extra) + len(candidates)
+    if len(resolved) != expected:
+        return (
+            f"unexpected realpath output: got {len(resolved)} paths, "
+            f"expected {expected}"
+        )
+    allowed = resolved[: 1 + len(extra)]
+    allowed_text = ", ".join(allowed)
+    for kind, resolved_path in zip(kinds, resolved[1 + len(extra) :]):
+        if not _within_allowed(resolved_path, allowed):
+            return (
+                f"{kind} must stay inside an allowed OpenFOAM root "
+                f"({allowed_text}); extend {ALLOWED_ROOTS_ENV} to add one "
+                f"(got: {resolved_path})"
+            )
     return None
 
 
@@ -333,7 +411,7 @@ def _build_case_command(
 # server instance.  Background processes spawned from a `wsl.exe -e`
 # invocation are killed when that invocation ends, so the run's wsl.exe must
 # stay a live child of this (long-lived) server process; the handle also
-# lets run_status detect a dead launcher.  Runs started by a previous server
+# lets run_case report start_failed.  Runs started by a previous server
 # instance simply have no entry here.
 _RUNS: dict[str, subprocess.Popen] = {}
 
@@ -345,10 +423,14 @@ _BASHRC_BASH = '"$HOME/OpenFOAM/OpenFOAM-14/etc/bashrc"'
 
 def _launch_run(case_dir: str, solver: str) -> None:
     """Start foamRun for a prepared case as a live wsl.exe child of this
-    process.  Writes log.run and drops the exit code into .exitcode."""
+    process.  Writes the launcher PID, log.run and the foamRun exit code."""
+    # The trailing brace group (not a simple command) keeps bash from
+    # exec-optimising itself away: /proc/<launcher_pid>/cmdline must keep the
+    # case path, because run_status' liveness check greps for it.
     launcher = (
         f"source {_BASHRC_BASH} >/dev/null; "
-        f"cd {shlex.quote(case_dir)} && {{ foamRun -solver {shlex.quote(solver)}"
+        f"cd {shlex.quote(case_dir)} && {{ echo $$ > .launcher_pid; "
+        f"foamRun -solver {shlex.quote(solver)}"
         " > log.run 2>&1; echo $? > .exitcode; }"
     )
     try:
@@ -379,6 +461,10 @@ def run_case(
         return _error("template is required")
     if not template.startswith("/") or "\n" in template or "\r" in template:
         return _error("template must be an absolute WSL path without newlines", template=template)
+    if template != template.strip():
+        return _error(
+            "template must not have leading/trailing whitespace", template=template
+        )
     if not NAME_RE.match(name or ""):
         return _error("invalid name: use [A-Za-z0-9._-]+", name=name)
     if not isinstance(n_correctors, int) or n_correctors < 1:
@@ -389,10 +475,15 @@ def run_case(
     problem = _check_root(root)
     if problem:
         return _error(problem)
-
     solver = solver or DEFAULT_SOLVER
     if not SOLVER_RE.match(solver):
         return _error("invalid solver name", solver=solver)
+    # Confinement comes after the cheap syntactic checks (including the
+    # solver name): it costs one WSL round-trip (realpath), so invalid
+    # requests fail fast without it.
+    problem = _confine_run_paths(template, root)
+    if problem:
+        return _error(problem)
     # The foamRun itself runs in the background; this timeout only covers the
     # setup (copy + dictionary patching + launch), which takes seconds.
     timeout = 120
@@ -429,7 +520,10 @@ def run_case(
         "case_dir": case_dir,
         "log_path": f"{case_dir}/log.run",
         "status": "running" if started else "start_failed",
-        "poll": "call run_status with this case_dir until state is 'finished'/'failed'",
+        "poll": (
+            "call run_status with this case_dir until the state is terminal: "
+            "'finished'/'failed'/'stale'"
+        ),
         "config": {
             "template": template,
             "name": name,
@@ -455,7 +549,18 @@ elif [ -f .exitcode ]; then
     echo "STATE=finished"
     echo "EXIT=$(cat .exitcode)"
 elif [ -f log.run ]; then
-    echo "STATE=running"
+    if [ -f .launcher_pid ]; then
+        pid=$(cat .launcher_pid 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
+           && grep -qaF -- "$1" "/proc/$pid/cmdline" 2>/dev/null; then
+            echo "STATE=running"
+        else
+            echo "STATE=stale"
+        fi
+    else
+        echo "STATE=running"
+        echo "PIDFILE=missing"
+    fi
 else
     echo "STATE=unknown"
 fi
@@ -487,6 +592,8 @@ def run_status(
     meta: dict[str, float] = {}
     state = "unknown"
     exit_code = None
+    pidfile_missing = False
+    payload_note = None
     for line in output.splitlines():
         if line == "---STATE---":
             continue
@@ -495,6 +602,8 @@ def run_status(
             meta[match.group(1)] = float(match.group(2))
         elif line.startswith("STATE="):
             state = line[len("STATE=") :].strip()
+        elif line == "PIDFILE=missing":
+            pidfile_missing = True
         elif line.startswith("EXIT="):
             try:
                 exit_code = int(line[len("EXIT=") :].strip())
@@ -503,28 +612,24 @@ def run_status(
     if state == "finished" and exit_code not in (None, 0):
         state = "failed"
     if state == "running":
-        handle = _RUNS.get(case_dir)
-        if handle is not None and handle.poll() is not None:
-            state = "failed"
+        if pidfile_missing:
             payload_note = (
-                "the launcher process is gone but no .exitcode was written; "
-                "the run died with it (e.g. the server or WSL was restarted)"
+                "no .launcher_pid (case started by an older server); "
+                "liveness unknown"
             )
-        elif handle is None:
-            payload_note = (
-                "this run was not started by the current server process, so "
-                "its liveness cannot be tracked; if the server was restarted "
-                "since run_case, the run may have died"
-            )
-        else:
-            payload_note = None
+    elif state == "stale":
+        payload_note = (
+            "the launcher process is dead and no .exitcode was written; "
+            "the run died with the server or WSL (e.g. a restart). Rerun "
+            "the case for a fresh comparison."
+        )
 
     payload: dict = {
         "case_dir": case_dir,
         "log_path": f"{case_dir}/log.run",
         "state": state,
     }
-    if state == "running" and payload_note:
+    if payload_note:
         payload["note"] = payload_note
     if exit_code is not None:
         payload["exit_code"] = exit_code
@@ -983,134 +1088,6 @@ def read_source(
     )
 
 
-def _strip_foam_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
-    text = re.sub(r"//[^\n]*", " ", text)
-    return text
-
-
-def _paren_body(text: str, open_index: int) -> str | None:
-    """Body of the parenthesis starting at ``open_index``."""
-    depth = 0
-    for i in range(open_index, len(text)):
-        if text[i] == "(":
-            depth += 1
-        elif text[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return text[open_index + 1 : i]
-    return None
-
-
-def _block_body(text: str, key: str) -> str | None:
-    """Body of the first ``key { ... }`` block."""
-    match = re.search(rf"\b{re.escape(key)}\b\s*\{{", text)
-    if not match:
-        return None
-    open_index = match.end() - 1
-    depth = 0
-    for i in range(open_index, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[open_index + 1 : i]
-    return None
-
-
-def _named_blocks(body: str) -> list[tuple[str, str]]:
-    """``name { ... }`` blocks at the top level of ``body``."""
-    blocks = []
-    index = 0
-    while True:
-        match = re.compile(r"([A-Za-z_][\w.\-]*)\s*\{").search(body, index)
-        if not match:
-            return blocks
-        open_index = match.end() - 1
-        depth = 0
-        for i in range(open_index, len(body)):
-            if body[i] == "{":
-                depth += 1
-            elif body[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    blocks.append((match.group(1), body[open_index + 1 : i]))
-                    index = i + 1
-                    break
-        else:
-            return blocks
-
-
-def _parse_entries(kind: str, body: str) -> list:
-    if kind == "vector":
-        values = []
-        for chunk in re.findall(r"\(([^()]*)\)", body):
-            parts = [float(v) for v in chunk.split()]
-            values.append(parts)
-        return values
-    return [float(v) for v in re.findall(r"[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?", body)]
-
-
-def _parse_foam_list(text: str, key: str) -> tuple[str | None, list | None, int | None]:
-    """Parse ``key uniform v;`` / ``key nonuniform List<T> N ( ... )``."""
-    match = re.search(rf"\b{re.escape(key)}\s+uniform\s+([^;]+);", text)
-    if match:
-        token = match.group(1).strip()
-        try:
-            value = [float(token)] if token[0] != "(" else _parse_entries("vector", token)[0]
-        except (ValueError, IndexError):
-            return "uniform", None, None
-        return "uniform", value, 1
-    match = re.search(
-        rf"\b{re.escape(key)}\s+nonuniform\s+List<(\w+)>\s*(\d+)\s*\(", text
-    )
-    if not match:
-        return None, None, None
-    count = int(match.group(2))
-    body = _paren_body(text, match.end() - 1)
-    if body is None:
-        return "nonuniform", None, count
-    return "nonuniform", _parse_entries(match.group(1), body), count
-
-
-def _parse_bare_list(text: str, kind: str = "label") -> tuple[list | None, int | None]:
-    """polyMesh ``owner``/``neighbour`` style: a bare ``<count> ( ... )`` list
-    (no ``internalField`` keyword)."""
-    match = re.search(r"\b(\d+)\s*\(", text)
-    if not match:
-        return None, None
-    count = int(match.group(1))
-    body = _paren_body(text, match.end() - 1)
-    if body is None:
-        return None, count
-    return _parse_entries(kind, body), count
-
-
-def _min_max(flat: list, is_vector: bool):
-    if not flat:
-        return None, None
-    if is_vector:
-        components = list(zip(*flat))
-        return [min(c) for c in components], [max(c) for c in components]
-    return min(flat), max(flat)
-
-
-def _side_guess(cells: list[tuple[int, int]], nx: int, ny: int) -> str | None:
-    if cells and all(i == 0 for i, _ in cells):
-        return "West"
-    if cells and all(i == nx - 1 for i, _ in cells):
-        return "East"
-    if cells and all(j == 0 for _, j in cells):
-        return "South"
-    if cells and all(j == ny - 1 for _, j in cells):
-        return "North"
-    return None
-
-
-_SIDE_SIGN = {"East": 1, "North": 1, "West": -1, "South": -1}
-
-
 def _shrink_json(payload: dict, budget: int) -> str:
     """Serialize to valid JSON within ``budget`` chars, dropping arrays if needed.
 
@@ -1249,6 +1226,20 @@ def extract_fields(
         "warnings": [],
     }
 
+    # ---- writeFormat: the reader is ascii-only --------------------------
+    control_text = read_file("system/controlDict")
+    if control_text is None:
+        payload["warnings"].append(
+            "system/controlDict not readable; writeFormat unknown"
+        )
+    elif of_fields.parse_write_format(control_text) == "binary":
+        return _error(
+            "writeFormat binary is not supported by the ascii reader; set "
+            "writeFormat ascii in system/controlDict",
+            case_dir=case_dir,
+            time=chosen,
+        )
+
     # ---- polyMesh (only needed for the mapping) ------------------------
     owners: list[int] = []
     neighbours: list[int] = []
@@ -1264,63 +1255,27 @@ def extract_fields(
                 "mapping disabled"
             )
         else:
-            n_cells_note = None
-            note = re.search(r"nCells:\s*(\d+)", owner_text)
-            if note:
-                n_cells_note = int(note.group(1))
-            note = re.search(r"nInternalFaces:\s*(\d+)", owner_text)
-            if note:
-                n_internal = int(note.group(1))
-            owner_values, _ = _parse_bare_list(_strip_foam_comments(owner_text))
-            neighbour_values, _ = _parse_bare_list(
-                _strip_foam_comments(neighbour_text)
+            mesh = of_fields.parse_poly_mesh(
+                owner_text, neighbour_text, boundary_text
             )
-            if owner_values is None or neighbour_values is None:
-                payload["warnings"].append("polyMesh owner/neighbour list not parsed")
-            else:
-                owners = [int(v) for v in owner_values]
-                neighbours = [int(v) for v in neighbour_values]
-                n_internal = n_internal or len(neighbours)
-                # Derive the cell count from the mesh itself: cell labels are
-                # contiguous and every cell owns or neighbours at least one
-                # face, so max+1 is exact.  The header note (nCells) is only a
-                # cross-check - some meshes do not carry it.
-                n_cells = max(
-                    max(owners, default=-1), max(neighbours, default=-1)
-                ) + 1
-                if n_cells_note is not None and n_cells_note != n_cells:
-                    payload["warnings"].append(
-                        f"polyMesh header says nCells: {n_cells_note} but "
-                        f"owner/neighbour imply {n_cells}; using {n_cells}"
-                    )
-                if int(nx) * int(ny) != n_cells:
-                    return _error(
-                        "nx*ny does not match the mesh cell count",
-                        nx=nx,
-                        ny=ny,
-                        nx_times_ny=int(nx) * int(ny),
-                        n_cells=n_cells,
-                        hint=(
-                            "pass the mesh's own (i,j) cell counts; see "
-                            "constant/polyMesh/owner"
-                        ),
-                    )
-                for name, block in _named_blocks(_strip_foam_comments(boundary_text)):
-                    n_faces = re.search(r"nFaces\s+(\d+)\s*;", block)
-                    start_face = re.search(r"startFace\s+(\d+)\s*;", block)
-                    kind = re.search(r"type\s+(\w+)\s*;", block)
-                    if n_faces and start_face:
-                        mesh_patches.append(
-                            {
-                                "name": name,
-                                "type": kind.group(1) if kind else None,
-                                "n_faces": int(n_faces.group(1)),
-                                "start_face": int(start_face.group(1)),
-                            }
-                        )
-
-    def cell_ij(cell: int) -> tuple[int, int]:
-        return cell % nx, cell // nx
+            payload["warnings"].extend(mesh["warnings"])
+            owners = mesh["owners"]
+            neighbours = mesh["neighbours"]
+            n_internal = mesh["n_internal"]
+            mesh_patches = mesh["patches"]
+            expected_cells = int(nx) * int(ny)
+            if mesh["n_cells"] is not None and expected_cells != mesh["n_cells"]:
+                return _error(
+                    "nx*ny does not match the mesh cell count",
+                    nx=nx,
+                    ny=ny,
+                    nx_times_ny=expected_cells,
+                    n_cells=mesh["n_cells"],
+                    hint=(
+                        "pass the mesh's own (i,j) cell counts; see "
+                        "constant/polyMesh/owner"
+                    ),
+                )
 
     # ---- read and map each field ---------------------------------------
     for name in names:
@@ -1328,11 +1283,17 @@ def extract_fields(
         if raw is None:
             payload["warnings"].append(f"field {name} not found in time {chosen}")
             continue
-        text = _strip_foam_comments(raw)
+        if of_fields.looks_binary(raw):
+            payload["warnings"].append(
+                f"field {name} appears binary; set writeFormat ascii"
+            )
+            payload["fields"][name] = {"class": None, "internal": None, "n": None}
+            continue
+        text = of_fields.strip_foam_comments(raw)
         class_match = re.search(r"\bclass\s+(\w+)\s*;", text)
         field_class = class_match.group(1) if class_match else None
         is_surface = field_class == "surfaceScalarField" or name == "phi"
-        kind, values, count = _parse_foam_list(text, "internalField")
+        kind, values, count = of_fields.parse_foam_list(text, "internalField")
         entry: dict = {"class": field_class, "internal": kind, "n": count}
         if values is None:
             payload["warnings"].append(f"internalField of {name} not parsed")
@@ -1346,7 +1307,7 @@ def extract_fields(
         flat = values
         is_vector = bool(flat) and isinstance(flat[0], list)
         entry["is_vector"] = is_vector
-        entry["min"], entry["max"] = _min_max(flat, is_vector)
+        entry["min"], entry["max"] = of_fields.min_max(flat, is_vector)
 
         has_grid = False
         if nx is not None and not is_surface:
@@ -1356,18 +1317,7 @@ def extract_fields(
                     "CartesianMesh::cellIndex = j*nx + i"
                 )
                 if want_grid:
-                    if is_vector:
-                        components = list(zip(*flat))
-                        for comp, letter in enumerate("xyz"):
-                            if comp < len(components):
-                                entry[f"grid_{letter}"] = [
-                                    [components[comp][j * nx + i] for i in range(nx)]
-                                    for j in range(ny)
-                                ]
-                    else:
-                        entry["grid"] = [
-                            [flat[j * nx + i] for i in range(nx)] for j in range(ny)
-                        ]
+                    entry.update(of_fields.build_cell_grids(flat, nx, ny))
                     has_grid = True
             else:
                 payload["warnings"].append(
@@ -1388,83 +1338,41 @@ def extract_fields(
         and neighbours
     ):
         phi_text = read_file(f"{chosen}/phi") or ""
-        _, phi_values, phi_count = _parse_foam_list(
-            _strip_foam_comments(phi_text), "internalField"
-        )
         entry = payload["fields"]["phi"]
-        if phi_values is None:
-            payload["warnings"].append("phi internalField not parsed")
-        elif n_internal is None or len(phi_values) < n_internal:
-            payload["warnings"].append(
-                f"phi has {len(phi_values)} internal values but the mesh expects "
-                f"{n_internal}; mapping skipped"
+        if not of_fields.looks_binary(phi_text):
+            # a binary phi was already warned about in the field loop above
+            _, phi_values, _ = of_fields.parse_foam_list(
+                of_fields.strip_foam_comments(phi_text), "internalField"
             )
-        else:
-            x_faces = [[None] * (nx + 1) for _ in range(ny)]
-            y_faces = [[None] * nx for _ in range(ny + 1)]
-            unmapped = 0
-            for face in range(n_internal):
-                o = owners[face]
-                n = neighbours[face]
-                i_o, j_o = cell_ij(o)
-                i_n, j_n = cell_ij(n)
-                value = phi_values[face]
-                if j_o == j_n and abs(i_o - i_n) == 1:
-                    i_face = max(i_o, i_n)
-                    x_faces[j_o][i_face] = value if i_o < i_n else -value
-                elif i_o == i_n and abs(j_o - j_n) == 1:
-                    j_face = max(j_o, j_n)
-                    y_faces[j_face][i_o] = value if j_o < j_n else -value
-                else:
-                    unmapped += 1
-            entry["x_faces"] = x_faces
-            entry["y_faces"] = y_faces
-            entry["face_note"] = (
-                "x_faces[j][i] = FaceFluxField::x(i, j), y_faces[j][i] = "
-                "FaceFluxField::y(i, j); signs converted from OpenFOAM's "
-                "owner->neighbour convention to +x/+y"
-            )
-            if unmapped:
+            if phi_values is None:
+                payload["warnings"].append("phi internalField not parsed")
+            elif n_internal is None or len(phi_values) < n_internal:
                 payload["warnings"].append(
-                    f"{unmapped} internal faces are not axis-aligned neighbours "
-                    "(unstructured mesh?) and were left unset"
+                    f"phi has {len(phi_values)} internal values but the mesh expects "
+                    f"{n_internal}; mapping skipped"
                 )
+            else:
+                x_faces, y_faces, unmapped = of_fields.map_internal_fluxes(
+                    phi_values, owners, neighbours, n_internal, nx, ny
+                )
+                entry["x_faces"] = x_faces
+                entry["y_faces"] = y_faces
+                entry["face_note"] = (
+                    "x_faces[j][i] = FaceFluxField::x(i, j), y_faces[j][i] = "
+                    "FaceFluxField::y(i, j); signs converted from OpenFOAM's "
+                    "owner->neighbour convention to +x/+y"
+                )
+                if unmapped:
+                    payload["warnings"].append(
+                        f"{unmapped} internal faces are not axis-aligned neighbours "
+                        "(unstructured mesh?) and were left unset"
+                    )
 
-            # boundary patches: owner cells + values + side guess
-            boundary_body = _block_body(_strip_foam_comments(phi_text), "boundaryField")
-            patch_values = {}
-            if boundary_body is not None:
-                for name, block in _named_blocks(boundary_body):
-                    kind, vals, count = _parse_foam_list(block, "value")
-                    patch_values[name] = {"value_kind": kind, "count": count, "values": vals}
-            patches = []
-            for mesh_patch in mesh_patches:
-                start = mesh_patch["start_face"]
-                n_faces = mesh_patch["n_faces"]
-                cells = [
-                    cell_ij(owners[f])
-                    for f in range(start, min(start + n_faces, len(owners)))
-                ]
-                info = patch_values.get(mesh_patch["name"], {})
-                side = _side_guess(cells, nx, ny)
-                patch_entry = {
-                    "name": mesh_patch["name"],
-                    "type": mesh_patch["type"],
-                    "n_faces": n_faces,
-                    "side": side,
-                    "owner_cells": [list(c) for c in cells[:max_vals]],
-                    "values": (info.get("values") or [])[:max_vals],
-                    "value_kind": info.get("value_kind"),
-                }
-                if side in _SIDE_SIGN:
-                    patch_entry["our_sign"] = _SIDE_SIGN[side]
-                    patch_entry["values_ours"] = [
-                        _SIDE_SIGN[side] * v for v in (info.get("values") or [])[:max_vals]
-                    ]
-                if (info.get("values") is not None) and len(info["values"]) > max_vals:
-                    patch_entry["truncated"] = True
-                patches.append(patch_entry)
-            entry["boundary_patches"] = patches
+                # boundary patches: owner cells + values + side guess
+                patch_values = of_fields.parse_boundary_patch_values(phi_text)
+                entry["boundary_patches"] = of_fields.build_boundary_patches(
+                    mesh_patches, patch_values, owners, nx, ny, max_vals
+                )
 
     return _shrink_json(payload, EXTRACT_FIELDS_MAX_CHARS), True
 

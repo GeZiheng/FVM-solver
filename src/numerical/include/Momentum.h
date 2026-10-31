@@ -2,6 +2,7 @@
 
 #include "BoundaryCondition.h"
 #include "Convection.h"
+#include "CorrectionOptions.h"
 #include "Field.h"
 #include "LinearSolver.h"
 #include "Mesh.h"
@@ -11,7 +12,7 @@
 
 namespace fvm::numerical
 {
-using fvm::core::CartesianMesh;
+using fvm::core::Mesh;
 using fvm::core::FaceFluxField;
 using fvm::core::Index;
 using fvm::core::Scalar;
@@ -33,7 +34,7 @@ struct MomentumAssembly
 /// pre-computed face mass-flux field: diffusion + convection + pressure-gradient
 /// source + under-relaxation (or the transient ddt term).
 /// @note `time.active()` requires `relaxation == 1`; the two are alternatives.
-MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
+MomentumAssembly assembleMomentum(const Mesh& mesh,
     const FaceFluxField& flux,
     const VectorField& velocity,
     Scalar mu,
@@ -43,7 +44,8 @@ MomentumAssembly assembleMomentum(const CartesianMesh& mesh,
     const ScalarField& pressure,
     const BoundaryField& bcP,
     Scalar relaxation,
-    const TimeTerm& time = {});
+    const TimeTerm& time = {},
+    const CorrectionOptions& corrections = {});
 
 /// Momentum predictor result: the predicted velocities plus the Rhie-Chow data
 /// (`uHat = H/a_P`, `d = V/a_P`) consumed by the pressure corrector.
@@ -61,7 +63,7 @@ struct MomentumPrediction
 
 /// Assemble and solve the u/v momentum equations and compute the Rhie-Chow data
 /// (OpenFOAM UEqn.H).
-MomentumPrediction predictMomentum(const CartesianMesh& mesh,
+MomentumPrediction predictMomentum(const Mesh& mesh,
     const FaceFluxField& flux,
     const VectorField& velocity,
     Scalar mu,
@@ -72,7 +74,8 @@ MomentumPrediction predictMomentum(const CartesianMesh& mesh,
     const BoundaryField& bcP,
     Scalar relaxationU,
     const TimeTerm& time,
-    fvm::math::LinearSolver& momSolver);
+    fvm::math::LinearSolver& momSolver,
+    const CorrectionOptions& corrections = {});
 
 /// Re-evaluate the Rhie-Chow data `uHat = H(u)/a_P` from the current velocity
 /// (OpenFOAM `HbyA = rAU*UEqn.H()`).  OpenFOAM re-evaluates it at *every*

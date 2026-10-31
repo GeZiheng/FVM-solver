@@ -2,6 +2,7 @@
 
 #include "BoundaryCondition.h"
 #include "Convection.h"
+#include "CorrectionOptions.h"
 #include "Field.h"
 #include "FluxField.h"
 #include "LinearSolver.h"
@@ -12,7 +13,7 @@
 
 namespace fvm::numerical
 {
-using fvm::core::CartesianMesh;
+using fvm::core::Mesh;
 using fvm::core::FaceFluxField;
 using fvm::core::Index;
 using fvm::core::Scalar;
@@ -28,6 +29,7 @@ struct SimpleConfig
     Scalar relaxationP = 0.3; ///< Pressure under-relaxation in (0, 1].
     ConvectionScheme scheme = ConvectionScheme::Upwind;
     fvm::math::SolverConfig solverConfig = {};
+    CorrectionOptions corrections;
     bool verbose = false;
 };
 
@@ -56,7 +58,7 @@ struct SimpleResult
 /// (computeMassFlux); on return it holds the corrected conservative flux
 /// (net outflow zero to the pressure solver's accuracy).  The iteration
 /// itself lives in the shared predictor/corrector; this file owns the loop.
-SimpleResult solveSimple(const CartesianMesh& mesh,
+SimpleResult solveSimple(const Mesh& mesh,
     Scalar rho,
     Scalar mu,
     const BoundaryField& bcU,

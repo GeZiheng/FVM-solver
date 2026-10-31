@@ -1,12 +1,19 @@
 #include "Field.h"
+#include "ObliqueMeshFixtures.h"
+#include "GridOperators.h"
 #include "LinearSolver.h"
-#include "Mesh.h"
+#include "CartesianMesh.h"
+#include "MeshGeomCache.h"
+#include "MeshQuality.h"
 #include "Momentum.h"
 #include "Simple.h"
 #include "TransportEquation.h"
+#include "UnstructuredMesh.h"
 #include <cmath>
 #include <doctest/doctest.h>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 using namespace fvm::core;
 using namespace fvm::math;
@@ -30,7 +37,181 @@ VectorField makeRecirculatingVelocity(const CartesianMesh& mesh)
     return velocity;
 }
 
+void setShearedChannelBCs(const Mesh& mesh,
+    BoundaryField& bcU,
+    BoundaryField& bcV,
+    BoundaryField& bcP)
+{
+    for (Index patch = 0; patch < mesh.patchCount(); ++patch)
+    {
+        const Index face = mesh.patchFaces(patch)[0];
+        const Point2 centroid = mesh.faceCentroid(face);
+        if (centroid.x < 1.0e-9)
+        {
+            bcU.set(patch, BCType::Dirichlet, 1.0);
+            bcV.set(patch, BCType::Dirichlet, 0.0);
+            bcP.set(patch, BCType::Neumann, 0.0);
+        }
+        else if (centroid.x > 1.0 - 1.0e-9)
+        {
+            bcU.set(patch, BCType::Neumann, 0.0);
+            bcV.set(patch, BCType::Dirichlet, 0.0);
+            bcP.set(patch, BCType::Dirichlet, 0.0);
+        }
+        else
+        {
+            bcU.set(patch, BCType::Dirichlet, 0.0);
+            bcV.set(patch, BCType::Dirichlet, 0.0);
+            bcP.set(patch, BCType::Neumann, 0.0);
+        }
+    }
+}
+
+Scalar netBoundaryFlux(const Mesh& mesh, const FaceFluxField& flux)
+{
+    Scalar net = 0.0;
+    for (Index patch = 0; patch < mesh.patchCount(); ++patch)
+    {
+        for (const Index face : mesh.patchFaces(patch))
+        {
+            net += flux[face];
+        }
+    }
+    return net;
+}
+
 } // namespace
+
+TEST_CASE("meshQualityWarning reports thresholded mesh-quality metrics")
+{
+    const CartesianMesh cartesian(8, 6, 0.0, 0.0, 1.0, 1.0);
+    CHECK(meshQualityWarning(cartesian).empty());
+
+    const UnstructuredMesh sheared(makeShearedTriMesh(4));
+    const Mesh& base = sheared;
+    const MeshGeomCache geometry(base);
+    const std::string both = meshQualityWarning(base,
+        geometry.maxNonOrthogonality() - 1.0,
+        geometry.maxSkewness() - 0.01);
+    CHECK(both.find("non-orthogonality") != std::string::npos);
+    CHECK(both.find("skewness") != std::string::npos);
+
+    const std::string none = meshQualityWarning(base,
+        geometry.maxNonOrthogonality() + 1.0,
+        geometry.maxSkewness() + 0.01);
+    CHECK(none.empty());
+}
+
+TEST_CASE("Simple channel on sheared mesh")
+{
+    for (const NonOrthSplit split : { NonOrthSplit::MinimumCorrection,
+             NonOrthSplit::OverRelaxed })
+    {
+        const UnstructuredMesh mesh(makeShearedTriMesh(4));
+        const Mesh& base = mesh;
+        const Scalar rho = 1.0;
+        const Scalar mu = 0.01;
+
+        BoundaryField bcU(base);
+        BoundaryField bcV(base);
+        BoundaryField bcP(base);
+        setShearedChannelBCs(base, bcU, bcV, bcP);
+
+        VectorField velocity(base, "velocity");
+        ScalarField pressure(base, "pressure");
+        FaceFluxField flux(base, "flux");
+
+        SimpleConfig config;
+        config.tolerance = 1.0e-6;
+        config.maxIterations = 5000;
+        config.relaxationU = 0.7;
+        config.relaxationP = 0.3;
+        config.scheme = ConvectionScheme::Upwind;
+        config.corrections.nonOrthSplit = split;
+        config.solverConfig.tolerance = 1.0e-10;
+        config.solverConfig.maxIterations = 5000;
+
+        const SimpleResult result = solveSimple(base,
+            rho,
+            mu,
+            bcU,
+            bcV,
+            bcP,
+            config,
+            velocity,
+            pressure,
+            flux);
+
+        CHECK(result.converged);
+        REQUIRE(!result.history.empty());
+        CHECK(result.history.back().continuity <= 1.0e-6);
+        CHECK(std::abs(netBoundaryFlux(base, flux)) <= 1.0e-8);
+    }
+}
+
+TEST_CASE("Simple non-orthogonal correctors are zero on Cartesian meshes")
+{
+    auto run = [](CorrectionOptions corrections)
+    {
+        CartesianMesh mesh(12, 10, 0.0, 0.0, 1.0, 1.0);
+        BoundaryField bcU(mesh);
+        BoundaryField bcV(mesh);
+        BoundaryField bcP(mesh);
+        setShearedChannelBCs(mesh, bcU, bcV, bcP);
+
+        VectorField velocity(mesh, "velocity");
+        ScalarField pressure(mesh, "pressure");
+        FaceFluxField flux(mesh, "flux");
+
+        SimpleConfig config;
+        config.tolerance = 1.0e-6;
+        config.maxIterations = 2000;
+        config.corrections = corrections;
+        config.solverConfig.tolerance = 1.0e-10;
+        config.solverConfig.maxIterations = 5000;
+        solveSimple(mesh,
+            1.0,
+            0.01,
+            bcU,
+            bcV,
+            bcP,
+            config,
+            velocity,
+            pressure,
+            flux);
+        return std::make_pair(velocity.u().data(), pressure.data());
+    };
+
+    CorrectionOptions noSubiterations;
+    noSubiterations.nNonOrthogonalCorrectors = 0;
+    CorrectionOptions twoSubiterations;
+    twoSubiterations.nNonOrthogonalCorrectors = 2;
+    CorrectionOptions overNoSubiterations = noSubiterations;
+    overNoSubiterations.nonOrthSplit = NonOrthSplit::OverRelaxed;
+    CorrectionOptions overTwoSubiterations = twoSubiterations;
+    overTwoSubiterations.nonOrthSplit = NonOrthSplit::OverRelaxed;
+
+    const auto reference = run(noSubiterations);
+    const auto corrected = run(twoSubiterations);
+    const auto overReference = run(overNoSubiterations);
+    const auto overCorrected = run(overTwoSubiterations);
+    CHECK((corrected.first - reference.first).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+    CHECK((corrected.second - reference.second).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+    CHECK((overCorrected.first - overReference.first)
+        .lpNorm<Eigen::Infinity>() <= 1.0e-12);
+    CHECK((overCorrected.second - overReference.second)
+        .lpNorm<Eigen::Infinity>() <= 1.0e-12);
+    CHECK((overReference.first - reference.first).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+    CHECK((overReference.second - reference.second)
+        .lpNorm<Eigen::Infinity>() <= 1.0e-12);
+    CHECK((overCorrected.first - corrected.first).lpNorm<Eigen::Infinity>()
+        <= 1.0e-12);
+    CHECK((overCorrected.second - corrected.second)
+        .lpNorm<Eigen::Infinity>() <= 1.0e-12);
+}
 
 TEST_CASE(
     "Simple: momentum assembly matches transport without pressure "
@@ -46,7 +227,7 @@ TEST_CASE(
     ScalarField muField(mesh, "mu");
     muField.setConstant(mu);
 
-    BoundaryField bc;
+    BoundaryField bc(mesh);
     bc.set(BoundaryField::West, BCType::Dirichlet, 1.0);
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
@@ -66,7 +247,7 @@ TEST_CASE(
         bc,
         0,
         pressure,
-        BoundaryField{},
+        BoundaryField(mesh),
         1.0);
     mom.system.A.finalize();
 
@@ -91,7 +272,7 @@ TEST_CASE("Simple: under-relaxation preserves the residual at u_old")
     ScalarField muField(mesh, "mu");
     muField.setConstant(mu);
 
-    BoundaryField bc;
+    BoundaryField bc(mesh);
     bc.set(BoundaryField::West, BCType::Dirichlet, 1.0);
     bc.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
@@ -112,7 +293,7 @@ TEST_CASE("Simple: under-relaxation preserves the residual at u_old")
         bc,
         0,
         pressure,
-        BoundaryField{},
+        BoundaryField(mesh),
         alpha);
     mom.system.A.finalize();
 
@@ -138,7 +319,7 @@ TEST_CASE("Simple: under-relaxation preserves the residual at u_old")
         bc,
         0,
         pressure,
-        BoundaryField{},
+        BoundaryField(mesh),
         1.0);
     for (Index c = 0; c < mesh.cellCount(); ++c)
     {
@@ -180,7 +361,7 @@ TEST_CASE("Simple: under-relaxation preserves the residual at u_old")
         bc,
         0,
         pressure,
-        BoundaryField{},
+        BoundaryField(mesh),
         alpha);
     momFp.system.A.finalize();
     const Vector solFp = directSolver->solve(momFp.system.A, momFp.system.b);
@@ -208,8 +389,8 @@ TEST_CASE("Simple: pressure gradient enters only the full right-hand side")
         pressure(c) = x;
     }
 
-    BoundaryField bc; // zero-flux walls (keeps system simple)
-    BoundaryField bcP;
+    BoundaryField bc(mesh); // zero-flux walls (keeps system simple)
+    BoundaryField bcP(mesh);
     bcP.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bcP.set(BoundaryField::East, BCType::Dirichlet, 1.0);
     const Scalar vol = mesh.cellVolume(0);
@@ -262,15 +443,15 @@ TEST_CASE(
     const Scalar rho = 1.0;
     const Scalar mu = 1.0;
 
-    BoundaryField bcU; // west/east: zero-gradient (default Neumann 0)
+    BoundaryField bcU(mesh); // west/east: zero-gradient (default Neumann 0)
     bcU.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcV;
+    BoundaryField bcV(mesh);
     bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcP; // north/south: zero-gradient (default)
+    BoundaryField bcP(mesh); // north/south: zero-gradient (default)
     bcP.set(BoundaryField::West, BCType::Dirichlet, 1.0);
     bcP.set(BoundaryField::East, BCType::Dirichlet, 0.0);
 
@@ -333,7 +514,7 @@ TEST_CASE(
     Scalar outletFlux = 0.0;
     for (Index j = 0; j < mesh.ny(); ++j)
     {
-        outletFlux += flux.x(mesh.nx(), j);
+        outletFlux += flux[mesh.xFace(mesh.nx(), j)];
     }
     CHECK(outletFlux == doctest::Approx(rho / 12.0).epsilon(0.05));
 }
@@ -346,19 +527,19 @@ TEST_CASE("Simple: lid-driven cavity at Re=100 converges with recirculation")
     const Scalar uLid = 1.0;
     const Scalar mu = 0.01; // Re = rho U L / mu = 100
 
-    BoundaryField bcU; // walls default Neumann -> set all to no-slip
+    BoundaryField bcU(mesh); // walls default Neumann -> set all to no-slip
     bcU.set(BoundaryField::North, BCType::Dirichlet, uLid);
     bcU.set(BoundaryField::East, BCType::Dirichlet, 0.0);
     bcU.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcV;
+    BoundaryField bcV(mesh);
     bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::East, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcP; // zero-gradient everywhere (default)
+    BoundaryField bcP(mesh); // zero-gradient everywhere (default)
 
     VectorField velocity(mesh, "u");
     ScalarField pressure(mesh, "p");
@@ -397,10 +578,10 @@ TEST_CASE("Simple: lid-driven cavity at Re=100 converges with recirculation")
     // u > 0 near the lid, u < 0 near the bottom (vertical centerline);
     // v > 0 near the left wall, v < 0 near the right wall (horizontal
     // centerline).
-    CHECK(velocity.u()(n / 2, n - 2) > 0.0);
-    CHECK(velocity.u()(n / 2, 1) < 0.0);
-    CHECK(velocity.v()(2, n / 2) > 0.0);
-    CHECK(velocity.v()(n - 3, n / 2) < 0.0);
+    CHECK(velocity.u()(mesh.cellIndex(n / 2, n - 2)) > 0.0);
+    CHECK(velocity.u()(mesh.cellIndex(n / 2, 1)) < 0.0);
+    CHECK(velocity.v()(mesh.cellIndex(2, n / 2)) > 0.0);
+    CHECK(velocity.v()(mesh.cellIndex(n - 3, n / 2)) < 0.0);
 
     // The corrected flux field is conservative up to the pressure
     // solver's accuracy (relative tolerance 1e-9).
@@ -424,19 +605,19 @@ TEST_CASE("Simple: unbalanced closed-domain velocity BCs throw")
     const Scalar rho = 1.0;
     const Scalar mu = 0.01;
 
-    BoundaryField bcU;
+    BoundaryField bcU(mesh);
     bcU.set(BoundaryField::West, BCType::Dirichlet, 1.0); // inlet
     bcU.set(BoundaryField::East, BCType::Dirichlet, 0.0); // wall
     bcU.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcV;
+    BoundaryField bcV(mesh);
     bcV.set(BoundaryField::West, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::East, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
     bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
 
-    BoundaryField bcP; // zero-gradient everywhere (default)
+    BoundaryField bcP(mesh); // zero-gradient everywhere (default)
 
     VectorField velocity(mesh, "u");
     ScalarField pressure(mesh, "p");
