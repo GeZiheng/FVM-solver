@@ -59,6 +59,10 @@ target_link_libraries(fvm_core
         Eigen3::Eigen
 )
 
+# The static library is linked into the pyfvm shared module, so it must be
+# built as position-independent code on Linux (MSVC ignores this property).
+set_target_properties(fvm_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # Tests
 enable_testing()
 add_executable(fvm_tests)
