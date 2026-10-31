@@ -2,7 +2,7 @@
 
 ## Project State
 
-- **Status**: phases 1–4-2, 4.3a, 4.3b and 4.3c (mesh abstraction, dual representations, SU2 mesh reader, `.vtu` writer + `pyfvm.read_su2`, non-orthogonal/skewness corrections + LSQ gradients + optional interior `NonOrthSplit`) complete; 100 C++ test cases, `pyfvm_tests` (22) and the application test layer (5 tagged ctest entries) pass. Application phase A covers cavity Re=100/400/1000 vs Ghia, planar Poiseuille, and the Stokes oscillating plate; cavity uses Central convection (Upwind numerical diffusion is the key Re=400 accuracy limiter). The OpenFOAM oblique trapezoidal NS cross-check passes at converged corrector counts (L2 4.5e-4 at NC=8; the NC=2 gap is mainly corrector lag, and the remaining general-field split dependence is O(h²), see `docs/numerical.md`).
+- **Status**: phases 1–4-2, 4.3a, 4.3b, 4.3c and application phases A–B (mesh abstraction, dual representations, SU2 mesh reader, `.vtu` writer + `pyfvm.read_su2`, non-orthogonal/skewness corrections + LSQ gradients + optional interior `NonOrthSplit`) complete; 100 C++ test cases, `pyfvm_tests` (22) and the application test layer (8 tagged ctest entries) pass. Application phase A covers cavity Re=100/400/1000 vs Ghia, planar Poiseuille, and the Stokes oscillating plate; cavity uses Central convection (Upwind numerical diffusion is the key Re=400 accuracy limiter). Application phase B adds backward-facing-step and cylinder cases via the shared `mesh_su2` SU2 generator helper, `UnstructuredMesh`, SIMPLE, and `.vtu` output. The OpenFOAM oblique trapezoidal NS cross-check passes at converged corrector counts (L2 4.5e-4 at NC=8; the NC=2 gap is mainly corrector lag, and the remaining general-field split dependence is O(h²), see `docs/numerical.md`).
 - **Capabilities & layout**: see `README.md`. No C++ demo executable.
 - **Solver structure**: reusable `predictMomentum` / `correctPressure` primitives (`Momentum`/`Pressure`); `Simple`/`Piso` are thin drivers — extend the primitives, not the loops.
 - **PISO**: working (`tests/test_piso.cpp`); invariants and cross-check evidence: **Key Design Decisions** + `docs/numerical.md` (via the `openfoam` MCP server).
@@ -124,5 +124,5 @@ Rules only; derivations and evidence: `docs/<module>.md` (mainly `docs/numerical
 
 ## Next Phase (Phase 4)
 
-Gmsh reader is shelved (SU2 is sufficient; if revived it must share the `MeshInput` mapping). Next: phase B unstructured application tests (backward-facing step + cylinder flow), with per-face Dirichlet values in `BoundaryField` (Option B) as the other next-phase candidate (solver-interface extension that unlocks Taylor–Green exact BCs and parabolic inlets).
+Gmsh reader is shelved (SU2 is sufficient; if revived it must share the `MeshInput` mapping). The meshgen MCP server is a roadmap candidate: wrap `mesh_su2` thinly only when its generators grow into a small mesh library and cross-session reuse is needed, without copying the geometry implementation. Next: per-face Dirichlet values in `BoundaryField` (Option B) remains the next-phase candidate (solver-interface extension that unlocks Taylor–Green exact BCs and parabolic inlets).
 Full roadmap: see README.md.

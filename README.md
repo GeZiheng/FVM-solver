@@ -53,7 +53,9 @@ tests/                   — doctest: mesh, unstructured, su2_reader (SU2 format
                            transient Poiseuille), vtk_writer
 python/                  — pyfvm bindings (optional, -DFVM_BUILD_PYTHON=ON): pyfvm.cpp (pybind11
                            layer, snake_case API), _path.py (sys.path bootstrap), examples/
-                           (case scripts: convection_diffusion.py, cavity.py, impulsive_couette.py),
+                           (case scripts and shared SU2 generators: convection_diffusion.py,
+                           cavity.py, impulsive_couette.py, mesh_su2.py,
+                           backward_facing_step.py, cylinder.py),
                            tests/test_pyfvm.py (binding-contract tests = ctest entry pyfvm_tests),
                            overlay-ports/python3 (empty vcpkg port: link against system Python)
 docs/                    — module docs (Chinese): core.md, math.md, io.md, numerical.md, python.md
@@ -130,9 +132,9 @@ python python/examples/<name>.py
 1. ✅ **非定常项 + PISO** — 已完成：瞬态 theta scheme（时间精度已验证）、瞬态输运、共享的 `Momentum`/`Pressure`/`GridOperators` 原语与 `solvePiso`；`tests/test_piso.cpp` 已启用。交叉验证数值与已排除假设清单见 [`docs/numerical.md`](docs/numerical.md)。
 2. ✅ **`pyfvm` Python bindings** — 已完成：pybind11（vcpkg `python` feature、`FVM_BUILD_PYTHON=ON`、可选），覆盖 mesh/fields/BC/SIMPLE/PISO/transport/VTK 输出的 snake_case API 与 numpy 零拷贝视图；算例脚本在 `python/examples/`；绑定契约测试在 `python/tests/`（ctest 条目 `pyfvm_tests`）；C++ `fvm_solver` demo 可执行文件已移除——算例一律为 Python 脚本。细节见 [`docs/python.md`](docs/python.md)。
 3. ✅ **任意网格输入与非正交修正** — 4.3a（mesh abstraction、双网格表示、零数值变化）、4.3b（`readSu2`、`.vtu` writer `writeVtu`、`pyfvm.read_su2`）与 4.3c（non-orthogonal diffusion/pressure correction、内部 split 可选 minimum / over-relaxed、skewness correction、LSQ gradients、`pyfvm.CorrectionOptions`）已完成：100 个 C++ test cases 与 22 项 `pyfvm_tests` 通过；正交单步 OpenFOAM 复验差 `1.8e-9`，斜交 manufactured 解达二阶，梯形 NS OpenFOAM 对照在收敛 corrector 数下通过（NC=8 时 L2 `4.5e-4`；NC=2 的差距主要是 corrector 滞后，剩余一般场 split 依赖为 O(h²)，见 [`docs/numerical.md`](docs/numerical.md)）。格式决策为 SU2-first；Gmsh reader 搁置（2026-10-28：SU2 已满足需求，若将来重启仍共享 `MeshInput` 映射层）。
-4. ✅ **示例算例的 application tests（阶段 A）** — 已完成：新增 application ctest 层（`ctest -L application`，5 项），覆盖 cavity Re=100/400/1000 对照 Ghia、平面 Poiseuille 与 Stokes 振荡平板；cavity 采用 Central 格式，默认 Upwind 的数值扩散在 Re=400 会显著放大中心线误差。阶段 B（非结构网格：后向台阶 + 圆柱绕流）与 `BoundaryField` 逐面 Dirichlet 值（Option B，解锁 Taylor–Green 等空间变化壁面值）为下一阶段候选。
+4. ✅ **示例算例的 application tests（阶段 A + B）** — 已完成：application ctest 层扩展到 8 项（`ctest -L application`）。阶段 A 覆盖 cavity Re=100/400/1000 对照 Ghia、平面 Poiseuille 与 Stokes 振荡平板；cavity 采用 Central 格式，默认 Upwind 的数值扩散在 Re=400 会显著放大中心线误差。阶段 B 新增后向台阶（Re=50/100）与圆柱（Re=20/40）非结构算例，均经 SU2 网格 → `UnstructuredMesh` → SIMPLE → `.vtu`；断言使用文献量级带/趋势带与校准数据（Armaly 1983、Erturk 2008、Fornberg 1980、Dennis & Chang）。
 
-Deferred/rejected：`examples/` 下的 per-case 可执行文件（繁琐）、JSON case 配置（与 Python 脚本重复）、按模块拆分 CMakeLists/tests/docs（仅当模块被外部复用或构建时间恶化时再议）。AMGCL/Hypre 后端仍是更大网格的候选方案。
+Deferred/rejected：`examples/` 下的 per-case 可执行文件（繁琐）、JSON case 配置（与 Python 脚本重复）、按模块拆分 CMakeLists/tests/docs（仅当模块被外部复用或构建时间恶化时再议）。AMGCL/Hypre 后端仍是更大网格的候选方案。**meshgen MCP server** 是路线图候选：待 `mesh_su2` 成长为小型网格库且有跨会话需求时，做成 `.agents/mcp/` 中的薄封装并双注册，不复制几何实现；本次不做。`BoundaryField` 逐面 Dirichlet 值（Option B，解锁 Taylor–Green 等空间变化壁面值）仍是下一阶段候选。
 
 ## Agent 开发环境（harness）
 

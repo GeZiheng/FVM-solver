@@ -54,7 +54,7 @@ numerical：
 io：
 
 - `write_vti(filename, mesh, scalars={"name": ScalarField}, vectors={"name": VectorField})`。
-- `read_su2(path)` 返回 `UnstructuredMesh`；SU2 格式错误抛 `ValueError`，文件打开失败抛 `RuntimeError`。
+- `read_su2(path)` 返回 `UnstructuredMesh`；SU2 格式错误抛 `ValueError`，文件打开失败抛 `RuntimeError`。共享的 SU2 文本生成 helper 位于 `examples/mesh_su2.py`。
 - `write_vtu(filename, mesh, scalars={"name": ScalarField}, vectors={"name": VectorField})` 写非结构网格结果；传入其他 mesh 的场抛 `ValueError`。
 
 约定与陷阱：
@@ -72,6 +72,9 @@ io：
 - `cavity.py` 支持 `--re {100,400,1000}`，用 Ghia et al. (1982) 中心线数据做 L∞/L2 对照，`--test` 启用精度断言。
 - `poiseuille.py` 检验平面 Poiseuille 的充分发展抛物线剖面与压降斜率。
 - `stokes_oscillating.py` 检验 Stokes 第二问题的周期稳态解。
+- `mesh_su2.py` 是 Phase B 算例共享的纯 Python SU2 文本生成 helper，提供 `l_shaped_bfs_grid(n)` 与 `polar_ogrid(...)`；生成文本由算例临时落盘后交给 `read_su2`。
+- `backward_facing_step.py` 求解扩张比 2、入口段 10h 的后向台阶（Re=50/100，Upwind），断言再附长度的文献量级带与 Re 趋势，网格研究数据记录在脚本注释中。
+- `cylinder.py` 求解 96×64 极坐标 O-grid 圆柱绕流（Re=20/40，稳态 SIMPLE + Central），逐面积分 Cd、测量尾迹长度并断言文献阈值带；`Cl` 仅作对称性诊断打印（校准值约 `-5e-5`），不断言。
 
 `python/examples/piso_nonortho_channel.py` 是 4.3c 斜交算例：由 bilinear 映射生成 $16\times16$ 梯形收缩通道 SU2 网格（顶边收窄到 $[0.3,0.7]$），运行单步压力驱动 PISO，打印 $p(0,0)$、入口单位长度通量与连续性误差。默认开启修正并使用两个 PISO corrector；`--no-corrections` 关闭三项修正，`--correctors N` 覆盖 corrector 数。该脚本用于复现 `docs/numerical.md` “斜交网格对照（未决）”中的算例设置。
 
@@ -81,4 +84,4 @@ io：
 
 `python/tests/test_pyfvm.py` 是**绑定契约测试**：numpy 零拷贝与索引顺序、网格几何、BC 默认值与非法参数、纯扩散线性精确解（`solve_transport` 全通路）、SIMPLE/PISO 粗网格冒烟、`write_vti` 冒烟。
 
-application 层由 5 个带 `application` 标签的 ctest 条目组成（`pyfvm_app_cavity_re100` / `_re400` / `_re1000` / `pyfvm_app_poiseuille` / `pyfvm_app_stokes_oscillating`，用 `ctest -L application` 运行），负责整算例精度回归；精度阈值锁定在示例脚本中。阈值校准余量一般不小于 2×，Stokes 为 1.4×。该层不改变 `fvm_unit_tests` 与 `pyfvm_tests` 的语义。
+application 层由 8 个带 `application` 标签的 ctest 条目组成：阶段 A 的 `pyfvm_app_cavity_re100` / `_re400` / `_re1000` / `pyfvm_app_poiseuille` / `pyfvm_app_stokes_oscillating`，以及阶段 B 的 `pyfvm_app_backward_step` / `pyfvm_app_cylinder_re40` / `pyfvm_app_cylinder_re20`（用 `ctest -L application` 运行），负责整算例精度回归；精度阈值锁定在示例脚本中。阈值校准余量一般不小于 2×，Stokes 为 1.4×。阶段 B 中，BFS 的 Re=50/100 再附长度带分别为 `[2,4]` / `[3,7]`，另要求 `x_r(100) >= 1.5*x_r(50)`；n=8/16/24 校准值为 3.841/4.374/4.569（Re=100，表观阶约 2.5、外推约 4.7），对应 20% 自洽护栏的实测余量约 4.5×。圆柱 Re=40 断言 `Cd∈[1.40,1.72]`、`L_w/D∈[1.8,2.8]`，Re=20 断言 `Cd∈[1.80,2.30]`；96×64→128×80 的 Cd 漂移实测 0.17–0.21%（Cd(40)=1.559、Cd(20)=2.090）。application 层串行全跑约 1 小时；本机冷态实测 backward_step 229s、cavity_re1000 368s、stokes 38s，持续满载后各条目可能变慢 2–15×，个别 TIMEOUT 余量薄。该层不改变 `fvm_unit_tests` 与 `pyfvm_tests` 的语义。
