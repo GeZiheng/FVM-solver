@@ -65,9 +65,13 @@ TOOL_DESCRIPTION = (
     "includes the pyfvm_tests Python binding tests when python=true). Use "
     "this instead of invoking cmake/ctest/ninja directly for project builds. "
     "run selects the ctest layer: unit (fvm_unit_tests + pyfvm_tests, "
-    "excludes the application label, fast), application (only the labeled "
-    "application tests; requires python=true), all (everything; the old "
-    "value 'tests' is accepted as an alias). "
+    "excludes the application label, fast), application (the "
+    "application_default subset by default, or the whole layer with "
+    "full=true; requires python=true), all (everything; the old value "
+    "'tests' is accepted as an alias). With run=application, the optional "
+    "tests regex is passed to ctest -R to select an explicit subset "
+    "(ctest matches substrings, so anchor with $); an empty match fails "
+    "loudly. "
     "application and all exceed the client's ~300s tool-call timeout, so "
     "they default to wait=false: ctest starts in the background and the call "
     "returns immediately; poll the separate test_status tool until the run "
@@ -117,6 +121,28 @@ TOOL_SCHEMA = {
                 "application/all default to asynchronous execution with "
                 "wait=false because they exceed the client tool-call "
                 "timeout; poll test_status for the result."
+            ),
+        },
+        "tests": {
+            "type": "string",
+            "description": (
+                "Optional ctest -R regex selecting a subset of the "
+                "application layer, e.g. "
+                "\"pyfvm_app_(cavity_re100|cylinder_re40)$\" (ctest -R "
+                "matches substrings, so anchor with $). Only valid with "
+                "run=application and mutually exclusive with full; an "
+                "empty match fails loudly. Omit to run the default "
+                "application_default subset."
+            ),
+        },
+        "full": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "With run=application, run every application entry instead "
+                "of the default application_default subset (~27 min cold "
+                "on a dev machine vs ~7 min). Only valid with "
+                "run=application and mutually exclusive with tests."
             ),
         },
         "wait": {
@@ -738,6 +764,8 @@ def build_and_test(
     python: bool = False,
     quiet: bool = True,
     wait: bool | None = None,
+    tests: str | None = None,
+    full: bool = False,
 ) -> tuple[str, bool]:
     """Configure, build and optionally run the project.
 
@@ -795,6 +823,61 @@ def build_and_test(
                         "invalid combination: run=application requires "
                         "python=true (the application tests are registered "
                         "in the FVM_BUILD_PYTHON block)"
+                    ),
+                },
+                indent=2,
+            ),
+            False,
+        )
+    if tests is not None and run != "application":
+        return (
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": (
+                        "invalid combination: tests requires "
+                        "run=application (it is passed to ctest -R to "
+                        "select a subset of the application layer)"
+                    ),
+                },
+                indent=2,
+            ),
+            False,
+        )
+    if tests is not None and not tests.strip():
+        return (
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": "invalid tests: expected a non-empty ctest -R regex",
+                },
+                indent=2,
+            ),
+            False,
+        )
+    if full and run != "application":
+        return (
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": (
+                        "invalid combination: full requires run=application "
+                        "(it disables the default application_default "
+                        "subset label)"
+                    ),
+                },
+                indent=2,
+            ),
+            False,
+        )
+    if full and tests is not None:
+        return (
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": (
+                        "invalid combination: full and tests are mutually "
+                        "exclusive (whole layer vs an explicit -R subset)"
                     ),
                 },
                 indent=2,
@@ -1000,7 +1083,18 @@ def build_and_test(
             if run == "unit":
                 test_cmd += ["-LE", "application"]
             elif run == "application":
-                test_cmd += ["-L", "application"]
+                if full:
+                    test_cmd += ["-L", "application"]
+                elif tests is not None:
+                    # A regex that matches nothing must fail loudly: plain
+                    # ctest exits 0 with only a warning in that case.
+                    test_cmd += ["-L", "application", "-R", tests,
+                                 "--no-tests=error"]
+                else:
+                    # Default subset, one label per physics family / code
+                    # path (set in CMakeLists.txt); mirrors the CI default.
+                    test_cmd += ["-L", "application_default",
+                                 "--no-tests=error"]
             sections.append("\n$ " + " ".join(test_cmd))
             transcript.append("\n$ " + " ".join(test_cmd))
 
@@ -1155,6 +1249,8 @@ def _handle(message: dict) -> None:
                     python=bool(arguments.get("python")),
                     quiet=bool(arguments.get("quiet", True)),
                     wait=arguments.get("wait"),
+                    tests=arguments.get("tests"),
+                    full=bool(arguments.get("full")),
                 )
         except Exception as exc:  # never take the server down
             text, ok = f"{name} crashed: {exc!r}", False

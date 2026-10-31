@@ -1,12 +1,24 @@
 # Build and test the project on Linux and Windows.
 # Dependencies are declared in vcpkg.json and resolved in manifest mode, which
 # only happens when CMake is configured with the vcpkg toolchain file.
+#
+# The Linux leg additionally builds the pyfvm extension
+# (FVM_BUILD_PYTHON=ON), which unlocks two more test layers in the same
+# build tree: the pyfvm_tests binding contracts and the application
+# regression subset (full example cases with accuracy thresholds,
+# selected by the application_default ctest label).  A manual full run
+# over every application entry is available through workflow_dispatch.
 name: CMake Build and Test
 
 on:
   # Runs on every pull request, on any base branch.
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_full:
+        description: 'Run all application tests instead of the default subset'
+        type: boolean
+        default: false
 
 # The build only needs to read the repository.
 permissions:
@@ -24,15 +36,17 @@ env:
   # Must match "builtin-baseline" in vcpkg.json. The runner checks out this
   # exact vcpkg commit, so the ports used in CI match the manifest.
   VCPKG_BASELINE: b40f8d253202fec83a5543c869aa7576b7cfdd2f
-
 jobs:
   build:
     # Stable check names: the runner image can change without breaking the
     # required status checks configured in the repository ruleset.
     name: build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    # Fail instead of burning the 6-hour default if vcpkg stalls.
-    timeout-minutes: 30
+    # 30 minutes covered the C++-only build.  The Linux leg now also
+    # builds pyfvm and runs the application subset, and a cold run still
+    # compiles the vcpkg dependencies; fail instead of burning the
+    # 6-hour default.
+    timeout-minutes: 45
     strategy:
       # Report the other platform as well if one of them fails.
       fail-fast: false
@@ -40,11 +54,21 @@ jobs:
         include:
           - name: linux-gcc
             os: ubuntu-latest
+            python: true
           - name: windows-msvc
             os: windows-latest
+            python: false
 
     steps:
     - uses: actions/checkout@v7
+
+    # The pyfvm extension is version-locked to the interpreter found at
+    # configure time; pin one so CMake does not pick a different python
+    # that happens to be on the runner PATH.
+    - uses: actions/setup-python@v5
+      if: matrix.python
+      with:
+        python-version: '3.12'
 
     # Binary cache: stores the packages vcpkg built for vcpkg.json, so an
     # unchanged dependency set is downloaded instead of compiled again.
@@ -87,12 +111,27 @@ jobs:
         -S ${{ github.workspace }}
         -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
         -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
+        ${{ matrix.python && '-DFVM_BUILD_PYTHON=ON -DPython_EXECUTABLE="$(which python)"' || '' }}
 
     - name: Build
       run: cmake --build ${{ github.workspace }}/build --config ${{ env.BUILD_TYPE }} --parallel
 
-    - name: Test
+    - name: Test (unit layer)
       working-directory: ${{ github.workspace }}/build
       # --no-tests=error fails the step if no test was registered at all.
-      run: ctest -C ${{ env.BUILD_TYPE }} --output-on-failure --no-tests=error
+      run: >
+        ctest -C ${{ env.BUILD_TYPE }} -LE application
+        --output-on-failure --no-tests=error
+
+    - name: Test (application default subset)
+      if: matrix.python
+      working-directory: ${{ github.workspace }}/build
+      # The subset membership lives in the application_default ctest label
+      # set in CMakeLists.txt (one entry per physics family / code path).
+      run: |
+        if [ "${{ inputs.run_full }}" = "true" ]; then
+          ctest -C ${{ env.BUILD_TYPE }} -L application --output-on-failure --no-tests=error
+        else
+          ctest -C ${{ env.BUILD_TYPE }} -L application_default --output-on-failure --no-tests=error
+        fi
 

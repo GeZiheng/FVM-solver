@@ -141,4 +141,17 @@ if(FVM_BUILD_PYTHON)
     fvm_add_application_test(backward_step backward_facing_step --test)
     fvm_add_application_test(cylinder_re40 cylinder --re 40 --test)
     fvm_add_application_test(cylinder_re20 cylinder --re 20 --test)
+
+    # The CI workflow (pull requests) and the build-and-test MCP server run
+    # this labelled subset by default (`ctest -L application_default`): one
+    # entry per physics family / code path, about 7 minutes cold instead of
+    # the ~27 minute full layer.  The full layer stays available explicitly
+    # (workflow_dispatch run_full=true / full=true).  Keep the labels in
+    # sync with the reasoning in docs/python.md (application layer).
+    set_tests_properties(pyfvm_app_cavity_re100
+                         pyfvm_app_stokes_oscillating
+                         pyfvm_app_backward_step
+                         pyfvm_app_cylinder_re40
+                         pyfvm_app_cylinder_re20
+                         PROPERTIES LABELS "application;application_default")
 endif()
