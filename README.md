@@ -129,14 +129,34 @@ python python/examples/<name>.py
 
 ## 路线图
 
-已商定的路线图，按顺序：
+### 已完成
 
-1. ✅ **非定常项 + PISO** — 已完成：瞬态 theta scheme（时间精度已验证）、瞬态输运、共享的 `Momentum`/`Pressure`/`GridOperators` 原语与 `solvePiso`；`tests/test_piso.cpp` 已启用。交叉验证数值与已排除假设清单见 [`docs/numerical.md`](docs/numerical.md)。
-2. ✅ **`pyfvm` Python bindings** — 已完成：pybind11（vcpkg `python` feature、`FVM_BUILD_PYTHON=ON`、可选），覆盖 mesh/fields/BC/SIMPLE/PISO/transport/VTK 输出的 snake_case API 与 numpy 零拷贝视图；算例脚本在 `python/examples/`；绑定契约测试在 `python/tests/`（ctest 条目 `pyfvm_tests`）；C++ `fvm_solver` demo 可执行文件已移除——算例一律为 Python 脚本。细节见 [`docs/python.md`](docs/python.md)。
-3. ✅ **任意网格输入与非正交修正** — 4.3a（mesh abstraction、双网格表示、零数值变化）、4.3b（`readSu2`、`.vtu` writer `writeVtu`、`pyfvm.read_su2`）与 4.3c（non-orthogonal diffusion/pressure correction、内部 split 可选 minimum / over-relaxed、skewness correction、LSQ gradients、`pyfvm.CorrectionOptions`）已完成：100 个 C++ test cases 与 22 项 `pyfvm_tests` 通过；正交单步 OpenFOAM 复验差 `1.8e-9`，斜交 manufactured 解达二阶，梯形 NS OpenFOAM 对照在收敛 corrector 数下通过（NC=8 时 L2 `4.5e-4`；NC=2 的差距主要是 corrector 滞后，剩余一般场 split 依赖为 O(h²)，见 [`docs/numerical.md`](docs/numerical.md)）。格式决策为 SU2-first；Gmsh reader 搁置（2026-10-28：SU2 已满足需求，若将来重启仍共享 `MeshInput` 映射层）。
-4. ✅ **示例算例的 application tests（阶段 A + B）** — 已完成：application ctest 层扩展到 8 项（`ctest -L application`）。阶段 A 覆盖 cavity Re=100/400/1000 对照 Ghia、平面 Poiseuille 与 Stokes 振荡平板；cavity 采用 Central 格式，默认 Upwind 的数值扩散在 Re=400 会显著放大中心线误差。阶段 B 新增后向台阶（Re=50/100）与圆柱（Re=20/40）非结构算例，均经 SU2 网格 → `UnstructuredMesh` → SIMPLE → `.vtu`；断言使用文献量级带/趋势带与校准数据（Armaly 1983、Erturk 2008、Fornberg 1980、Dennis & Chang）。
+Phase 1–3 为路线图之前的基础：Phase 1 项目骨架（`Mesh`/`Field` 数据定义、基于 Eigen 的线性方程组求解、VTK 输出后处理）；Phase 2 动量方程组装（对流/扩散/边界条件离散格式）；Phase 3 SIMPLE 循环与 OpenFOAM 风格的持久面通量。
 
-Deferred/rejected：`examples/` 下的 per-case 可执行文件（繁琐）、JSON case 配置（与 Python 脚本重复）、按模块拆分 CMakeLists/tests/docs（仅当模块被外部复用或构建时间恶化时再议）。AMGCL/Hypre 后端仍是更大网格的候选方案。**meshgen MCP server** 是路线图候选：待 `mesh_su2` 成长为小型网格库且有跨会话需求时，做成 `.agents/mcp/` 中的薄封装并双注册，不复制几何实现；本次不做。`BoundaryField` 逐面 Dirichlet 值（Option B，解锁 Taylor–Green 等空间变化壁面值）仍是下一阶段候选。
+- **4.1 非定常项 + PISO**：隐式 theta 时间格式（二阶精度已验证）、瞬态输运、共享 `Momentum`/`Pressure`/`GridOperators` 原语与 `solvePiso`；与 OpenFOAM-14 的对照与结论见 [`docs/numerical.md`](docs/numerical.md)。
+- **4.2 `pyfvm` Python bindings**：pybind11 snake_case API + numpy 零拷贝视图；算例脚本在 `python/examples/`，契约测试为 `pyfvm_tests`；细节见 [`docs/python.md`](docs/python.md)。
+- **4.3 任意网格输入与非正交修正（a–c）**：face-first mesh abstraction 双表示（`CartesianMesh`/`UnstructuredMesh`）、SU2 reader + `.vtu` 输出、非正交/偏斜修正 + LSQ 梯度 + 可选 split；斜交梯形 NS 的 OpenFOAM 对照在 NC=8 时 L2 `4.5e-4`（[`docs/numerical.md`](docs/numerical.md)）。Gmsh reader 搁置（SU2-first；重启时共享 `MeshInput` 映射层）。
+- **4.4 Application tests（阶段 A–B）**：cavity Re=100/400/1000（Ghia）、平面 Poiseuille、Stokes 振荡平板、后向台阶 Re=50/100、圆柱 Re=20/40（SU2 → `UnstructuredMesh` → SIMPLE → `.vtu`）；ctest `-L application` 共 8 项。
+
+当前基线：100 个 C++ test cases、22 项 `pyfvm_tests`、8 项 application tests 全部通过。
+
+### Phase 5（下一阶段，2026-11-01 商定）
+
+按 5.1 → 5.2 → 5.3 顺序执行：
+
+- **5.1 `BoundaryField` 逐面 Dirichlet 值（Option B）**：按面 Dirichlet 值进入装配与压力边界系数，解锁空间变化 BC（Taylor–Green 精确解、抛物线入口）；含 pyfvm 绑定与单元测试。先行——5.3 多数算例依赖它。
+- **5.2 AMGCL 线性求解后端**：选型 AMGCL（header-only、原生 Eigen adapter、单进程无需 MPI；Hypre 因 vcpkg port 无条件依赖 mpi/blas/lapack 落选）。自建 vcpkg overlay port（锁版本 + SHA512），`FVM_BUILD_AMGCL=ON` 默认关闭、既有 CI 不变；新增 `createAmgclCG`（压力 SPD）/`createAmgclBiCGSTAB`（动量非对称）工厂并暴露到 pyfvm。
+- **5.3 更大规模/复杂算例**（按复杂度递增）：
+  1. 方腔 Re=3200 @ 256×256（Ghia 对照；AMG vs BiCGSTAB-ILUT 性能 showcase——性能数据记录进 [`docs/numerical.md`](docs/numerical.md)，CI 只断言正确性）；
+  2. 圆柱 Re=20/40 稳态改矩形域 `[-10,25]×[-10,10]`（O-4 多块生成器，`polar_ogrid` 退役；对 Fornberg / Dennis & Chang 带重校准）；
+  3. 后向台阶 Re=389 充分发展（抛物线）入口（Armaly 1983 上带）；
+  4. 斜网格抛物线入口 Poiseuille（小算例：逐面 Dirichlet 在非正交网格上的单元级验证，作 Taylor–Green 前置）；
+  5. Taylor–Green 涡（瞬态 PISO、精确 BC、64²→128²→256² 网格收敛验证二阶精度）；
+  6. 圆柱 Re=100 卡门涡街（同矩形域生成器，瞬态 PISO + Central；断言 St（文献带 ≈0.164–0.167）、Cd_mean、Cl 振幅；ctest 跑缩短版，完整收敛研究由脚本参数承担）。
+
+大算例（方腔 256²、涡街）标 `application` 但不进 `application_default`，保护默认 CI 时长。
+
+Deferred/rejected：`examples/` per-case 可执行文件、JSON case 配置、按模块拆分 CMakeLists/tests/docs（条件同前）。meshgen MCP server 仍是条件触发候选（`mesh_su2` 成长为小型网格库且出现跨会话需求时再做薄封装）。修正限制器与边界显式补全按 [`docs/numerical.md`](docs/numerical.md) 登记的触发条件执行。
 
 ## Agent 开发环境（harness）
 
