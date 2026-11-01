@@ -49,6 +49,32 @@ _ACTIVE_CTEST: dict | None = None
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
+# The same script backs two MCP registrations: the Windows-native
+# "build-and-test" and "build-and-test-wsl" (launched via wsl.exe with the
+# WSL python3). The tag keeps their build directories and async-ctest
+# markers apart when they share the repository's build/ tree.
+_HOST_TAG = "windows" if os.name == "nt" else "wsl"
+
+
+def _build_root() -> pathlib.Path:
+    """Build root: the repository's build/, or FVM_BUILD_ROOT when set.
+
+    The override lets the WSL instance build on its native ext4 filesystem
+    instead of the slower /mnt/<drive> mount.
+    """
+    override = os.environ.get("FVM_BUILD_ROOT")
+    if override:
+        return pathlib.Path(override).expanduser()
+    return REPO_ROOT / "build"
+
+
+def _relpath(path: pathlib.Path) -> str:
+    """Prefer a repo-relative posix path; outside paths stay absolute."""
+    try:
+        return path.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return path.as_posix()
+
 # Used to reproduce the Visual Studio developer environment; see
 # _msvc_environment(). vswhere.exe sits under a Program Files root, which the
 # agent may filter out of the environment, so resolve it at runtime (see
@@ -305,6 +331,12 @@ def _vcpkg_root() -> str | None:
     if root:
         return root
 
+    if os.name != "nt":
+        # No persisted-environment fallback outside Windows. The WSL
+        # registration sources ~/.profile via `bash -lc`, so VCPKG_ROOT
+        # must be exported there (interactive .bashrc exports stay unseen).
+        return None
+
     try:
         import winreg
     except ImportError:
@@ -488,7 +520,7 @@ def _msvc_environment() -> tuple[dict[str, str] | None, str]:
 
 def _write_marker(marker: pathlib.Path, state: str, **extra) -> None:
     """Persist the async-run state; failures stay silent (best effort)."""
-    data = {"state": state}
+    data = {"state": state, "host": _HOST_TAG}
     data.update(extra)
     try:
         marker.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -498,13 +530,16 @@ def _write_marker(marker: pathlib.Path, state: str, **extra) -> None:
 
 def _find_running_marker() -> pathlib.Path | None:
     """Return a leftover 'running' marker from a dead server, if any."""
-    build_root = REPO_ROOT / "build"
+    build_root = _build_root()
     if not build_root.exists():
         return None
     for marker in sorted(build_root.glob("*-agent*/mcp_ctest.json")):
         try:
             data = json.loads(marker.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("host") != _HOST_TAG:
+            # Foreign host (or a pre-host-field marker): not ours to reap.
             continue
         if data.get("state") == "running":
             return marker
@@ -652,7 +687,7 @@ def _start_async_ctest(
         run=run,
         config=config,
         started=time.time(),
-        log=log_file.relative_to(REPO_ROOT).as_posix(),
+        log=_relpath(log_file),
     )
     payload = {
         "ok": True,
@@ -662,7 +697,7 @@ def _start_async_ctest(
         "run": run,
         "python": python,
         "build_dir": str(build_dir),
-        "async_log": log_file.relative_to(REPO_ROOT).as_posix(),
+        "async_log": _relpath(log_file),
         "report": (
             "ctest started in the background; poll the test_status tool "
             "until it reports a terminal state"
@@ -753,7 +788,7 @@ def test_status() -> tuple[str, bool]:
     if failed:
         payload["first_error"] = _first_error(output)
         payload["tail"] = _tail(output)
-    payload["log_path"] = handle["build_log"].relative_to(REPO_ROOT).as_posix()
+    payload["log_path"] = _relpath(handle["build_log"])
     return json.dumps(payload, indent=2), not failed
 
 
@@ -913,13 +948,20 @@ def build_and_test(
             False,
         )
 
-    build_dir = REPO_ROOT / "build" / f"{config}-agent{'-py' if python else ''}"
+    build_dir = _build_root() / (
+        f"{config}-agent{'-py' if python else ''}"
+        f"{'-wsl' if _HOST_TAG == 'wsl' else ''}"
+    )
     sections = [f"project: {REPO_ROOT}", f"build dir: {build_dir}"]
     transcript: list[str] = []
     failed = False
     stage = "configure"
     test_summary: str | None = None
-    tests: dict | None = None
+    # NOTE: do not name this local `tests` -- that would shadow the ctest -R
+    # regex parameter and silently drop it (a pre-existing bug caught while
+    # validating the WSL twin; the regex reached the function but was None
+    # by the time the application branch built its ctest command).
+    tests_result: dict | None = None
     log_file = build_dir / "build_and_test.log"
     log_path: str | None = None
 
@@ -931,7 +973,7 @@ def build_and_test(
         try:
             with log_file.open("w", encoding="utf-8", newline="\n") as stream:
                 stream.write("\n".join(transcript) + "\n")
-            log_path = log_file.relative_to(REPO_ROOT).as_posix()
+            log_path = _relpath(log_file)
         except OSError:
             log_path = None
 
@@ -987,13 +1029,13 @@ def build_and_test(
                 / "vcpkg.cmake"
             )
         )
-    if python:
-        configure_cmd.append("-DFVM_BUILD_PYTHON=ON")
     else:
         sections.append(
             "WARNING: VCPKG_ROOT is not set; configuring without the vcpkg "
             "toolchain file (eigen3/doctest will not be found)."
         )
+    if python:
+        configure_cmd.append("-DFVM_BUILD_PYTHON=ON")
     sections.append("\n$ " + " ".join(configure_cmd))
     transcript.append("$ " + " ".join(configure_cmd))
     code, output = _run(configure_cmd, CONFIGURE_TIMEOUT, build_env)
@@ -1117,13 +1159,13 @@ def build_and_test(
             sections.append(_tail(output))
             transcript.append(output)
             write_log()
-            tests = _parse_ctest(output)
+            tests_result = _parse_ctest(output)
             if code != 0:
                 failed = True
                 sections.append(f"\nTESTS FAILED (exit code {code})")
             else:
                 sections.append("\nALL TESTS PASSED")
-                test_summary = tests["summary"] or "all tests passed"
+                test_summary = tests_result["summary"] or "all tests passed"
 
     if not failed and quiet:
         summary = [
@@ -1142,8 +1184,8 @@ def build_and_test(
             "stage": "done",
             "report": "\n".join(summary),
         }
-        if tests is not None:
-            payload["tests"] = tests
+        if tests_result is not None:
+            payload["tests"] = tests_result
         if log_path is not None:
             payload["log_path"] = log_path
         return json.dumps(payload, indent=2), True
@@ -1162,8 +1204,8 @@ def build_and_test(
         "stage": stage,
         "report": "\n".join(sections),
     }
-    if tests is not None:
-        payload["tests"] = tests
+    if tests_result is not None:
+        payload["tests"] = tests_result
     if failed:
         payload["first_error"] = _first_error(output)
         payload["tail"] = _tail(output)

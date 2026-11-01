@@ -12,6 +12,17 @@
         ],
       "enabled": true
     },
+    "build-and-test-wsl": {
+      "type": "local",
+      "command": [
+        "wsl.exe",
+        "-e",
+        "bash",
+        "-lc",
+        "exec python3 .agents/mcp/build_and_test_server.py"
+      ],
+      "enabled": true
+    },
     "openfoam": {
       "type": "local",
       "command": [

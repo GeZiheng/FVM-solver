@@ -140,7 +140,7 @@ Deferred/rejected：`examples/` 下的 per-case 可执行文件（繁琐）、JS
 
 ## Agent 开发环境（harness）
 
-本仓库的 agent harness 由两个项目级 MCP server 组成：`build-and-test` 和 `openfoam`。两者都运行在 agent 沙箱之外，这是 WSL 与 vcpkg 操作无需逐次提权就能工作的原因。使用时机、工具参数与比较纪律见 [`AGENTS.md`](AGENTS.md) 的 MCP Servers 小节。
+本仓库的 agent harness 由三个项目级 MCP server 组成：`build-and-test`、`build-and-test-wsl` 与 `openfoam`。三者都运行在 agent 沙箱之外，这是 WSL 与 vcpkg 操作无需逐次提权就能工作的原因。`build-and-test-wsl` 用 WSL 的 `python3` 启动**同一份** `build_and_test_server.py`（`wsl.exe -e bash -lc "exec python3 .agents/mcp/build_and_test_server.py"`），用于在本地复现 Linux 构建路径（如 CI 才会暴露的 `-fPIC` 链接问题）。使用时机、工具参数与比较纪律见 [`AGENTS.md`](AGENTS.md) 的 MCP Servers 小节。
 
 harness 的单一出处分为三层：
 
@@ -154,7 +154,7 @@ harness 的单一出处分为三层：
 
 ```text
 .agents/mcp/
-  build_and_test_server.py   — build-and-test MCP server（CMake/Ninja/ctest 封装）
+  build_and_test_server.py   — build-and-test MCP server（CMake/Ninja/ctest 封装；Windows 与 WSL 双注册）
   openfoam_server.py         — openfoam MCP server（WSL OpenFOAM-14 驱动）
   openfoam_fields.py         — 纯 ascii 解析 + 字段重映射（无 WSL、无 subprocess、无 I/O）
   openfoam/                  — make_of_case.sh、of_log_summary.py 等辅助脚本；tests/ 计划中
@@ -169,11 +169,12 @@ opencode.json               — OpenCode：skill 路径、同一组 MCP server�
 ### 环境与配置要点
 
 - `VCPKG_ROOT` 与 `Path` 中的 `ninja.exe` 必须在 agent 会话启动前就绪；前提与构建命令见上文“构建与测试”。
+- `build-and-test-wsl` 的前提在 WSL 默认发行版内：`python3`、`cmake`、`ninja`、C++ 编译器与 Linux vcpkg（env `VCPKG_ROOT`，须在 `~/.profile` 导出——`bash -lc` 看不到 `~/.bashrc` 交互守卫后的 export）；仓库须位于 Windows 盘符下（`wsl.exe` 把 cwd 翻译为 `/mnt/<drive>/...`）。其构建目录为 `build/<config>-agent[-py]-wsl/`（与 Windows 实例隔离，异步 marker 带 `host` 字段互不误回收；无 `host` 字段的旧格式 marker 视为异宿主、不回收）；可选 env `FVM_BUILD_ROOT` 把构建根移到 WSL ext4（`/mnt/<drive>` 上构建偏慢），此时 `log_path` 为绝对路径。
 - `FVM_OF_ALLOWED_ROOTS` 是冒号分隔的绝对 WSL 路径，用于扩大 `run_case` 允许的 `template`/`root` 根；候选路径在 WSL 内经 `realpath` 规范化，符号链接与 `..` 无法逃逸。该检查不是 TOCTOU-free 的；威胁模型是混淆的 agent，不是本地竞争者。
-- 工具副作用：`build_and_test` 写 `build/<config>-agent[-py]/`（异步模式另写 `ctest_async.log` 与 `mcp_ctest.json`），`run_case` 在 WSL 中创建 case 目录并启动 `foamRun`，其余工具全部只读。ascii-only 限制见 [`AGENTS.md`](AGENTS.md) 的 MCP Servers 小节。
+- 工具副作用：`build_and_test` 写 `build/<config>-agent[-py]/`（WSL 实例写 `build/<config>-agent[-py]-wsl/`，或 `FVM_BUILD_ROOT` 下的同名目录；异步模式另写 `ctest_async.log` 与 `mcp_ctest.json`，无 `host` 字段的旧格式 marker 视为异宿主、不回收），`run_case` 在 WSL 中创建 case 目录并启动 `foamRun`，其余工具全部只读。ascii-only 限制见 [`AGENTS.md`](AGENTS.md) 的 MCP Servers 小节。
 - `build_and_test` 返回结构化 JSON：成功含 `ok`/`config`/`build_dir`/`stage`/`tests`/`report`；失败附 `first_error`（按 CMake > ninja `FAILED:` > MSVC `error C<n>` > `error:` > ctest 的优先级取首行）、截断的 `tail` 与 `log_path`——完整未截断 transcript 只写入构建目录的 `build_and_test.log`。`run=application/all` 默认后台执行（`wait=false`，规避客户端 ~300s 工具调用超时）：立即返回 `stage=test-async`，随后轮询 `test_status` 直到 `finished`/`timeout`/`stale`，终态字段与同步路径同构。`run=application` 默认跑 `application_default` 标签子集（5 条，成员在 `CMakeLists.txt`，与 CI 默认一致）；`full=true` 跑整层，或用 `tests` 正则传给 `ctest -R`（子串匹配需 `$` 锚定；空匹配经 `--no-tests=error` 显式失败；与 `full` 互斥）。
 - `run_status` 的状态为 `running` / `finished` / `failed` / `stale` / `unknown`；`stale` 表示启动器进程已死且没有 `.exitcode`（例如 server 重启），需要重跑 case。启动器 PID 记录在 case 目录的 `.launcher_pid`（`kill -0` + `/proc/<pid>/cmdline` 含 case 路径双重校验，防 PID 复用）。
-- 审批模式记录在 `.codex/config.toml`：当前仅 `run_case` 需要审批；`build_and_test` 免批（副作用仅限仓库内 `build/` 与 vcpkg 缓存，且持久 implementer 工作流依赖无人工介入的中间编译检查），`openfoam` 的只读工具默认免批；三个只读子 agent（explorer/reviewer/test-triage）的 toml 另有"禁调 `build_and_test`/`run_case`"的指令。
+- 审批模式记录在 `.codex/config.toml`：当前仅 `run_case` 需要审批；`build_and_test`（含 WSL 实例）免批（副作用仅限仓库内 `build/`、`FVM_BUILD_ROOT` 覆盖指定的构建根与各自 vcpkg 缓存，且持久 implementer 工作流依赖无人工介入的中间编译检查），`openfoam` 的只读工具默认免批；三个只读子 agent（explorer/reviewer/test-triage）的 toml 另有"禁调 `build_and_test`/`run_case`"的指令。
 - openfoam 字段映射假定结构网格：`nx*ny` 必须等于网格单元数，`grid[j][i] = cell j*nx+i`，面通量从 OpenFOAM 的 owner→neighbour 约定转换到本项目的 `+x/+y` 约定。
 
 ### 手工验证
@@ -184,6 +185,12 @@ harness 自身还没有自动化测试（计划覆盖字典解析器、`extract_
 python -m py_compile .agents\mcp\build_and_test_server.py .agents\mcp\openfoam_server.py .agents\mcp\openfoam_fields.py
 # 纯函数冒烟：直接导入模块，不需要 WSL
 python -c "import sys; sys.path.insert(0, r'.agents/mcp'); import openfoam_fields, openfoam_server; print('import ok')"
+```
+
+marker 宿主隔离自检（伪造异宿主 running marker，确认本宿主忽略）：
+
+```powershell
+python -c "import sys, json; sys.path.insert(0, r'.agents/mcp'); import build_and_test_server as b; d=b.REPO_ROOT/'build'/'probe-agent-wsl'; d.mkdir(parents=True, exist_ok=True); (d/'mcp_ctest.json').write_text(json.dumps({'state':'running','host':'wsl'}), encoding='utf-8'); print('foreign marker ignored:', b._find_running_marker() is None)"
 ```
 
 build-and-test 的分层与异步路径（`run=unit` 同步、`run=application` 后台 + `test_status` 轮询、并发启动拒绝、未轮询句柄回收、`stale` 检测）通过 stdio JSON-RPC 驱动脚本手工验证，脚本不入库（位于 gitignored 的 `build/` 下）。
@@ -199,6 +206,7 @@ build-and-test 的分层与异步路径（`run=unit` 同步、`run=application` 
 ### 已知局限 / 计划项
 
 - 只读子 agent 的本地命令受沙箱约束，但 MCP 工具在沙箱外运行；已通过 toml 指令禁调 `build_and_test`/`run_case`（软约束），硬性的 per-agent 工具白名单待 Codex 机制验证后再引入。
+- `build-and-test-wsl` 首次 vcpkg 引导在慢网络下可能超过 configure 的 1800s 超时（实测：vcpkg 自带的 Linux cmake ~62MB 直连 ~8KB/s 即触发）。该引导是一次性的，且文件可预置：在 Windows 侧（有代理）下载同名文件放入 `~/vcpkg/downloads/` 即被 vcpkg 按 SHA 校验直接采用（本次的 cmake/doctest/eigen/pybind11/patchelf 均以此方式完成）；`VCPKG_DOWNLOADS` 亦可指向共享缓存。已缓存后 WSL 构建与 Windows 同量级。
 
 ## 文档索引
 
