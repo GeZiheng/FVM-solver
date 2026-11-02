@@ -33,15 +33,14 @@
       "timeout": 300000
     }
   },
-  "permission": {
-    "bash": {
-      "*": "allow",
-      "cmake --build *": "deny",
-      "cmake -B *": "deny",
-      "cmake -S *": "deny",
-      "ctest *": "deny",
-      "ninja *": "deny",
-      "*fvm_tests*": "deny"
-    }
-  }
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "allow" },
+    { "action": "shell", "resource": "cmake --build *", "effect": "deny" },
+    { "action": "shell", "resource": "cmake -B *", "effect": "deny" },
+    { "action": "shell", "resource": "cmake -S *", "effect": "deny" },
+    { "action": "shell", "resource": "ctest *", "effect": "deny" },
+    { "action": "shell", "resource": "ninja *", "effect": "deny" },
+    { "action": "shell", "resource": "*fvm_tests*", "effect": "deny" },
+    { "action": "openfoam_run_case", "resource": "*", "effect": "ask" }
+  ]
 }

@@ -181,7 +181,7 @@ harness 的单一出处分为三层：
 .agents/skills/refactor-code/SKILL.md — 四阶段代码改动工作流（中文）
 .codex/config.toml          — MCP server 注册 + 审批模式
 .codex/agents/*.toml        — explorer / implementer / reviewer / test-triage / docs（glm-5.3-flash）
-opencode.json               — OpenCode：skill 路径、同一组 MCP server、bash 权限块
+opencode.json               — OpenCode：skill 路径、同一组 MCP server、V2 permissions 数组（shell deny + run_case 审批）
 ```
 
 两个 agent 注册并访问同一份 server 实现。
@@ -194,7 +194,7 @@ opencode.json               — OpenCode：skill 路径、同一组 MCP server�
 - 工具副作用：`build_and_test` 写 `build/<config>-agent[-py]/`（WSL 实例写 `build/<config>-agent[-py]-wsl/`，或 `FVM_BUILD_ROOT` 下的同名目录；异步模式另写 `ctest_async.log` 与 `mcp_ctest.json`，无 `host` 字段的旧格式 marker 视为异宿主、不回收），`run_case` 在 WSL 中创建 case 目录并启动 `foamRun`，其余工具全部只读。ascii-only 限制见 [`AGENTS.md`](AGENTS.md) 的 MCP Servers 小节。
 - `build_and_test` 返回结构化 JSON：成功含 `ok`/`config`/`build_dir`/`stage`/`tests`/`report`；失败附 `first_error`（按 CMake > ninja `FAILED:` > MSVC `error C<n>` > `error:` > ctest 的优先级取首行）、截断的 `tail` 与 `log_path`——完整未截断 transcript 只写入构建目录的 `build_and_test.log`。`run=application/all` 默认后台执行（`wait=false`，规避客户端 ~300s 工具调用超时）：立即返回 `stage=test-async`，随后轮询 `test_status` 直到 `finished`/`timeout`/`stale`，终态字段与同步路径同构。`run=application` 默认跑 `application_default` 标签子集（5 条，成员在 `CMakeLists.txt`，与 CI 默认一致）；`full=true` 跑整层，或用 `tests` 正则传给 `ctest -R`（子串匹配需 `$` 锚定；空匹配经 `--no-tests=error` 显式失败；与 `full` 互斥）。
 - `run_status` 的状态为 `running` / `finished` / `failed` / `stale` / `unknown`；`stale` 表示启动器进程已死且没有 `.exitcode`（例如 server 重启），需要重跑 case。启动器 PID 记录在 case 目录的 `.launcher_pid`（`kill -0` + `/proc/<pid>/cmdline` 含 case 路径双重校验，防 PID 复用）。
-- 审批模式记录在 `.codex/config.toml`：当前仅 `run_case` 需要审批；`build_and_test`（含 WSL 实例）免批（副作用仅限仓库内 `build/`、`FVM_BUILD_ROOT` 覆盖指定的构建根与各自 vcpkg 缓存，且持久 implementer 工作流依赖无人工介入的中间编译检查），`openfoam` 的只读工具默认免批；三个只读子 agent（explorer/reviewer/test-triage）的 toml 另有"禁调 `build_and_test`/`run_case`"的指令。
+- 审批模式记录在 `.codex/config.toml`：当前仅 `run_case` 需要审批；`build_and_test`（含 WSL 实例）免批（副作用仅限仓库内 `build/`、`FVM_BUILD_ROOT` 覆盖指定的构建根与各自 vcpkg 缓存，且持久 implementer 工作流依赖无人工介入的中间编译检查），`openfoam` 的只读工具默认免批；三个只读子 agent（explorer/reviewer/test-triage）的 toml 另有"禁调 `build_and_test`/`run_case`"的指令。OpenCode 侧在 `opencode.json` 对齐同一契约：V2 `permissions` 数组中 `openfoam_run_case` 为 `ask`、其余 openfoam 工具走默认放行，shell 规则 deny 一切 `cmake`/`ctest`/`ninja`/`fvm_tests` 直调（强制走 `build-and-test` MCP 工具）。
 - openfoam 字段映射假定结构网格：`nx*ny` 必须等于网格单元数，`grid[j][i] = cell j*nx+i`，面通量从 OpenFOAM 的 owner→neighbour 约定转换到本项目的 `+x/+y` 约定。
 
 ### 手工验证

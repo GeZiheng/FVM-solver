@@ -128,4 +128,4 @@ Rules only; derivations and evidence: `docs/<module>.md` (mainly `docs/numerical
 
 Roadmap (single source of truth): see README.md §路线图 → Phase 5. This section tracks execution progress only — do not restate the roadmap here.
 
-Status (2026-11-01): Phase 5 payload decisions agreed (5.1 per-face Dirichlet values / 5.2 AMGCL backend / 5.3 larger application cases) and recorded in README.md. Phase 1 plan (`.agents/plans/phase5.md`) pending; no code touched yet.
+Status (2026-11-01): Phase 5 payload decisions agreed and recorded in README.md. Phase 5 is delivered in sub-batches, not as one batch. Current batch: **5.1 per-face Dirichlet values** — Phase 1 plan in `.agents/plans/phase5-1-per-face-dirichlet.md` (pending user confirmation); no code touched yet. 5.2 (AMGCL) and 5.3 (larger cases) get their own plans after 5.1 lands.
