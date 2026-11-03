@@ -82,6 +82,7 @@ target_sources(fvm_tests
         tests/test_convection.cpp
         tests/test_transport.cpp
         tests/test_simple.cpp
+        tests/test_boundary_face_values.cpp
         tests/test_transient.cpp
         tests/test_piso.cpp
         tests/main.cpp

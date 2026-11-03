@@ -215,6 +215,78 @@ class TestTransportBinding(unittest.TestCase):
         np.testing.assert_allclose(base, corrected, atol=1e-12)
 
 
+class TestBoundaryFaceValues(unittest.TestCase):
+    """Contract tests for BoundaryField's per-face value API."""
+
+    def test_set_values_follows_patch_face_order(self):
+        mesh = fvm.CartesianMesh(3, 4, 0.0, 0.0, 1.0, 1.0)
+        bc = fvm.BoundaryField(mesh)
+        values = np.array([1.0, 2.0, 3.0, 4.0])
+        bc.set_values(fvm.BoundaryField.West, fvm.BCType.Dirichlet,
+                      values)
+
+        faces = mesh.patch_faces(fvm.BoundaryField.West)
+        self.assertEqual(len(faces), len(values))
+        for face, expected in zip(faces, values):
+            self.assertEqual(bc.value_at(face), expected)
+
+    def test_set_values_rejects_the_wrong_length(self):
+        mesh = fvm.CartesianMesh(3, 4, 0.0, 0.0, 1.0, 1.0)
+        bc = fvm.BoundaryField(mesh)
+        with self.assertRaises(ValueError):
+            bc.set_values(fvm.BoundaryField.West, fvm.BCType.Dirichlet,
+                          np.array([1.0, 2.0]))
+
+    def test_set_values_rejects_non_1d_arrays(self):
+        mesh = fvm.CartesianMesh(3, 4, 0.0, 0.0, 1.0, 1.0)
+        bc = fvm.BoundaryField(mesh)
+        with self.assertRaises(ValueError):
+            bc.set_values(fvm.BoundaryField.West, fvm.BCType.Dirichlet,
+                          np.zeros((2, 2)))
+
+    def test_set_values_rejects_invalid_patches(self):
+        mesh = fvm.CartesianMesh(3, 4, 0.0, 0.0, 1.0, 1.0)
+        bc = fvm.BoundaryField(mesh)
+        with self.assertRaises(IndexError):
+            bc.set_values(99, fvm.BCType.Dirichlet, np.zeros(4))
+
+    def test_simple_smoke_with_a_set_values_inlet(self):
+        nx, ny = 8, 4
+        mesh = fvm.CartesianMesh(nx, ny, 0.0, 0.0, 1.0, 1.0)
+        velocity = fvm.VectorField(mesh, "velocity")
+        pressure = fvm.ScalarField(mesh, "pressure")
+        flux = fvm.FaceFluxField(mesh, "phi")
+
+        inlet = np.array([0.5 * y * (1.0 - y)
+                          for y in (mesh.face_centroid(face)[1]
+                                    for face in
+                                    mesh.patch_faces(
+                                        fvm.BoundaryField.West))])
+        bc_u = fvm.BoundaryField(mesh)
+        bc_u.set_values(fvm.BoundaryField.West, fvm.BCType.Dirichlet,
+                        inlet)
+        bc_u.set(fvm.BoundaryField.East, fvm.BCType.Neumann, 0.0)
+        for side in (fvm.BoundaryField.North, fvm.BoundaryField.South):
+            bc_u.set(side, fvm.BCType.Dirichlet, 0.0)
+
+        bc_v = fvm.BoundaryField(mesh)
+        for side in (fvm.BoundaryField.West, fvm.BoundaryField.East,
+                     fvm.BoundaryField.North, fvm.BoundaryField.South):
+            bc_v.set(side, fvm.BCType.Dirichlet, 0.0)
+        bc_p = fvm.BoundaryField(mesh)
+        bc_p.set(fvm.BoundaryField.East, fvm.BCType.Dirichlet, 0.0)
+
+        cfg = fvm.SimpleConfig()
+        cfg.tolerance = 1e-5
+        cfg.max_iterations = 1000
+        cfg.relaxation_u = 0.7
+        cfg.relaxation_p = 0.3
+        result = fvm.solve_simple(mesh, 1.0, 0.01, bc_u, bc_v, bc_p, cfg,
+                                  velocity, pressure, flux)
+        self.assertTrue(result.converged)
+        self.assertTrue(np.isfinite(velocity.u.to_numpy()).all())
+
+
 class TestDriverSmokes(unittest.TestCase):
     """End-to-end smokes: the drivers run to completion through the
     bindings and produce finite, sane fields. Quantitative physics

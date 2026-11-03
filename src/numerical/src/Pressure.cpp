@@ -226,9 +226,11 @@ CorrectorResult correctPressure(const Mesh& mesh,
             const BoundaryCondition& vCond = bcV.get(patch);
 
             const Scalar ub
-                = (uCond.type == BCType::Dirichlet) ? uCond.value : uHatU(o);
+                = (uCond.type == BCType::Dirichlet) ? bcU.valueAt(f)
+                                                     : uHatU(o);
             const Scalar vb
-                = (vCond.type == BCType::Dirichlet) ? vCond.value : uHatV(o);
+                = (vCond.type == BCType::Dirichlet) ? bcV.valueAt(f)
+                                                     : uHatV(o);
 
             // S is owner-outward, so Fb is the owner-outward boundary flux.
             const Scalar Fb = rho * (ub * S.x + vb * S.y);
@@ -261,7 +263,7 @@ CorrectorResult correctPressure(const Mesh& mesh,
 
                 if (!isReference(o))
                     pSys.A.insert(rowOf(o), rowOf(o), Cb);
-                rhsExtra(o) += Cb * pCond.value;
+                rhsExtra(o) += Cb * bcP.valueAt(f);
             }
         }
     }
@@ -419,7 +421,7 @@ CorrectorResult correctPressure(const Mesh& mesh,
         }
         else if (bcP.get(mesh.facePatch(f)).type == BCType::Dirichlet)
         {
-            flux[f] -= faceC(f) * (bcP.get(mesh.facePatch(f)).value - pNew(o));
+            flux[f] -= faceC(f) * (bcP.valueAt(f) - pNew(o));
         }
     }
 

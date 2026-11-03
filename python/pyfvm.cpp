@@ -578,6 +578,39 @@ void bindNumerical(py::module_& m)
             py::arg("side"), py::arg("type"), py::arg("value"))
         .def("get", &BoundaryField::get, py::arg("side"),
             py::return_value_policy::copy);
+    pyBoundaryField.def(
+        "set_values",
+        [](BoundaryField& self, Index patch, BCType type,
+            py::array_t<Scalar, py::array::c_style | py::array::forcecast>
+                values) {
+            if (values.ndim() != 1)
+            {
+                throw py::value_error("boundary values must be one-dimensional");
+            }
+            if (patch >= self.mesh().patchCount())
+            {
+                throw std::out_of_range(
+                    "boundary patch index is out of range");
+            }
+            const auto faces = self.mesh().patchFaces(patch);
+            if (static_cast<std::size_t>(values.size()) != faces.size())
+            {
+                throw py::value_error(
+                    "per-face value count must equal the patch face count");
+            }
+
+            std::vector<Scalar> copied;
+            copied.reserve(static_cast<std::size_t>(values.size()));
+            auto raw = values.unchecked<1>();
+            for (py::ssize_t k = 0; k < raw.size(); ++k)
+            {
+                copied.push_back(static_cast<Scalar>(raw(k)));
+            }
+            self.setValues(patch, type, std::move(copied));
+        },
+        py::arg("side"), py::arg("type"), py::arg("values"));
+    pyBoundaryField.def("value_at", &BoundaryField::valueAt,
+        py::arg("face"));
     pyBoundaryField.def("patch_count", &BoundaryField::patchCount);
     pyBoundaryField.attr("East") = py::int_(BoundaryField::East);
     pyBoundaryField.attr("North") = py::int_(BoundaryField::North);

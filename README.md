@@ -138,13 +138,13 @@ Phase 1–3 为路线图之前的基础：Phase 1 项目骨架（`Mesh`/`Field` 
 - **4.3 任意网格输入与非正交修正（a–c）**：face-first mesh abstraction 双表示（`CartesianMesh`/`UnstructuredMesh`）、SU2 reader + `.vtu` 输出、非正交/偏斜修正 + LSQ 梯度 + 可选 split；斜交梯形 NS 的 OpenFOAM 对照在 NC=8 时 L2 `4.5e-4`（[`docs/numerical.md`](docs/numerical.md)）。Gmsh reader 搁置（SU2-first；重启时共享 `MeshInput` 映射层）。
 - **4.4 Application tests（阶段 A–B）**：cavity Re=100/400/1000（Ghia）、平面 Poiseuille、Stokes 振荡平板、后向台阶 Re=50/100、圆柱 Re=20/40（SU2 → `UnstructuredMesh` → SIMPLE → `.vtu`）；ctest `-L application` 共 8 项。
 
-当前基线：100 个 C++ test cases、22 项 `pyfvm_tests`、8 项 application tests 全部通过。
+当前基线：109 个 C++ test cases、27 项 `pyfvm_tests`、8 项 application tests 全部通过。
 
 ### Phase 5（下一阶段，2026-11-01 商定）
 
 按 5.1 → 5.2 → 5.3 顺序执行：
 
-- **5.1 `BoundaryField` 逐面 Dirichlet 值（Option B）**：按面 Dirichlet 值进入装配与压力边界系数，解锁空间变化 BC（Taylor–Green 精确解、抛物线入口）；含 pyfvm 绑定与单元测试。先行——5.3 多数算例依赖它。
+- ✅ **5.1 `BoundaryField` 逐面 Dirichlet 值（Option B）** — 已完成：按面 Dirichlet 值进入装配与压力边界系数，解锁空间变化 BC（Taylor–Green 精确解、抛物线入口）；含 pyfvm 绑定与单元测试。先行——5.3 多数算例依赖它。新增 8 个 C++ 用例与 5 项绑定测试（Cartesian 线性场精确、斜网格 O(h) 收敛、压力边界通量守恒、端到端抛物线入口 SIMPLE）。
 - **5.2 AMGCL 线性求解后端**：选型 AMGCL（header-only、原生 Eigen adapter、单进程无需 MPI；Hypre 因 vcpkg port 无条件依赖 mpi/blas/lapack 落选）。自建 vcpkg overlay port（锁版本 + SHA512），`FVM_BUILD_AMGCL=ON` 默认关闭、既有 CI 不变；新增 `createAmgclCG`（压力 SPD）/`createAmgclBiCGSTAB`（动量非对称）工厂并暴露到 pyfvm。
 - **5.3 更大规模/复杂算例**（按复杂度递增）：
   1. 方腔 Re=3200 @ 256×256（Ghia 对照；AMG vs BiCGSTAB-ILUT 性能 showcase——性能数据记录进 [`docs/numerical.md`](docs/numerical.md)，CI 只断言正确性）；

@@ -23,7 +23,7 @@ $$\underbrace{\sum_f F_f \phi_f}_{\text{convection}} = \underbrace{\sum_f D_f (\
 | 插值权重 $g_f$ | $\lVert x_f-x_N\rVert/\lVert x_P-x_N\rVert$ | $1/2$ |
 | 边界质量通量 | $F_b=\rho (u_b\mathbf S_x+v_b\mathbf S_y)$ | 与旧的分量/面规则一致 |
 
-边界速度 $u_b/v_b$ 取该 patch 的 Dirichlet 值；未给定时取 owner 值（零梯度）。非正交分解中的 $\mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f$ 已由扩散矩阵的隐式正交部分和显式交叉项共同使用：矩阵保持正交扩散形式，$\mathbf k_f$ 只产生进入右端的 deferred-correction 项。
+边界速度 $u_b/v_b$ 取该 patch 的 Dirichlet 条件经 `valueAt(face)` 解析的面值；未给定时取 owner 值（零梯度）。非正交分解中的 $\mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f$ 已由扩散矩阵的隐式正交部分和显式交叉项共同使用：矩阵保持正交扩散形式，$\mathbf k_f$ 只产生进入右端的 deferred-correction 项。
 
 ## BoundaryCondition：边界条件
 
@@ -31,6 +31,10 @@ $$\underbrace{\sum_f F_f \phi_f}_{\text{convection}} = \underbrace{\sum_f D_f (\
 - `BoundaryField(mesh)` 按 mesh 的 patch 存储边界条件，默认全部为零通量 Neumann（$g=0$）。
 - `BoundaryField::East/North/West/South` 常量仅对 `CartesianMesh` 的 patch 顺序有效（$0/1/2/3$）；非结构网格以 `patchName/patchFaces` 为准。
 - `set/get` 对越界 patch 抛异常；同一 patch 上所有边界面共享一个条件。
+- 逐面值 API：`setValues(patch, type, values)` 按 `mesh.patchFaces(patch)` 遍历序把 `values` 散射进全局面下标存储（`valueAt(face)` 为 O(1)）；长度不符抛 `std::invalid_argument`。
+- `valueAt(face)` 先取该面的逐面值；未设置时回退 patch 常数。内部面抛 `std::invalid_argument`。未调用 `setValues` 时，`valueAt(face)` 与 patch 常数处处相等，默认装配路径零变化。
+- 逐面值语义与 BC 语义一致：Dirichlet 值为该面 $\phi_b$，Neumann 值为该面外法向导数 $\mathrm{d}\phi/\mathrm{d}n$；BC type 仍是 patch 级。
+- divergence、LSQ 梯度、对流边界速度与入流 RHS、扩散边界 RHS、压力 `phiHbyA` 与 Dirichlet-p 的 `C_b·p_b` 等全部边界消费点统一经 `valueAt(face)` 取值。
 
 ## GridOperators：公共离散算子
 
@@ -91,7 +95,7 @@ $$\alpha_{\min}=\frac{\mathbf S_f\cdot\mathbf d_f}{\mathbf d_f\cdot\mathbf d_f},
 
   $$D_b = \gamma_P \beta_f,\qquad \beta_f=\frac{\mathbf S_f\cdot\mathbf S_f}{\mathbf S_f\cdot\boldsymbol\delta},\quad \boldsymbol\delta=x_f-x_P$$
 
-  均匀笛卡尔网格上 $\beta_f=S_f/d_{Pb}$。
+  均匀笛卡尔网格上 $\beta_f=S_f/d_{Pb}$。$\phi_b$ 与 $g$ 均按 `valueAt(face)` 逐面解析。
 
   ```
   A(P,P) += D_b,   b(P) += D_b·φ_b
@@ -162,7 +166,7 @@ $$\phi_f=g_f\phi_O+(1-g_f)\phi_N+\mathbf G_f\cdot\mathbf s_f .$$
 | 情况 | 处理 | 含义 |
 |------|------|------|
 | $F_b > 0$（出流） | `A(P,P) += F_b` | 面值由单元值外插（迎风），通量未知留在矩阵 |
-| $F_b < 0$（入流）+ Dirichlet | `b(P) −= F_b·φ_b` | 入流携带已知值，通量完全已知移入右端项（注意 $F_b < 0$，故为减量） |
+| $F_b < 0$（入流）+ Dirichlet | `b(P) −= F_b·φ_b` | 入流携带 `valueAt(face)` 解析的已知值，通量完全已知移入右端项（注意 $F_b < 0$，故为减量） |
 | $F_b < 0$（入流）+ Neumann | `A(P,P) += F_b` | 假设法向零梯度，面值取 $\phi_P$ |
 
 ## TransportEquation：标量输运装配

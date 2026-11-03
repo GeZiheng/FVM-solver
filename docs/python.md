@@ -42,7 +42,7 @@ core：
 
 numerical：
 
-- 边界：`BoundaryField(mesh)` + `.set(patch, type, value)` / `.get(patch)` / `.patch_count()`；patch 常量 `BoundaryField.East/North/West/South` 只对应笛卡尔 patch 顺序，越界 patch 抛 `IndexError`；类型 `BCType.Dirichlet/Neumann`。默认全部 patch 零梯度 Neumann。
+- 边界：`BoundaryField(mesh)` + `.set(patch, type, value)` / `.get(patch)` / `.patch_count()`；patch 常量 `BoundaryField.East/North/West/South` 只对应笛卡尔 patch 顺序，越界 patch 抛 `IndexError`；类型 `BCType.Dirichlet/Neumann`。默认全部 patch 零梯度 Neumann。逐面值用 `.set_values(patch, type, values)` 设置：`values` 为 1-D numpy 数组，长度必须等于该 patch 面数，顺序遵循 `mesh.patch_faces(patch)` 遍历序；非 1-D 或长度不符抛 `ValueError`，patch 越界抛 `IndexError`。`.value_at(face)` 优先返回逐面值，否则回退 patch 常数。逐面值的含义与 C++ 侧一致：Dirichlet 为面值，Neumann 为法向导数。
 - 枚举：`ConvectionScheme.Upwind/Central`、`TimeScheme.Euler/CrankNicolson`、`NonOrthSplit.MinimumCorrection/OverRelaxed`。
 - `SolverConfig`：`tolerance`（相对残差）/ `max_iterations` / `verbose`。
 - `CorrectionOptions`：`non_orthogonal_diffusion=True`、`skew_interpolation=True`、`n_non_orthogonal_correctors=0`、`non_orth_split=NonOrthSplit.MinimumCorrection`。笛卡尔网格上修正量恒为零，默认行为保持零数值变化（旋转正交网格上压力 `crossP` 仍含各向异性补全项，见 `docs/numerical.md` 压力方程一节）。`n_non_orthogonal_correctors` 是压力求解子循环附加数（0 表示一次压力求解），负值会被拒绝。`non_orth_split` 永远控制内部面 $(\alpha,k)$；`non_orthogonal_diffusion` 只门控显式交叉项，因此“关闭修正 + OverRelaxed”表示 over 隐式、无显式修正。示例：`corrections.non_orth_split = NonOrthSplit.OverRelaxed`。

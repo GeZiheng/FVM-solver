@@ -66,14 +66,14 @@ void assembleDiffusion(const Mesh& mesh,
                 const Scalar diffusion
                     = gamma(owner) * geometry.boundaryCoef(face);
                 A.insert(owner, owner, diffusion);
-                b(owner) += diffusion * cond.value;
+                b(owner) += diffusion * bc.valueAt(face);
             }
             else
             {
                 const Point2 area = mesh.faceAreaVector(face);
                 const Scalar faceArea
                     = std::sqrt(area.x * area.x + area.y * area.y);
-                b(owner) += gamma(owner) * cond.value * faceArea;
+                b(owner) += gamma(owner) * bc.valueAt(face) * faceArea;
             }
         }
     }
