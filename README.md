@@ -165,7 +165,7 @@ Deferred/rejected：`examples/` per-case 可执行文件、JSON case 配置、�
 harness 的单一出处分为三层：
 
 - 委派策略（routing table、skip threshold、parent-owned responsibilities）：`AGENTS.md` 的 Codex Subagent Policy。
-- Agent runtime 行为（每个子 agent 的自我简报）：`.codex/agents/*.toml`。
+- Agent runtime 行为（每个子 agent 的自我简报）：`.codex/agents/*.toml` 与其 ZCode 移植 `.zcode/agents/*.md`（同一简报；ZCode 版用 frontmatter 的 `tools` 白名单替代 Codex 的 sandbox_mode，只读 agent 因此硬性拿不到 MCP 工具）。
 - 工作流阶段映射（哪个重构阶段委派给哪个 agent）：`.agents/skills/refactor-code/SKILL.md`；它只引用策略、不复述。
 
 同一条规则出现在第二层即是缺陷：应更新 owning 层并让引用处指向它，而不是维护两份事实。
@@ -181,10 +181,12 @@ harness 的单一出处分为三层：
 .agents/skills/refactor-code/SKILL.md — 四阶段代码改动工作流（中文）
 .codex/config.toml          — MCP server 注册 + 审批模式
 .codex/agents/*.toml        — explorer / implementer / reviewer / test-triage / docs（glm-5.3-flash）
+.zcode/config.json          — ZCode：同一组 MCP server（`mcp.servers`）
+.zcode/agents/*.md          — 上述五个子 agent 的 ZCode 版（GLM-5.3-Flash；只读 agent 带 tools 白名单）
 opencode.json               — OpenCode：skill 路径、同一组 MCP server、V2 permissions 数组（shell deny + run_case 审批）
 ```
 
-两个 agent 注册并访问同一份 server 实现。
+三个 agent（Codex、OpenCode、ZCode）注册并访问同一份 server 实现；skills 三者共用 `.agents/skills/`（ZCode 原生扫描该目录）。
 
 ### 环境与配置要点
 
@@ -194,7 +196,7 @@ opencode.json               — OpenCode：skill 路径、同一组 MCP server�
 - 工具副作用：`build_and_test` 写 `build/<config>-agent[-py]/`（WSL 实例写 `build/<config>-agent[-py]-wsl/`，或 `FVM_BUILD_ROOT` 下的同名目录；异步模式另写 `ctest_async.log` 与 `mcp_ctest.json`，无 `host` 字段的旧格式 marker 视为异宿主、不回收），`run_case` 在 WSL 中创建 case 目录并启动 `foamRun`，其余工具全部只读。ascii-only 限制见 [`AGENTS.md`](AGENTS.md) 的 MCP Servers 小节。
 - `build_and_test` 返回结构化 JSON：成功含 `ok`/`config`/`build_dir`/`stage`/`tests`/`report`；失败附 `first_error`（按 CMake > ninja `FAILED:` > MSVC `error C<n>` > `error:` > ctest 的优先级取首行）、截断的 `tail` 与 `log_path`——完整未截断 transcript 只写入构建目录的 `build_and_test.log`。`run=application/all` 默认后台执行（`wait=false`，规避客户端 ~300s 工具调用超时）：立即返回 `stage=test-async`，随后轮询 `test_status` 直到 `finished`/`timeout`/`stale`，终态字段与同步路径同构。`run=application` 默认跑 `application_default` 标签子集（5 条，成员在 `CMakeLists.txt`，与 CI 默认一致）；`full=true` 跑整层，或用 `tests` 正则传给 `ctest -R`（子串匹配需 `$` 锚定；空匹配经 `--no-tests=error` 显式失败；与 `full` 互斥）。
 - `run_status` 的状态为 `running` / `finished` / `failed` / `stale` / `unknown`；`stale` 表示启动器进程已死且没有 `.exitcode`（例如 server 重启），需要重跑 case。启动器 PID 记录在 case 目录的 `.launcher_pid`（`kill -0` + `/proc/<pid>/cmdline` 含 case 路径双重校验，防 PID 复用）。
-- 审批模式记录在 `.codex/config.toml`：当前仅 `run_case` 需要审批；`build_and_test`（含 WSL 实例）免批（副作用仅限仓库内 `build/`、`FVM_BUILD_ROOT` 覆盖指定的构建根与各自 vcpkg 缓存，且持久 implementer 工作流依赖无人工介入的中间编译检查），`openfoam` 的只读工具默认免批；三个只读子 agent（explorer/reviewer/test-triage）的 toml 另有"禁调 `build_and_test`/`run_case`"的指令。OpenCode 侧在 `opencode.json` 对齐同一契约：V2 `permissions` 数组中 `openfoam_run_case` 为 `ask`、其余 openfoam 工具走默认放行，shell 规则 deny 一切 `cmake`/`ctest`/`ninja`/`fvm_tests` 直调（强制走 `build-and-test` MCP 工具）。
+- 审批模式记录在 `.codex/config.toml`：当前仅 `run_case` 需要审批；`build_and_test`（含 WSL 实例）免批（副作用仅限仓库内 `build/`、`FVM_BUILD_ROOT` 覆盖指定的构建根与各自 vcpkg 缓存，且持久 implementer 工作流依赖无人工介入的中间编译检查），`openfoam` 的只读工具默认免批；三个只读子 agent（explorer/reviewer/test-triage）的 toml 另有"禁调 `build_and_test`/`run_case`"的指令。OpenCode 侧在 `opencode.json` 对齐同一契约：V2 `permissions` 数组中 `openfoam_run_case` 为 `ask`、其余 openfoam 工具走默认放行，shell 规则 deny 一切 `cmake`/`ctest`/`ninja`/`fvm_tests` 直调（强制走 `build-and-test` MCP 工具）。ZCode 侧在 `.zcode/config.json` 注册同一组 server 并自动连接，但没有 per-tool 审批与 shell deny 机制：`run_case` 需确认改由 AGENTS.md 的行为约定承担（ZCode 会话中调用 `run_case` 前先征得用户同意），shell 直调 cmake/ctest 的禁令同样以 AGENTS.md 指令为准。
 - openfoam 字段映射假定结构网格：`nx*ny` 必须等于网格单元数，`grid[j][i] = cell j*nx+i`，面通量从 OpenFOAM 的 owner→neighbour 约定转换到本项目的 `+x/+y` 约定。
 
 ### 手工验证
@@ -220,12 +222,12 @@ build-and-test 的分层与异步路径（`run=unit` 同步、`run=application` 
 ### 扩展规则
 
 - 新的 MCP 工具与其 schema 一起加进所属 server；可复用的 OpenFOAM 文本解析放进 `openfoam_fields.py`，且必须保持无 WSL/subprocess/I/O，以维持可单测性。
-- server 保持纯标准库 Python、stdio 上的换行分隔 JSON-RPC；`.codex/config.toml` 与 `opencode.json` 注册的入口（`python .agents/mcp/<server>.py`）必须始终可用。
+- server 保持纯标准库 Python、stdio 上的换行分隔 JSON-RPC；`.codex/config.toml`、`opencode.json` 与 `.zcode/config.json` 注册的入口（`python .agents/mcp/<server>.py`）必须始终可用。
 - harness 源码仅 ASCII；面向 agent 的文档跟随所在文件的语言（中文以外的术语保留英文）。
 
 ### 已知局限 / 计划项
 
-- 只读子 agent 的本地命令受沙箱约束，但 MCP 工具在沙箱外运行；已通过 toml 指令禁调 `build_and_test`/`run_case`（软约束），硬性的 per-agent 工具白名单待 Codex 机制验证后再引入。
+- 只读子 agent 的本地命令受沙箱约束，但 MCP 工具在沙箱外运行；Codex 侧已通过 toml 指令禁调 `build_and_test`/`run_case`（软约束），硬性的 per-agent 工具白名单待 Codex 机制验证后再引入。ZCode 侧已通过 `.zcode/agents/*.md` 的 `tools: [Read, Bash]` 白名单硬性裁剪（MCP 工具与写工具均不可见），Bash 只读语义仍靠 agent 指令约束。
 - `build-and-test-wsl` 首次 vcpkg 引导在慢网络下可能超过 configure 的 1800s 超时（实测：vcpkg 自带的 Linux cmake ~62MB 直连 ~8KB/s 即触发）。该引导是一次性的，且文件可预置：在 Windows 侧（有代理）下载同名文件放入 `~/vcpkg/downloads/` 即被 vcpkg 按 SHA 校验直接采用（本次的 cmake/doctest/eigen/pybind11/patchelf 均以此方式完成）；`VCPKG_DOWNLOADS` 亦可指向共享缓存。已缓存后 WSL 构建与 Windows 同量级。
 
 ## 文档索引

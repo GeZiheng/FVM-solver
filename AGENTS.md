@@ -7,9 +7,9 @@
 - **Solver structure**: reusable `predictMomentum` / `correctPressure` primitives (`Momentum`/`Pressure`); `Simple`/`Piso` are thin drivers — extend the primitives, not the loops.
 - **PISO**: working (`tests/test_piso.cpp`); invariants and cross-check evidence: **Key Design Decisions** + `docs/numerical.md` (via the `openfoam` MCP server).
 
-## Skills (`.agents/skills/`, shared by Codex and OpenCode)
+## Skills (`.agents/skills/`, shared by Codex, OpenCode and ZCode)
 
-Both agents load the project skills from `.agents/skills` (Codex: project skill root; OpenCode: `skills.paths` in `opencode.json`). Use them:
+All three agents load the project skills from `.agents/skills` (Codex: project skill root; OpenCode: `skills.paths` in `opencode.json`; ZCode: native `.agents/skills` scan). Use them:
 
 - **`refactor-code`** — every planned change to this project's code goes through its four phases (plan → edit → review → docs). Phase 1 must present a plan and wait for the user's confirmation before any code is touched.
 
@@ -17,7 +17,7 @@ There is no OpenFOAM skill: cross-check mechanics live in the `openfoam` MCP ser
 
 ## Codex Subagent Policy
 
-The project parent uses `glm-5.3` (`.codex/config.toml`; the ZAI provider stays user-level). The `glm-5.3-flash` agents in `.codex/agents/` execute work that **passes the delegation gates** or **meets the read-only triggers** below; everything else is parent-direct, with no approval beyond the plan confirmation the workflow already requires:
+The project parent uses `glm-5.3` (`.codex/config.toml`; the ZAI provider stays user-level). The `glm-5.3-flash` agents in `.codex/agents/` execute work that **passes the delegation gates** or **meets the read-only triggers** below; everything else is parent-direct, with no approval beyond the plan confirmation the workflow already requires. ZCode sessions run the same policy through the `.zcode/agents/*.md` twins of these five agents (GLM-5.3-Flash pinned per machine in the frontmatter; the three read-only twins carry a hard `tools: [Read, Bash]` whitelist that hides all MCP and write tools):
 
 | Task class | Default agent | Mode |
 | --- | --- | --- |
@@ -47,7 +47,7 @@ The parent may cross a gate either way with a one-line justification; `fvm-docs`
 
 **Measured non-levers** (do not re-litigate without new data): reasoning-effort overrides (A/B: 40 s vs 41 s), respawning the implementer per group, removing stop-and-report.
 
-Single source of truth for delegation: this section (routing table, gates, read-only triggers, session shape, parent-owned work). `.codex/agents/*.toml` own runtime behaviour; the `refactor-code` skill only maps workflow phases to agents, never restating policy or gate numbers.
+Single source of truth for delegation: this section (routing table, gates, read-only triggers, session shape, parent-owned work). `.codex/agents/*.toml` and their `.zcode/agents/*.md` twins own runtime behaviour; the `refactor-code` skill only maps workflow phases to agents, never restating policy or gate numbers.
 
 ### Token discipline (the parent context is the scarce resource)
 
@@ -78,7 +78,7 @@ Human-facing prerequisites and the canonical manual CMake/CTest commands are in 
 
 ## MCP Servers
 
-Two project-scoped stdio JSON-RPC servers (plain-stdlib Python): `build-and-test` and `openfoam`, registered in `.codex/config.toml` / `opencode.json` and running **outside** the agent sandbox — that is what makes WSL and vcpkg access work. Prefer them; manual fallback commands: README.md (Build & Test). Harness internals (file map, env vars, verification rules): README.md, "Agent 开发环境（harness）".
+Two project-scoped stdio JSON-RPC servers (plain-stdlib Python): `build-and-test` and `openfoam`, registered in `.codex/config.toml` / `opencode.json` / `.zcode/config.json` and running **outside** the agent sandbox — that is what makes WSL and vcpkg access work. Prefer them; manual fallback commands: README.md (Build & Test). Harness internals (file map, env vars, verification rules): README.md, "Agent 开发环境（harness）".
 
 ### build-and-test (`.agents/mcp/build_and_test_server.py`)
 
@@ -99,7 +99,7 @@ The single entry point for OpenFOAM-14 reference checks (structured JSON; parame
 
 Comparison discipline (full protocol: `docs/numerical.md` §对比纪律): fix the contract first; **single step** first (`end_time == dt`, `p(0,0)` + inlet `phi/S` to solver tolerance); one configuration per directory; `nCorrectors = 1` and `= 2`; never loosen tolerances.
 
-Only `run_case` requires approval; `build_and_test` is auto-approved; the read-only `openfoam` tools are auto-approved. Hardening and side effects: README "Agent 开发环境（harness）". Helper scripts (`.agents/mcp/openfoam/`) are the human fallback. Never modify the OpenFOAM source tree or an existing case directory.
+Only `run_case` requires approval; `build_and_test` is auto-approved; the read-only `openfoam` tools are auto-approved. ZCode has no per-tool approval mechanism — its sessions honor the same contract behaviorally: ask the user before `run_case`, and rely on the Build Instructions rule above (never shell out to cmake/ctest/ninja) instead of OpenCode's shell-deny permissions. Hardening and side effects: README "Agent 开发环境（harness）". Helper scripts (`.agents/mcp/openfoam/`) are the human fallback. Never modify the OpenFOAM source tree or an existing case directory.
 
 ## Key Design Decisions
 
