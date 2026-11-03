@@ -162,3 +162,61 @@ def polar_ogrid(n_theta, n_r, r0, r1):
             lines.append(f"3 {first} {second}")
 
     return "\n".join(lines) + "\n"
+
+
+def sheared_channel(n, shear=0.3):
+    """Return a sheared constant-section channel as SU2 text.
+
+    The unit square is mapped bilinearly onto the parallelogram with
+    corners (0, 0), (1, 0), (1 + shear, 1), (shear, 1): the south and
+    north edges stay horizontal (constant section height one) while the
+    x-faces tilt by atan(shear), which exercises the non-orthogonal
+    corrections.  ``n`` is the cell count per edge; the grid is
+    ``n x n`` quads.  Marker order is south, east, north, west
+    (patch 0..3), matching piso_nonortho_channel.py.
+    """
+    if not isinstance(n, int) or n <= 0:
+        raise ValueError("n must be a positive integer")
+    if shear <= 0.0:
+        raise ValueError("shear must be positive")
+
+    corners = ((0.0, 0.0), (1.0, 0.0), (1.0 + shear, 1.0), (shear, 1.0))
+
+    def point(i, j):
+        s = i / n
+        t = j / n
+        x = (1.0 - t) * ((1.0 - s) * corners[0][0] + s * corners[1][0]) \
+            + t * ((1.0 - s) * corners[3][0] + s * corners[2][0])
+        y = (1.0 - t) * ((1.0 - s) * corners[0][1] + s * corners[1][1]) \
+            + t * ((1.0 - s) * corners[3][1] + s * corners[2][1])
+        return x, y
+
+    def point_id(i, j):
+        return j * (n + 1) + i + 1
+
+    lines = ["NDIME= 2", f"NPOIN= {(n + 1) * (n + 1)}"]
+    for j in range(n + 1):
+        for i in range(n + 1):
+            x, y = point(i, j)
+            lines.append(f"{point_id(i, j)} {x!r} {y!r}")
+
+    lines.append(f"NELEM= {n * n}")
+    for j in range(n):
+        for i in range(n):
+            lines.append(f"9 {point_id(i, j)} {point_id(i + 1, j)} "
+                         f"{point_id(i + 1, j + 1)} {point_id(i, j + 1)}")
+
+    markers = [
+        ("south", [(point_id(i, 0), point_id(i + 1, 0)) for i in range(n)]),
+        ("east", [(point_id(n, j), point_id(n, j + 1)) for j in range(n)]),
+        ("north", [(point_id(i + 1, n), point_id(i, n)) for i in range(n)]),
+        ("west", [(point_id(0, j + 1), point_id(0, j)) for j in range(n)]),
+    ]
+    lines.append(f"NMARK= {len(markers)}")
+    for name, faces in markers:
+        lines.append(f"MARKER_TAG= {name}")
+        lines.append(f"MARKER_ELEMS= {len(faces)}")
+        for first, second in faces:
+            lines.append(f"3 {first} {second}")
+
+    return "\n".join(lines) + "\n"

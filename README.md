@@ -138,7 +138,7 @@ Phase 1–3 为路线图之前的基础：Phase 1 项目骨架（`Mesh`/`Field` 
 - **4.3 任意网格输入与非正交修正（a–c）**：face-first mesh abstraction 双表示（`CartesianMesh`/`UnstructuredMesh`）、SU2 reader + `.vtu` 输出、非正交/偏斜修正 + LSQ 梯度 + 可选 split；斜交梯形 NS 的 OpenFOAM 对照在 NC=8 时 L2 `4.5e-4`（[`docs/numerical.md`](docs/numerical.md)）。Gmsh reader 搁置（SU2-first；重启时共享 `MeshInput` 映射层）。
 - **4.4 Application tests（阶段 A–B）**：cavity Re=100/400/1000（Ghia）、平面 Poiseuille、Stokes 振荡平板、后向台阶 Re=50/100、圆柱 Re=20/40（SU2 → `UnstructuredMesh` → SIMPLE → `.vtu`）；ctest `-L application` 共 8 项。
 
-当前基线：109 个 C++ test cases、27 项 `pyfvm_tests`、8 项 application tests 全部通过。
+当前基线：109 个 C++ test cases、27 项 `pyfvm_tests`、9 项 application tests 全部通过。
 
 ### Phase 5（下一阶段，2026-11-01 商定）
 
@@ -150,7 +150,7 @@ Phase 1–3 为路线图之前的基础：Phase 1 项目骨架（`Mesh`/`Field` 
   1. 方腔 Re=3200 @ 256×256（Ghia 对照；AMG vs BiCGSTAB-ILUT 性能 showcase——性能数据记录进 [`docs/numerical.md`](docs/numerical.md)，CI 只断言正确性）；
   2. 圆柱 Re=20/40 稳态改矩形域 `[-10,25]×[-10,10]`（O-4 多块生成器，`polar_ogrid` 退役；对 Fornberg / Dennis & Chang 带重校准）；
   3. 后向台阶 Re=389 充分发展（抛物线）入口（Armaly 1983 上带）；
-  4. 斜网格抛物线入口 Poiseuille（小算例：逐面 Dirichlet 在非正交网格上的单元级验证，作 Taylor–Green 前置）；
+  4. ✅ 斜网格抛物线入口 Poiseuille — 已完成（2026-11-03，随 5.1 提前）：等截面斜切通道、两端逐面抛物线速度 + 全 Neumann 解析压力；入口通量精确守恒，剖面 O(h) 带断言；顺带实测斜面 Dirichlet-p 的 `Cb` 无补全偏移（见 [`docs/numerical.md`](docs/numerical.md)）；
   5. Taylor–Green 涡（瞬态 PISO、精确 BC、64²→128²→256² 网格收敛验证二阶精度）；
   6. 圆柱 Re=100 卡门涡街（同矩形域生成器，瞬态 PISO + Central；断言 St（文献带 ≈0.164–0.167）、Cd_mean、Cl 振幅；ctest 跑缩短版，完整收敛研究由脚本参数承担）。
 

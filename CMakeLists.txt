@@ -149,6 +149,7 @@ if(FVM_BUILD_PYTHON)
     fvm_add_application_test(poiseuille poiseuille --test)
     fvm_add_application_test(stokes_oscillating stokes_oscillating --test)
     fvm_add_application_test(backward_step backward_facing_step --test)
+    fvm_add_application_test(skewed_poiseuille skewed_poiseuille --test)
     fvm_add_application_test(cylinder_re40 cylinder --re 40 --test)
     fvm_add_application_test(cylinder_re20 cylinder --re 20 --test)
 
