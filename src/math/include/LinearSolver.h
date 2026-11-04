@@ -15,8 +15,10 @@ struct SolverConfig
     Scalar tolerance = 1e-6;
     int maxIterations = 1000;
     bool verbose = false;
-    // "eigen" default; "amgcl-cg"/"amgcl-bicgstab" need FVM_BUILD_AMGCL=ON.
+    // Implementation family: "eigen" | "amgcl"; amgcl needs FVM_BUILD_AMGCL=ON.
     std::string backend = "eigen";
+    // Outer Krylov method: "bicgstab" | "cg"; both families support both.
+    std::string method = "bicgstab";
 };
 
 /**

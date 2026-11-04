@@ -135,45 +135,59 @@ void requireIndex(bool ok)
         throw py::index_error("index out of range");
 }
 
-/// Create the linear solver requested by config.backend. The default
-/// ("eigen") keeps the plain Eigen BiCGSTAB path; the AMGCL backends are
-/// only available when the module is built with FVM_BUILD_AMGCL=ON. Runs
-/// before the GIL is released, so the errors surface as normal Python
-/// exceptions.
+/// Create the linear solver requested by the orthogonal pair
+/// config.backend x config.method (implementation family vs outer Krylov
+/// method). The default (eigen + bicgstab) keeps the plain Eigen BiCGSTAB
+/// path; the amgcl family is only available when the module is built with
+/// FVM_BUILD_AMGCL=ON. Runs before the GIL is released, so the errors
+/// surface as normal Python exceptions.
 std::unique_ptr<math::LinearSolver> makeLinearSolver(
     const math::SolverConfig& config)
 {
+    if (config.backend == "amgcl")
+    {
 #ifdef FVM_HAVE_AMGCL
-    if (config.backend == "amgcl-cg")
-    {
-        return math::createAmgclCG(config);
-    }
-    if (config.backend == "amgcl-bicgstab")
-    {
-        return math::createAmgclBiCGSTAB(config);
-    }
+        if (config.method == "cg")
+        {
+            return math::createAmgclCG(config);
+        }
+        if (config.method == "bicgstab")
+        {
+            return math::createAmgclBiCGSTAB(config);
+        }
 #else
-    if (config.backend == "amgcl-cg" || config.backend == "amgcl-bicgstab")
-    {
+        // Family-level gate, independent of the method: the OFF build
+        // rejects amgcl before the method is even looked at.
         throw std::runtime_error(
-            "backend '" + config.backend + "' requires building the project "
-            "with FVM_BUILD_AMGCL=ON");
-    }
+            "backend 'amgcl' requires building the project with "
+            "FVM_BUILD_AMGCL=ON");
 #endif
-    if (config.backend == "eigen")
+    }
+    else if (config.backend == "eigen")
     {
-        return math::createEigenBiCGSTAB(config);
+        if (config.method == "bicgstab")
+        {
+            return math::createEigenBiCGSTAB(config);
+        }
+        if (config.method == "cg")
+        {
+            return math::createEigenCG(config);
+        }
+    }
+    else
+    {
+        throw std::invalid_argument(
+            "unknown solver backend '" + config.backend
+            + "': expected \"eigen\" or \"amgcl\"");
     }
     throw std::invalid_argument(
-        "unknown solver backend '" + config.backend + "': expected \"eigen\""
-#ifdef FVM_HAVE_AMGCL
-        ", \"amgcl-cg\" or \"amgcl-bicgstab\""
-#endif
-    );
+        "unknown solver method '" + config.method
+        + "': expected \"bicgstab\" or \"cg\"");
 }
 
-/// High-level steady scalar transport: assemble, solve with BiCGSTAB,
-/// return the solution as a numpy array (row-major cell order, j * nx + i).
+/// High-level steady scalar transport: assemble, solve the linear system
+/// (selected by SolverConfig backend x method), return the solution as a
+/// numpy array (row-major cell order, j * nx + i).
 py::array_t<Scalar> solveTransport(const Mesh& mesh,
     const FaceFluxField& flux,
     const ScalarField& gamma,
@@ -659,10 +673,11 @@ void bindNumerical(py::module_& m)
         .def_readwrite("tolerance", &SolverConfig::tolerance)
         .def_readwrite("max_iterations", &SolverConfig::maxIterations)
         .def_readwrite("verbose", &SolverConfig::verbose)
-        // Linear solver backend: "eigen" (default) or the AMGCL factories
-        // when the module was built with FVM_BUILD_AMGCL=ON (probe with
-        // pyfvm.HAVE_AMGCL).
-        .def_readwrite("backend", &SolverConfig::backend);
+        // Linear solver selection: backend ("eigen" default; "amgcl" when
+        // the module was built with FVM_BUILD_AMGCL=ON, probe with
+        // pyfvm.HAVE_AMGCL) x method ("bicgstab" default; "cg").
+        .def_readwrite("backend", &SolverConfig::backend)
+        .def_readwrite("method", &SolverConfig::method);
 
     py::class_<CorrectionOptions>(m,
         "CorrectionOptions",
