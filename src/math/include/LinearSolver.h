@@ -15,6 +15,8 @@ struct SolverConfig
     Scalar tolerance = 1e-6;
     int maxIterations = 1000;
     bool verbose = false;
+    // "eigen" default; "amgcl-cg"/"amgcl-bicgstab" need FVM_BUILD_AMGCL=ON.
+    std::string backend = "eigen";
 };
 
 /**
@@ -63,5 +65,12 @@ protected:
 std::unique_ptr<LinearSolver> createEigenBiCGSTAB(const SolverConfig& cfg = {});
 std::unique_ptr<LinearSolver> createEigenCG(const SolverConfig& cfg = {});
 std::unique_ptr<LinearSolver> createEigenSparseLU(const SolverConfig& cfg = {});
+
+// AMGCL-backed factories, available only when the project is configured
+// with FVM_BUILD_AMGCL=ON (which defines FVM_HAVE_AMGCL).
+#ifdef FVM_HAVE_AMGCL
+std::unique_ptr<LinearSolver> createAmgclCG(const SolverConfig& cfg = {});
+std::unique_ptr<LinearSolver> createAmgclBiCGSTAB(const SolverConfig& cfg = {});
+#endif
 
 } // namespace fvm::math

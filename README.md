@@ -58,6 +58,8 @@ python/                  — pyfvm bindings (optional, -DFVM_BUILD_PYTHON=ON): p
                            backward_facing_step.py, cylinder.py),
                            tests/test_pyfvm.py (binding-contract tests = ctest entry pyfvm_tests),
                            overlay-ports/python3 (empty vcpkg port: link against system Python)
+ports/                   — vcpkg overlay port for amgcl (header-only, locked 1.5.0 +
+                           SHA512, depends only on eigen3; linked when FVM_BUILD_AMGCL=ON)
 docs/                    — module docs (Chinese): core.md, math.md, io.md, numerical.md, python.md
 ```
 
@@ -104,6 +106,10 @@ ctest --test-dir build/release-py -L application --output-on-failure
 
 binding 的 vcpkg feature、overlay port、解释器版本锁定与产物定位机制见 [`docs/python.md`](docs/python.md)。
 
+### AMGCL 线性求解后端（可选）
+
+追加 `-DFVM_BUILD_AMGCL=ON`（默认 OFF）会启用 AMGCL 线性求解后端：新增 `createAmgclCG`（压力类 SPD）/ `createAmgclBiCGSTAB`（动量类非对称）两个工厂（编译定义 `FVM_HAVE_AMGCL`），依赖经仓库内 overlay port `ports/amgcl/`（`vcpkg-configuration.json`）接入；OFF 构建不执行任何 amgcl 接线，既有 CI 行为不变。
+
 ### 运行算例
 
 ```powershell
@@ -126,6 +132,7 @@ python python/examples/<name>.py
 - `eigen3` — sparse linear algebra
 - `doctest` — unit testing (header-only)
 - `pybind11` — Python bindings (optional; only via the vcpkg `python` manifest feature when `FVM_BUILD_PYTHON=ON`)
+- `amgcl` — AMG-preconditioned linear solver backend (optional; only linked when `FVM_BUILD_AMGCL=ON`, via the in-repo overlay port `ports/amgcl/` — version locked 1.5.0 + SHA512, depends only on `eigen3`)
 
 ## 路线图
 
@@ -138,14 +145,14 @@ Phase 1–3 为路线图之前的基础：Phase 1 项目骨架（`Mesh`/`Field` 
 - **4.3 任意网格输入与非正交修正（a–c）**：face-first mesh abstraction 双表示（`CartesianMesh`/`UnstructuredMesh`）、SU2 reader + `.vtu` 输出、非正交/偏斜修正 + LSQ 梯度 + 可选 split；斜交梯形 NS 的 OpenFOAM 对照在 NC=8 时 L2 `4.5e-4`（[`docs/numerical.md`](docs/numerical.md)）。Gmsh reader 搁置（SU2-first；重启时共享 `MeshInput` 映射层）。
 - **4.4 Application tests（阶段 A–B）**：cavity Re=100/400/1000（Ghia）、平面 Poiseuille、Stokes 振荡平板、后向台阶 Re=50/100、圆柱 Re=20/40（SU2 → `UnstructuredMesh` → SIMPLE → `.vtu`）；ctest `-L application` 共 8 项。
 
-当前基线：109 个 C++ test cases、27 项 `pyfvm_tests`、9 项 application tests 全部通过。
+当前基线：109 个 C++ test cases、27 项 `pyfvm_tests`、9 项 application tests 全部通过。`FVM_BUILD_AMGCL=ON` 构建另含 3 项 C++ AMGCL 用例与 1 项 AMGCL 绑定用例（112 / 28，默认构建中后者跳过）。
 
 ### Phase 5（下一阶段，2026-11-01 商定）
 
 按 5.1 → 5.2 → 5.3 顺序执行：
 
 - ✅ **5.1 `BoundaryField` 逐面 Dirichlet 值（Option B）** — 已完成：按面 Dirichlet 值进入装配与压力边界系数，解锁空间变化 BC（Taylor–Green 精确解、抛物线入口）；含 pyfvm 绑定与单元测试。先行——5.3 多数算例依赖它。新增 8 个 C++ 用例与 5 项绑定测试（Cartesian 线性场精确、斜网格 O(h) 收敛、压力边界通量守恒、端到端抛物线入口 SIMPLE）。
-- **5.2 AMGCL 线性求解后端**：选型 AMGCL（header-only、原生 Eigen adapter、单进程无需 MPI；Hypre 因 vcpkg port 无条件依赖 mpi/blas/lapack 落选）。自建 vcpkg overlay port（锁版本 + SHA512），`FVM_BUILD_AMGCL=ON` 默认关闭、既有 CI 不变；新增 `createAmgclCG`（压力 SPD）/`createAmgclBiCGSTAB`（动量非对称）工厂并暴露到 pyfvm。
+- ✅ **5.2 AMGCL 线性求解后端** — 已完成（2026-11-04）：选型 AMGCL（header-only、原生 Eigen adapter、单进程无需 MPI；Hypre 因 vcpkg port 无条件依赖 mpi/blas/lapack 落选）。自建 vcpkg overlay port（锁版本 + SHA512），`FVM_BUILD_AMGCL=ON` 默认关闭、既有 CI 不变；新增 `createAmgclCG`（压力 SPD）/`createAmgclBiCGSTAB`（动量非对称）工厂并暴露到 pyfvm（`SolverConfig::backend`）；新增 3 个 C++ 用例与 1 项绑定测试（skip 守卫，仅 ON 构建执行）。
 - **5.3 更大规模/复杂算例**（按复杂度递增）：
   1. 方腔 Re=3200 @ 256×256（Ghia 对照；AMG vs BiCGSTAB-ILUT 性能 showcase——性能数据记录进 [`docs/numerical.md`](docs/numerical.md)，CI 只断言正确性）；
   2. 圆柱 Re=20/40 稳态改矩形域 `[-10,25]×[-10,10]`（O-4 多块生成器，`polar_ogrid` 退役；对 Fornberg / Dennis & Chang 带重校准）；
@@ -195,6 +202,7 @@ opencode.json               — OpenCode：skill 路径、同一组 MCP server�
 - `FVM_OF_ALLOWED_ROOTS` 是冒号分隔的绝对 WSL 路径，用于扩大 `run_case` 允许的 `template`/`root` 根；候选路径在 WSL 内经 `realpath` 规范化，符号链接与 `..` 无法逃逸。该检查不是 TOCTOU-free 的；威胁模型是混淆的 agent，不是本地竞争者。
 - 工具副作用：`build_and_test` 写 `build/<config>-agent[-py]/`（WSL 实例写 `build/<config>-agent[-py]-wsl/`，或 `FVM_BUILD_ROOT` 下的同名目录；异步模式另写 `ctest_async.log` 与 `mcp_ctest.json`，无 `host` 字段的旧格式 marker 视为异宿主、不回收），`run_case` 在 WSL 中创建 case 目录并启动 `foamRun`，其余工具全部只读。ascii-only 限制见 [`AGENTS.md`](AGENTS.md) 的 MCP Servers 小节。
 - `build_and_test` 返回结构化 JSON：成功含 `ok`/`config`/`build_dir`/`stage`/`tests`/`report`；失败附 `first_error`（按 CMake > ninja `FAILED:` > MSVC `error C<n>` > `error:` > ctest 的优先级取首行）、截断的 `tail` 与 `log_path`——完整未截断 transcript 只写入构建目录的 `build_and_test.log`。`run=application/all` 默认后台执行（`wait=false`，规避客户端 ~300s 工具调用超时）：立即返回 `stage=test-async`，随后轮询 `test_status` 直到 `finished`/`timeout`/`stale`，终态字段与同步路径同构。`run=application` 默认跑 `application_default` 标签子集（5 条，成员在 `CMakeLists.txt`，与 CI 默认一致）；`full=true` 跑整层，或用 `tests` 正则传给 `ctest -R`（子串匹配需 `$` 锚定；空匹配经 `--no-tests=error` 显式失败；与 `full` 互斥）。
+- `build_and_test` 另有可选参数 `cmake_args`（字符串，默认空）：仅接受 `-D<NAME>=<VALUE>` 形式的 token（空白分隔、逐个校验），合法则追加到 cmake configure 命令末尾，非法 token 直接报错——ON 模式选项（如 `-DFVM_BUILD_AMGCL=ON`）的验证通道。
 - `run_status` 的状态为 `running` / `finished` / `failed` / `stale` / `unknown`；`stale` 表示启动器进程已死且没有 `.exitcode`（例如 server 重启），需要重跑 case。启动器 PID 记录在 case 目录的 `.launcher_pid`（`kill -0` + `/proc/<pid>/cmdline` 含 case 路径双重校验，防 PID 复用）。
 - 审批模式记录在 `.codex/config.toml`：当前仅 `run_case` 需要审批；`build_and_test`（含 WSL 实例）免批（副作用仅限仓库内 `build/`、`FVM_BUILD_ROOT` 覆盖指定的构建根与各自 vcpkg 缓存，且持久 implementer 工作流依赖无人工介入的中间编译检查），`openfoam` 的只读工具默认免批；三个只读子 agent（explorer/reviewer/test-triage）的 toml 另有"禁调 `build_and_test`/`run_case`"的指令。OpenCode 侧在 `opencode.json` 对齐同一契约：V2 `permissions` 数组中 `openfoam_run_case` 为 `ask`、其余 openfoam 工具走默认放行，shell 规则 deny 一切 `cmake`/`ctest`/`ninja`/`fvm_tests` 直调（强制走 `build-and-test` MCP 工具）。ZCode 侧在 `.zcode/config.json` 注册同一组 server 并自动连接，但没有 per-tool 审批与 shell deny 机制：`run_case` 需确认改由 AGENTS.md 的行为约定承担（ZCode 会话中调用 `run_case` 前先征得用户同意），shell 直调 cmake/ctest 的禁令同样以 AGENTS.md 指令为准。
 - openfoam 字段映射假定结构网格：`nx*ny` 必须等于网格单元数，`grid[j][i] = cell j*nx+i`，面通量从 OpenFOAM 的 owner→neighbour 约定转换到本项目的 `+x/+y` 约定。

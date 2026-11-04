@@ -42,6 +42,11 @@ ASYNC_TEST_TIMEOUT = 3600
 
 RUN_MODES = ("none", "unit", "application", "all")
 
+# build_and_test(cmake_args=...) appends its tokens verbatim to the cmake
+# configure command; restrict them to cache-variable definitions so no
+# other cmake option can be smuggled in.
+_CMAKE_ARG_PATTERN = re.compile(r"^-D[A-Za-z0-9_]+=.+$")
+
 # In-memory handle for the background ctest started with wait=false; see
 # _start_async_ctest()/test_status(). A marker file next to the log covers
 # the "server died mid-run" case (test_status then reports stale).
@@ -98,6 +103,10 @@ TOOL_DESCRIPTION = (
     "tests regex is passed to ctest -R to select an explicit subset "
     "(ctest matches substrings, so anchor with $); an empty match fails "
     "loudly. "
+    "The optional cmake_args string appends extra CMake cache definitions "
+    "to the configure command: whitespace-separated -D<NAME>=<VALUE> "
+    "tokens (e.g. \"-DFVM_BUILD_AMGCL=ON\"); anything else is rejected "
+    "without running anything. "
     "application and all exceed the client's ~300s tool-call timeout, so "
     "they default to wait=false: ctest starts in the background and the call "
     "returns immediately; poll the separate test_status tool until the run "
@@ -187,6 +196,15 @@ TOOL_SCHEMA = {
                 "Build with -DFVM_BUILD_PYTHON=ON (pybind11 bindings) into "
                 "build/<config>-agent-py, separate from the default build. "
                 "ctest then also runs the Python binding tests."
+            ),
+        },
+        "cmake_args": {
+            "type": "string",
+            "description": (
+                "Optional extra CMake cache definitions appended to the "
+                "configure command, whitespace-separated; every token must "
+                "match -D<NAME>=<VALUE> (e.g. \"-DFVM_BUILD_AMGCL=ON\"). "
+                "Invalid tokens are rejected without running anything."
             ),
         },
         "quiet": {
@@ -801,6 +819,7 @@ def build_and_test(
     wait: bool | None = None,
     tests: str | None = None,
     full: bool = False,
+    cmake_args: str | None = None,
 ) -> tuple[str, bool]:
     """Configure, build and optionally run the project.
 
@@ -933,6 +952,27 @@ def build_and_test(
             ),
             False,
         )
+    if cmake_args is not None:
+        invalid = [
+            token
+            for token in cmake_args.split()
+            if not _CMAKE_ARG_PATTERN.match(token)
+        ]
+        if invalid:
+            return (
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": (
+                            "invalid cmake_args token "
+                            f"{invalid[0]!r}: expected whitespace-separated "
+                            "-D<NAME>=<VALUE> definitions"
+                        ),
+                    },
+                    indent=2,
+                ),
+                False,
+            )
     if wait is not None and not isinstance(wait, bool):
         return (
             json.dumps(
@@ -1036,6 +1076,10 @@ def build_and_test(
         )
     if python:
         configure_cmd.append("-DFVM_BUILD_PYTHON=ON")
+    if cmake_args:
+        # Already validated above; re-splitting keeps the empty string a
+        # no-op and puts one token per configure argument.
+        configure_cmd.extend(cmake_args.split())
     sections.append("\n$ " + " ".join(configure_cmd))
     transcript.append("$ " + " ".join(configure_cmd))
     code, output = _run(configure_cmd, CONFIGURE_TIMEOUT, build_env)
@@ -1293,6 +1337,7 @@ def _handle(message: dict) -> None:
                     wait=arguments.get("wait"),
                     tests=arguments.get("tests"),
                     full=bool(arguments.get("full")),
+                    cmake_args=arguments.get("cmake_args"),
                 )
         except Exception as exc:  # never take the server down
             text, ok = f"{name} crashed: {exc!r}", False

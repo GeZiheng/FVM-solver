@@ -144,6 +144,39 @@ class TestTransportBinding(unittest.TestCase):
         np.testing.assert_allclose(sol.reshape(n, n),
                                    np.tile(1.0 - x, (n, 1)), atol=1e-8)
 
+    @unittest.skipUnless(getattr(fvm, "HAVE_AMGCL", False),
+                         "requires FVM_BUILD_AMGCL=ON")
+    def test_solve_transport_amgcl_backends(self):
+        # Mirror of test_pure_diffusion_linear_profile_exact with the solver
+        # chosen through SolverConfig.backend instead of the Eigen default.
+        # The pure-diffusion system is SPD, so both AMGCL variants apply:
+        # amgcl-bicgstab mirrors the default BiCGSTAB path, amgcl-cg is the
+        # SPD pressure-style solver.
+        n = 16
+        mesh = fvm.CartesianMesh(n, n, 0.0, 0.0, 1.0, 1.0)
+        gamma = fvm.ScalarField(mesh, "gamma")
+        gamma.set_constant(1.0)
+        velocity = fvm.VectorField(mesh, "velocity")  # stays zero
+
+        bc = fvm.BoundaryField(mesh)
+        bc.set(fvm.BoundaryField.West, fvm.BCType.Dirichlet, 1.0)
+        bc.set(fvm.BoundaryField.East, fvm.BCType.Dirichlet, 0.0)
+
+        flux = fvm.interpolate_cell_velocity_flux(mesh, velocity, 1.0)
+        x = (np.arange(n) + 0.5) * mesh.dx()
+        expected = np.tile(1.0 - x, (n, 1))
+
+        for backend in ("amgcl-bicgstab", "amgcl-cg"):
+            with self.subTest(backend=backend):
+                solver_cfg = fvm.SolverConfig()
+                solver_cfg.tolerance = 1e-12
+                solver_cfg.backend = backend
+                sol = fvm.solve_transport(mesh, flux, gamma,
+                                          fvm.ConvectionScheme.Upwind, bc,
+                                          solver_cfg)
+                np.testing.assert_allclose(sol.reshape(n, n), expected,
+                                           atol=1e-8)
+
     def test_correction_options_plumbing_and_zero_change(self):
         options = fvm.CorrectionOptions()
         self.assertTrue(options.non_orthogonal_diffusion)

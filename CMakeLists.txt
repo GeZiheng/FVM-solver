@@ -20,6 +20,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Find packages via vcpkg
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(doctest CONFIG REQUIRED)
+# Optional AMGCL backend: provided by the repo-local overlay port
+# ports/amgcl (see vcpkg-configuration.json). Guarded so the default OFF
+# configuration never runs find_package or any of the wiring below.
+if(FVM_BUILD_AMGCL)
+    find_package(amgcl CONFIG REQUIRED)
+endif()
 
 # Core library
 add_library(fvm_core STATIC)
@@ -46,6 +52,12 @@ target_sources(fvm_core
         src/numerical/src/Piso.cpp
 )
 
+# Optional AMGCL backend: the amgcl headers are heavy, so its translation
+# unit is only compiled when the backend is enabled (FVM_HAVE_AMGCL).
+if(FVM_BUILD_AMGCL)
+    target_sources(fvm_core PRIVATE src/math/src/AmgclSolver.cpp)
+endif()
+
 target_include_directories(fvm_core
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/include
@@ -58,6 +70,11 @@ target_link_libraries(fvm_core
     PUBLIC
         Eigen3::Eigen
 )
+
+if(FVM_BUILD_AMGCL)
+    target_link_libraries(fvm_core PUBLIC amgcl::amgcl)
+    target_compile_definitions(fvm_core PUBLIC FVM_HAVE_AMGCL)
+endif()
 
 # The static library is linked into the pyfvm shared module, so it must be
 # built as position-independent code on Linux (MSVC ignores this property).
@@ -88,6 +105,10 @@ target_sources(fvm_tests
         tests/main.cpp
 )
 
+if(FVM_BUILD_AMGCL)
+    target_sources(fvm_tests PRIVATE tests/test_amgcl_solver.cpp)
+endif()
+
 target_link_libraries(fvm_tests
     PRIVATE
         fvm_core
@@ -99,6 +120,10 @@ add_test(NAME fvm_unit_tests COMMAND fvm_tests)
 # Python bindings (optional): pybind11 extension module `pyfvm`.
 # Configure with -DFVM_BUILD_PYTHON=ON; the .pyd lands in <build>/python.
 option(FVM_BUILD_PYTHON "Build the pyfvm Python bindings (pybind11)" OFF)
+# AMGCL linear solver backend (optional): header-only, wired through the
+# repo-local overlay port ports/amgcl. Configure with -DFVM_BUILD_AMGCL=ON;
+# OFF keeps the build byte-identical to the plain Eigen-only configuration.
+option(FVM_BUILD_AMGCL "Enable the AMGCL linear solver backend" OFF)
 if(FVM_BUILD_PYTHON)
     # The extension is version-locked to the interpreter it is built against
     # (a cp312 module does not import in 3.14). Honour an explicit

@@ -135,6 +135,43 @@ void requireIndex(bool ok)
         throw py::index_error("index out of range");
 }
 
+/// Create the linear solver requested by config.backend. The default
+/// ("eigen") keeps the plain Eigen BiCGSTAB path; the AMGCL backends are
+/// only available when the module is built with FVM_BUILD_AMGCL=ON. Runs
+/// before the GIL is released, so the errors surface as normal Python
+/// exceptions.
+std::unique_ptr<math::LinearSolver> makeLinearSolver(
+    const math::SolverConfig& config)
+{
+#ifdef FVM_HAVE_AMGCL
+    if (config.backend == "amgcl-cg")
+    {
+        return math::createAmgclCG(config);
+    }
+    if (config.backend == "amgcl-bicgstab")
+    {
+        return math::createAmgclBiCGSTAB(config);
+    }
+#else
+    if (config.backend == "amgcl-cg" || config.backend == "amgcl-bicgstab")
+    {
+        throw std::runtime_error(
+            "backend '" + config.backend + "' requires building the project "
+            "with FVM_BUILD_AMGCL=ON");
+    }
+#endif
+    if (config.backend == "eigen")
+    {
+        return math::createEigenBiCGSTAB(config);
+    }
+    throw std::invalid_argument(
+        "unknown solver backend '" + config.backend + "': expected \"eigen\""
+#ifdef FVM_HAVE_AMGCL
+        ", \"amgcl-cg\" or \"amgcl-bicgstab\""
+#endif
+    );
+}
+
 /// High-level steady scalar transport: assemble, solve with BiCGSTAB,
 /// return the solution as a numpy array (row-major cell order, j * nx + i).
 py::array_t<Scalar> solveTransport(const Mesh& mesh,
@@ -167,7 +204,7 @@ py::array_t<Scalar> solveTransport(const Mesh& mesh,
         phiExplicit,
         corrections);
     sys.A.finalize();
-    auto solver = math::createEigenBiCGSTAB(solverConfig);
+    auto solver = makeLinearSolver(solverConfig);
     Vector x;
     {
         py::gil_scoped_release release;
@@ -211,7 +248,7 @@ py::array_t<Scalar> solveTransientTransport(const Mesh& mesh,
         &phiOld,
         corrections);
     sys.A.finalize();
-    auto solver = math::createEigenBiCGSTAB(solverConfig);
+    auto solver = makeLinearSolver(solverConfig);
     Vector x;
     {
         py::gil_scoped_release release;
@@ -621,7 +658,11 @@ void bindNumerical(py::module_& m)
         .def(py::init<>())
         .def_readwrite("tolerance", &SolverConfig::tolerance)
         .def_readwrite("max_iterations", &SolverConfig::maxIterations)
-        .def_readwrite("verbose", &SolverConfig::verbose);
+        .def_readwrite("verbose", &SolverConfig::verbose)
+        // Linear solver backend: "eigen" (default) or the AMGCL factories
+        // when the module was built with FVM_BUILD_AMGCL=ON (probe with
+        // pyfvm.HAVE_AMGCL).
+        .def_readwrite("backend", &SolverConfig::backend);
 
     py::class_<CorrectionOptions>(m,
         "CorrectionOptions",
@@ -768,5 +809,13 @@ PYBIND11_MODULE(pyfvm, m)
               "convection-diffusion transport, SIMPLE, PISO). Meshes may be "
               "Cartesian or SU2-read unstructured meshes. Fluxes use a "
               "single per-face array; BoundaryField requires a mesh.";
+    // Build-time probe for the Python side: SolverConfig backend values
+    // other than "eigen" are only usable when this is true.
+    m.attr("HAVE_AMGCL") =
+#ifdef FVM_HAVE_AMGCL
+        true;
+#else
+        false;
+#endif
     fvm::python::bindAll(m);
 }
