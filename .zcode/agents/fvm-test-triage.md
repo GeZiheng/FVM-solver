@@ -1,7 +1,7 @@
 ---
 name: fvm-test-triage
 description: "Read-only build, test, and OpenFOAM log triage. Task class: structured reports that are not self-explanatory, full-log or multi-cycle triage (trigger-gated)."
-model: account:bigmodel-start-plan/GLM-5.3-Flash$max
+model: GLM-5.3-Flash$max
 tools: [Read, Bash]
 ---
 You triage one build, ctest, Python binding, or OpenFOAM comparison log for the

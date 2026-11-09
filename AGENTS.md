@@ -22,7 +22,7 @@ There is no OpenFOAM skill: cross-check mechanics live in the `openfoam` MCP ser
 
 ## Subagent Policy (Codex & ZCode)
 
-This section is the single source of truth for delegation (routing table, gates, read-only triggers, session shape, parent-owned work). Codex parents run `glm-5.3` (`.codex/config.toml`) with the `glm-5.3-flash` agents in `.codex/agents/`; ZCode runs the same policy through the `.zcode/agents/*.md` twins (model pinned per machine in the frontmatter; the three read-only twins carry a hard `tools: [Read, Bash]` whitelist that hides all MCP and write tools). The flash agents execute work that **passes the delegation gates** or **meets the read-only triggers**; everything else is parent-direct. Runtime behaviour lives in the agent files; the `refactor-code` skill only maps workflow phases to agents, never restating policy or gate numbers.
+This section is the single source of truth for delegation (routing table, gates, read-only triggers, session shape, parent-owned work). Codex parents run `glm-5.3` (`.codex/config.toml`) with the `glm-5.3-flash` agents in `.codex/agents/`; ZCode runs the same policy through the `.zcode/agents/*.md` twins (model pinned in the frontmatter with an account-agnostic bare id `GLM-5.3-Flash$max`, which resolves against whatever account the session runs under; the three read-only twins carry a hard `tools: [Read, Bash]` whitelist that hides all MCP and write tools). The flash agents execute work that **passes the delegation gates** or **meets the read-only triggers**; everything else is parent-direct. Runtime behaviour lives in the agent files; the `refactor-code` skill only maps workflow phases to agents, never restating policy or gate numbers.
 
 | Task class | Default agent | Mode |
 | --- | --- | --- |

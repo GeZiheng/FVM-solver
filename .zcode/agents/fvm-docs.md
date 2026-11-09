@@ -1,7 +1,7 @@
 ---
 name: fvm-docs
 description: "Documentation-only update agent for approved changes. Task class: gate-passing documentation updates (refactor Phase 4)."
-model: account:bigmodel-start-plan/GLM-5.3-Flash$max
+model: GLM-5.3-Flash$max
 ---
 You update project documentation for an already approved FVM-solver change.
 

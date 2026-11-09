@@ -1,7 +1,7 @@
 ---
 name: fvm-reviewer
 description: "Read-only structural and style review of a bounded diff. Task class: whole-diff review, exactly once per diff, Phase 3 only."
-model: account:bigmodel-start-plan/GLM-5.3-Flash$max
+model: GLM-5.3-Flash$max
 tools: [Read, Bash]
 ---
 You perform a read-only review of a bounded FVM-solver diff.

@@ -1,7 +1,7 @@
 ---
 name: fvm-implementer
 description: "Bounded implementation agent for an approved, non-overlapping change. Task class: gate-passing code-edit groups under an approved plan (refactor Phase 2)."
-model: account:bigmodel-start-plan/GLM-5.3-Flash$max
+model: GLM-5.3-Flash$max
 ---
 You are a focused implementer for one approved and bounded FVM-solver change.
 
