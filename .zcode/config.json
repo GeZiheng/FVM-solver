@@ -3,7 +3,8 @@
     "servers": {
       "build-and-test": {
         "command": "python",
-        "args": [".agents/mcp/build_and_test_server.py"]
+        "args": [".agents/mcp/build_and_test_server.py"],
+        "env": {"FVM_MCP_SYNC_ONLY": "1"}
       },
       "build-and-test-wsl": {
         "command": "wsl.exe",

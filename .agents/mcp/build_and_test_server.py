@@ -40,6 +40,19 @@ RUN_TIMEOUT = 1800
 ENV_TIMEOUT = 300
 ASYNC_TEST_TIMEOUT = 3600
 
+# Synchronous application-layer runs legitimately take hours (full layer
+# ~90 min, cavity_re3200 alone ~73 min); RUN_TIMEOUT would kill them
+# mid-run. Env-overridable for slower machines.
+SYNC_RUN_TIMEOUT_APP = int(os.environ.get("FVM_MCP_SYNC_RUN_TIMEOUT",
+                                          "14400"))
+# FVM_MCP_SYNC_ONLY=1 (set via the ZCode registration env) never spawns the
+# detached background ctest: that harness wedges the detached grandchildren
+# at interpreter startup (parked NtQueryInformationFile, 0 CPU), while its
+# request-scoped children run fine. Sync runs outlive the client's ~30 s
+# tool-call timeout; the result then lands in build_and_test.log and the
+# caller reads the log tail (same recovery as any timed-out sync call).
+SYNC_ONLY = os.environ.get("FVM_MCP_SYNC_ONLY", "") == "1"
+
 RUN_MODES = ("none", "unit", "application", "all")
 
 # build_and_test(cmake_args=...) appends its tokens verbatim to the cmake
@@ -1185,6 +1198,8 @@ def build_and_test(
             transcript.append("\n$ " + " ".join(test_cmd))
 
             sync = wait if wait is not None else run in ("none", "unit")
+            if SYNC_ONLY:
+                sync = True
             if not sync:
                 sections.append(
                     "\nctest runs in the background (wait=false); poll the "
@@ -1199,7 +1214,9 @@ def build_and_test(
                     test_cmd, build_dir, build_env, config, run, python, quiet
                 )
 
-            code, output = _run(test_cmd, RUN_TIMEOUT, build_env)
+            run_timeout = (SYNC_RUN_TIMEOUT_APP
+                           if run in ("application", "all") else RUN_TIMEOUT)
+            code, output = _run(test_cmd, run_timeout, build_env)
             sections.append(_tail(output))
             transcript.append(output)
             write_log()
