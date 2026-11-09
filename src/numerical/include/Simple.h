@@ -28,7 +28,16 @@ struct SimpleConfig
     Scalar relaxationU = 0.7; ///< Momentum under-relaxation in (0, 1].
     Scalar relaxationP = 0.3; ///< Pressure under-relaxation in (0, 1].
     ConvectionScheme scheme = ConvectionScheme::Upwind;
+    /// Momentum-equation linear solver.
     fvm::math::SolverConfig solverConfig = {};
+    /// Pressure-equation linear solver. Independent of solverConfig (the
+    /// momentum solver); the default (eigen CG) keeps the historical
+    /// hardcoded factory, so unset configs are bit-identical to before.
+    fvm::math::SolverConfig pressureSolverConfig = [] {
+        fvm::math::SolverConfig cfg;
+        cfg.method = "cg";
+        return cfg;
+    }();
     CorrectionOptions corrections;
     bool verbose = false;
 };

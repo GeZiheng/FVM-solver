@@ -145,19 +145,19 @@ Phase 1–3 为路线图之前的基础：Phase 1 项目骨架（`Mesh`/`Field` 
 - **4.3 任意网格输入与非正交修正（a–c）**：face-first mesh abstraction 双表示（`CartesianMesh`/`UnstructuredMesh`）、SU2 reader + `.vtu` 输出、非正交/偏斜修正 + LSQ 梯度 + 可选 split；斜交梯形 NS 的 OpenFOAM 对照在 NC=8 时 L2 `4.5e-4`（[`docs/numerical.md`](docs/numerical.md)）。Gmsh reader 搁置（SU2-first；重启时共享 `MeshInput` 映射层）。
 - **4.4 Application tests（阶段 A–B）**：cavity Re=100/400/1000（Ghia）、平面 Poiseuille、Stokes 振荡平板、后向台阶 Re=50/100、圆柱 Re=20/40（SU2 → `UnstructuredMesh` → SIMPLE → `.vtu`）；ctest `-L application` 共 8 项。
 
-当前基线：109 个 C++ test cases、`pyfvm_tests` 30 项（默认构建中 2 个 AMGCL 组合 subTest 按守卫跳过）、9 项 application tests 全部通过。`FVM_BUILD_AMGCL=ON` 构建另含 3 项 C++ AMGCL 用例（112 C++），且 AMGCL 组合实跑、OFF 门控用例转为跳过。
+当前测试基线（计数、按构建模式门控的细节）见 [`AGENTS.md`](AGENTS.md) Project State。
 
-### Phase 5（下一阶段，2026-11-01 商定）
+### Phase 5（2026-11-01 商定，分批交付中）
 
-按 5.1 → 5.2 → 5.3 顺序执行：
+按 5.1 → 5.2 → 5.3 顺序执行。各批次交付日期与执行状态见 [`AGENTS.md`](AGENTS.md) Next Phase；✅ 条目只保留完成标记：
 
-- ✅ **5.1 `BoundaryField` 逐面 Dirichlet 值（Option B）** — 已完成：按面 Dirichlet 值进入装配与压力边界系数，解锁空间变化 BC（Taylor–Green 精确解、抛物线入口）；含 pyfvm 绑定与单元测试。先行——5.3 多数算例依赖它。新增 8 个 C++ 用例与 5 项绑定测试（Cartesian 线性场精确、斜网格 O(h) 收敛、压力边界通量守恒、端到端抛物线入口 SIMPLE）。
-- ✅ **5.2 AMGCL 线性求解后端** — 已完成（2026-11-04）：选型 AMGCL（header-only、原生 Eigen adapter、单进程无需 MPI；Hypre 因 vcpkg port 无条件依赖 mpi/blas/lapack 落选）。自建 vcpkg overlay port（锁版本 + SHA512），`FVM_BUILD_AMGCL=ON` 默认关闭、既有 CI 不变；新增 `createAmgclCG`（压力 SPD）/`createAmgclBiCGSTAB`（动量非对称）工厂并暴露到 pyfvm（`SolverConfig::backend` × `method` 正交字段，`makeLinearSolver` 二维分派四家工厂）；新增 3 个 C++ 用例与 3 项绑定测试（四组合 / 非法值负路径 / OFF 族级门控，按构建模式守卫）。
+- ✅ **5.1 `BoundaryField` 逐面 Dirichlet 值（Option B）** — 按面 Dirichlet 值进入装配与压力边界系数，解锁空间变化 BC（Taylor–Green 精确解、抛物线入口）。先行——5.3 多数算例依赖它。设计要点见 [`docs/numerical.md`](docs/numerical.md) §BoundaryCondition。
+- ✅ **5.2 AMGCL 线性求解后端** — `FVM_BUILD_AMGCL=ON` 默认关闭、既有 CI 不变。选型依据（vs Hypre）、overlay port 与工厂细节见 [`docs/math.md`](docs/math.md)。
 - **5.3 更大规模/复杂算例**（按复杂度递增）：
-  1. 方腔 Re=3200 @ 256×256（Ghia 对照；AMG vs BiCGSTAB-ILUT 性能 showcase——性能数据记录进 [`docs/numerical.md`](docs/numerical.md)，CI 只断言正确性）；
+  1. ✅ 方腔 Re=3200 @ 256×256（Ghia 对照；AMG vs BiCGSTAB-ILUT 性能 showcase——性能数据记录进 [`docs/numerical.md`](docs/numerical.md)，CI 只断言正确性）；
   2. 圆柱 Re=20/40 稳态改矩形域 `[-10,25]×[-10,10]`（O-4 多块生成器，`polar_ogrid` 退役；对 Fornberg / Dennis & Chang 带重校准）；
   3. 后向台阶 Re=389 充分发展（抛物线）入口（Armaly 1983 上带）；
-  4. ✅ 斜网格抛物线入口 Poiseuille — 已完成（2026-11-03，随 5.1 提前）：等截面斜切通道、两端逐面抛物线速度 + 全 Neumann 解析压力；入口通量精确守恒，剖面 O(h) 带断言；顺带实测斜面 Dirichlet-p 的 `Cb` 无补全偏移（见 [`docs/numerical.md`](docs/numerical.md)）；
+  4. ✅ 斜网格抛物线入口 Poiseuille（等截面斜切通道、两端逐面抛物线速度 + 全 Neumann 解析压力）— 2026-11-03 随 5.1 提前完成；实测斜面 Dirichlet-p 的 `Cb` 无补全偏移，见 [`docs/numerical.md`](docs/numerical.md)；
   5. Taylor–Green 涡（瞬态 PISO、精确 BC、64²→128²→256² 网格收敛验证二阶精度）；
   6. 圆柱 Re=100 卡门涡街（同矩形域生成器，瞬态 PISO + Central；断言 St（文献带 ≈0.164–0.167）、Cd_mean、Cl 振幅；ctest 跑缩短版，完整收敛研究由脚本参数承担）。
 
@@ -171,7 +171,7 @@ Deferred/rejected：`examples/` per-case 可执行文件、JSON case 配置、�
 
 harness 的单一出处分为三层：
 
-- 委派策略（routing table、skip threshold、parent-owned responsibilities）：`AGENTS.md` 的 Codex Subagent Policy。
+- 委派策略（routing table、skip threshold、parent-owned responsibilities）：`AGENTS.md` 的 Subagent Policy (Codex & ZCode)。
 - Agent runtime 行为（每个子 agent 的自我简报）：`.codex/agents/*.toml` 与其 ZCode 移植 `.zcode/agents/*.md`（同一简报；ZCode 版用 frontmatter 的 `tools` 白名单替代 Codex 的 sandbox_mode，只读 agent 因此硬性拿不到 MCP 工具）。
 - 工作流阶段映射（哪个重构阶段委派给哪个 agent）：`.agents/skills/refactor-code/SKILL.md`；它只引用策略、不复述。
 

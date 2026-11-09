@@ -104,6 +104,8 @@ def main():
     cfg.time_scheme = fvm.TimeScheme.Euler
     cfg.solver_config.tolerance = 1e-9
     cfg.solver_config.max_iterations = 20000
+    cfg.pressure_solver_config.tolerance = 1e-9
+    cfg.pressure_solver_config.max_iterations = 20000
     if args.no_corrections:
         cfg.corrections.non_orthogonal_diffusion = False
         cfg.corrections.skew_interpolation = False

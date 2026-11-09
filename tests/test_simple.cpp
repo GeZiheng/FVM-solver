@@ -169,6 +169,12 @@ TEST_CASE("Simple non-orthogonal correctors are zero on Cartesian meshes")
         config.corrections = corrections;
         config.solverConfig.tolerance = 1.0e-10;
         config.solverConfig.maxIterations = 5000;
+        // The zero-change bounds assume the pressure solve is as tight as
+        // the momentum one; the fields are independent by design, so the
+        // pressure config mirrors solverConfig explicitly (pre-change the
+        // pressure factory inherited it).
+        config.pressureSolverConfig.tolerance = 1.0e-10;
+        config.pressureSolverConfig.maxIterations = 5000;
         solveSimple(mesh,
             1.0,
             0.01,
@@ -640,4 +646,191 @@ TEST_CASE("Simple: unbalanced closed-domain velocity BCs throw")
     bcU.set(BoundaryField::East, BCType::Dirichlet, 1.0);
     computeMassFlux(mesh, velocity, rho, bcU, bcV, flux);
     CHECK_NOTHROW(checkFluxCompatibility(flux));
+}
+
+TEST_CASE("Simple: independent momentum/pressure solver configs dispatch")
+{
+    // The pressure-driven Poiseuille channel case above (mu = 1, so the
+    // momentum matrix stays diffusion-dominated enough for CG), solved with
+    // (a) the default method pair (eigen bicgstab momentum + eigen cg
+    // pressure, the old hardcoded factories) and (b) the orthogonal method
+    // overrides (momentum cg, pressure bicgstab). Both must converge to the
+    // exact profile, and an unknown method must be rejected at entry,
+    // before any solve work.
+
+    const Index nx = 32, ny = 32;
+    const Scalar rho = 1.0;
+    const Scalar mu = 1.0;
+
+    CartesianMesh mesh(nx, ny, 0.0, 0.0, 1.0, 1.0);
+
+    BoundaryField bcU(mesh); // west/east: zero-gradient (default Neumann 0)
+    bcU.set(BoundaryField::North, BCType::Dirichlet, 0.0);
+    bcU.set(BoundaryField::South, BCType::Dirichlet, 0.0);
+
+    BoundaryField bcV(mesh);
+    bcV.set(BoundaryField::North, BCType::Dirichlet, 0.0);
+    bcV.set(BoundaryField::South, BCType::Dirichlet, 0.0);
+
+    BoundaryField bcP(mesh); // north/south: zero-gradient (default)
+    bcP.set(BoundaryField::West, BCType::Dirichlet, 1.0);
+    bcP.set(BoundaryField::East, BCType::Dirichlet, 0.0);
+
+    VectorField velocityA(mesh, "u");
+    ScalarField pressureA(mesh, "p");
+    FaceFluxField fluxA(mesh, "phi");
+
+    // Case settings follow the Poiseuille case above, including its tight
+    // linear-solver tolerances (set on both configs: the fields are
+    // independent by design). (a) keeps the default method pair (eigen
+    // bicgstab momentum + eigen cg pressure, the old hardcoded factories);
+    // (b) swaps the methods to prove both fields are dispatched.
+    SimpleConfig configA;
+    configA.tolerance = 1e-7;
+    configA.maxIterations = 2000;
+    configA.relaxationU = 0.7;
+    configA.relaxationP = 0.3;
+    configA.solverConfig.tolerance = 1e-9;
+    configA.solverConfig.maxIterations = 2000;
+    configA.pressureSolverConfig.tolerance = 1e-9;
+    configA.pressureSolverConfig.maxIterations = 2000;
+    const SimpleResult resultA = solveSimple(mesh,
+        rho,
+        mu,
+        bcU,
+        bcV,
+        bcP,
+        configA,
+        velocityA,
+        pressureA,
+        fluxA);
+    CHECK(resultA.converged);
+
+    VectorField velocityB(mesh, "u");
+    ScalarField pressureB(mesh, "p");
+    FaceFluxField fluxB(mesh, "phi");
+
+    // (b) Orthogonal method overrides on the two independent fields.
+    SimpleConfig configB;
+    configB.tolerance = 1e-7;
+    configB.maxIterations = 2000;
+    configB.relaxationU = 0.7;
+    configB.relaxationP = 0.3;
+    configB.solverConfig.tolerance = 1e-9;
+    configB.solverConfig.maxIterations = 2000;
+    configB.pressureSolverConfig.tolerance = 1e-9;
+    configB.pressureSolverConfig.maxIterations = 2000;
+    configB.solverConfig.method = "cg";
+    configB.pressureSolverConfig.method = "bicgstab";
+    const SimpleResult resultB = solveSimple(mesh,
+        rho,
+        mu,
+        bcU,
+        bcV,
+        bcP,
+        configB,
+        velocityB,
+        pressureB,
+        fluxB);
+    CHECK(resultB.converged);
+
+    // (c) The eigen-only ILUT method end-to-end through the driver:
+    // momentum bicgstab_ilut, pressure on the default cg.
+    VectorField velocityC(mesh, "u");
+    ScalarField pressureC(mesh, "p");
+    FaceFluxField fluxC(mesh, "phi");
+
+    SimpleConfig configC;
+    configC.tolerance = 1e-7;
+    configC.maxIterations = 2000;
+    configC.relaxationU = 0.7;
+    configC.relaxationP = 0.3;
+    configC.solverConfig.tolerance = 1e-9;
+    configC.solverConfig.maxIterations = 2000;
+    configC.solverConfig.method = "bicgstab_ilut";
+    configC.pressureSolverConfig.tolerance = 1e-9;
+    configC.pressureSolverConfig.maxIterations = 2000;
+    const SimpleResult resultC = solveSimple(mesh,
+        rho,
+        mu,
+        bcU,
+        bcV,
+        bcP,
+        configC,
+        velocityC,
+        pressureC,
+        fluxC);
+    CHECK(resultC.converged);
+
+    // Both paths must reproduce the exact Poiseuille profile at the file's
+    // existing physics tolerances (the same bounds the case above uses).
+    auto checkPoiseuille
+        = [&](const VectorField& vel, const ScalarField& pres) {
+              Scalar err2 = 0.0, ref2 = 0.0, flowRate = 0.0, maxAbsV = 0.0;
+              for (Index c = 0; c < mesh.cellCount(); ++c)
+              {
+                  auto [x, y] = mesh.cellCenter(c);
+                  const Scalar uExact = 0.5 * y * (1.0 - y);
+                  err2 += (vel.u()(c) - uExact) * (vel.u()(c) - uExact);
+                  ref2 += uExact * uExact;
+                  flowRate += vel.u()(c) * mesh.dy();
+                  maxAbsV = std::max(maxAbsV, std::abs(vel.v()(c)));
+              }
+              flowRate /= nx;
+              CHECK(std::sqrt(err2 / ref2) < 0.05);
+              CHECK(flowRate == doctest::Approx(1.0 / 12.0).epsilon(0.08));
+              CHECK(maxAbsV < 0.01);
+          };
+    checkPoiseuille(velocityA, pressureA);
+    checkPoiseuille(velocityB, pressureB);
+    checkPoiseuille(velocityC, pressureC);
+
+    // Cross-path agreement: the two Krylov paths land on slightly different
+    // converged states. The split is inner-solve-accuracy independent
+    // (measured the same at inner 1e-6 and 1e-9): it is the SIMPLE loop's
+    // trajectory ambiguity on this case, not linear-solver noise, so the
+    // bounds follow the file's physics-tolerance looseness.
+    Scalar du = 0.0, dv = 0.0, dp = 0.0;
+    for (Index c = 0; c < mesh.cellCount(); ++c)
+    {
+        du = std::max(du, std::abs(velocityA.u()(c) - velocityB.u()(c)));
+        dv = std::max(dv, std::abs(velocityA.v()(c) - velocityB.v()(c)));
+        dp = std::max(dp, std::abs(pressureA(c) - pressureB(c)));
+    }
+    CHECK(du < 2e-3);
+    CHECK(dv < 2e-3);
+    CHECK(dp < 5e-2);
+
+    // Unknown methods are dispatched on entry and throw std::invalid_argument.
+    VectorField velocityBad(mesh, "u");
+    ScalarField pressureBad(mesh, "p");
+    FaceFluxField fluxBad(mesh, "phi");
+
+    SimpleConfig badMomentum;
+    badMomentum.solverConfig.method = "bogus";
+    CHECK_THROWS_AS(solveSimple(mesh,
+                        rho,
+                        mu,
+                        bcU,
+                        bcV,
+                        bcP,
+                        badMomentum,
+                        velocityBad,
+                        pressureBad,
+                        fluxBad),
+        std::invalid_argument);
+
+    SimpleConfig badPressure;
+    badPressure.pressureSolverConfig.method = "bogus";
+    CHECK_THROWS_AS(solveSimple(mesh,
+                        rho,
+                        mu,
+                        bcU,
+                        bcV,
+                        bcP,
+                        badPressure,
+                        velocityBad,
+                        pressureBad,
+                        fluxBad),
+        std::invalid_argument);
 }

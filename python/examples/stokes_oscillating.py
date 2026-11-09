@@ -71,6 +71,8 @@ def oscillating_run(max_cycles=40, steady_tol=1e-6):
     cfg.time_scheme = fvm.TimeScheme.Euler
     cfg.solver_config.tolerance = 1e-9
     cfg.solver_config.max_iterations = 20000
+    cfg.pressure_solver_config.tolerance = 1e-9
+    cfg.pressure_solver_config.max_iterations = 20000
 
     step = 0
     prev = None
@@ -141,6 +143,8 @@ def couette_stepwise_sanity():
         cfg.time_scheme = fvm.TimeScheme.Euler
         cfg.solver_config.tolerance = 1e-9
         cfg.solver_config.max_iterations = 20000
+        cfg.pressure_solver_config.tolerance = 1e-9
+        cfg.pressure_solver_config.max_iterations = 20000
         return mesh, velocity, pressure, flux, bc_u, bc_v, bc_p, cfg
 
     mesh, velocity, pressure, flux, bc_u, bc_v, bc_p, cfg = setup()

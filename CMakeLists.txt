@@ -171,6 +171,12 @@ if(FVM_BUILD_PYTHON)
     fvm_add_application_test(cavity_re400 cavity --re 400 --test)
     fvm_add_application_test(cavity_re1000 cavity --re 1000 --test)
     set_tests_properties(pyfvm_app_cavity_re1000 PROPERTIES TIMEOUT 900)
+    # Phase 5.3-1: 256x256, ~80 min cold on the calibration machine
+    # (converges at the loosened 2e-5 outer tolerance around iteration
+    # 2560); large case kept out of application_default on purpose
+    # (docs/python.md).
+    fvm_add_application_test(cavity_re3200 cavity --re 3200 --test)
+    set_tests_properties(pyfvm_app_cavity_re3200 PROPERTIES TIMEOUT 10800)
     fvm_add_application_test(poiseuille poiseuille --test)
     fvm_add_application_test(stokes_oscillating stokes_oscillating --test)
     fvm_add_application_test(backward_step backward_facing_step --test)

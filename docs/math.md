@@ -29,7 +29,7 @@
   新增后端时只需添加新的子类 + 工厂函数，不触动任何调用点。
 
 - **统一配置**：`SolverConfig { tolerance, maxIterations, verbose, backend, method }`，语义为**相对残差**判据 $\lVert Ax-b \rVert / \lVert b \rVert \le \text{tolerance}$。求解后可通过 `lastIterations()` / `lastResidual()` 查询实际迭代数与残差。
-- **`backend` × `method` 正交字段**：`backend`（实现族，默认 `"eigen"` | `"amgcl"`）与 `method`（外层 Krylov，默认 `"bicgstab"` | `"cg"`）独立选择，pyfvm 的 `makeLinearSolver` 按二维组合分派四家工厂（含经此可达的 `(eigen, cg)` 组合）。`amgcl` 族需 `FVM_BUILD_AMGCL=ON` 构建（未知值 → `invalid_argument`；OFF 构建选 amgcl → `runtime_error`，与方法无关）。C++ 驱动不消费这两个字段——C++ 直接调工厂，字段由 pyfvm 单系统入口消费。
+- **`backend` × `method` 正交字段**：`backend`（实现族，默认 `"eigen"` | `"amgcl"`）与 `method`（外层 Krylov，默认 `"bicgstab"` | `"cg"` | `"bicgstab_ilut"`，最后一个仅 eigen 族支持）独立选择，math 核心的 `makeLinearSolver(cfg)` 按二维组合分派五家工厂。`amgcl` 族需 `FVM_BUILD_AMGCL=ON` 构建（未知 backend/method 值 → `invalid_argument`；OFF 构建选 amgcl → `runtime_error`，与方法无关且先于 method 检查）。消费方：pyfvm 的单系统入口（`solve_transport` 等，绑定层自有分派已删除、直接转发到本函数）与 NS 驱动 `solveSimple`/`solvePiso`（动量用 `solverConfig`、压力用独立的 `pressureSolverConfig`，不设置时与历史硬编码 BiCGSTAB + CG 逐位一致，见 `docs/numerical.md`）。
 - **失败即异常**：所有实现在不收敛或分解失败时抛 `std::runtime_error`，调用方无需检查错误码。
 
 ### 实现一览
@@ -39,6 +39,7 @@
 | `createEigenBiCGSTAB` | 双共轭梯度稳定法 + 对角（Jacobi）预条件 | 非对称系统（含对流的输运方程） | 见下方容差换算说明 |
 | `createEigenCG` | 共轭梯度法 + 对角预条件 | 对称正定系统（纯扩散） | 非对称矩阵上行为未定义 |
 | `createEigenSparseLU` | 稀疏 LU 直接分解 | 小问题、验证用、病态系统 | `lastIterations`=1，残差为显式计算的 $\lVert Ax-b \rVert / \lVert b \rVert$ |
+| `createEigenBiCGSTABILUT` | BiCGSTAB + IncompleteLUT 预条件 | 非对称系统、对角预条件收敛不佳时 | fillfactor 取 Eigen 默认；容差换算与自检收敛同 BiCGSTAB 封装；仅经 `method = "bicgstab_ilut"` 可达 |
 | `createAmgclCG` | AMG（smoothed_aggregation + spai0）预条件 CG | 压力类 SPD 系统 | 需 `FVM_BUILD_AMGCL=ON`，见下节 |
 | `createAmgclBiCGSTAB` | AMG（smoothed_aggregation + ilu0）预条件 BiCGSTAB | 动量类非对称系统 | 需 `FVM_BUILD_AMGCL=ON`，见下节 |
 
@@ -51,6 +52,7 @@
 - **自检收敛**：`lastIterations()` / `lastResidual()` 取 amgcl solve 返回的 `(iters, error)`；`error > tolerance` 时抛 `std::runtime_error`——与 Eigen BiCGSTAB 包装同约定，不依赖求解器状态标志。
 - **矩阵对接**：`SparseMatrix::native()` 是 ColMajor Eigen 矩阵，solve 内先做一次 ColMajor→RowMajor 存储序转换，再经 `amgcl/adapter/eigen.hpp` 适配。
 - **TU 级 `AMGCL_NO_BOOST`**：amgcl 1.5.0 的 `util.hpp` 默认拉 `boost/property_tree`（只有 ptree 参数桥接需要）；本项目使用 plain-struct params，不需要 Boost，故在该 TU 的所有 amgcl include 之前定义 `AMGCL_NO_BOOST`。
+- **NS 驱动可达**：`solveSimple`/`solvePiso` 经 `makeLinearSolver` 消费 amgcl（5.3-1 起）；256² 方腔 Re=3200 上的固定外迭代性能对照见 `docs/numerical.md`「方腔 Re=3200 与线性求解器性能对照」。
 
 **依赖接入**：自建 vcpkg overlay port `ports/amgcl/`（锁 1.5.0 + SHA512，仅依赖 eigen3），经 `vcpkg-configuration.json` 的 `overlay-ports` 接入；`FVM_BUILD_AMGCL` 默认 OFF，OFF 构建不执行任何 amgcl 接线。
 

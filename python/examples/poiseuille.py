@@ -55,6 +55,8 @@ def run():
     cfg.scheme = fvm.ConvectionScheme.Central
     cfg.solver_config.tolerance = 1e-9
     cfg.solver_config.max_iterations = 2000
+    cfg.pressure_solver_config.tolerance = 1e-9
+    cfg.pressure_solver_config.max_iterations = 2000
 
     result = fvm.solve_simple(mesh, rho, mu, bc_u, bc_v, bc_p, cfg,
                               velocity, pressure, flux)

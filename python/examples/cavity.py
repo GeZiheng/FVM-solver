@@ -2,16 +2,21 @@
 benchmark on the centrelines.
 
 The cavity is a unit square with a unit-speed lid; with rho = 1 the Reynolds
-number is Re = 1/mu.  Run with --re {100,400,1000}; --test asserts the
+number is Re = 1/mu.  Run with --re {100,400,1000,3200}; --test asserts the
 centreline errors against the tabulated reference data and exits non-zero on
-failure.
+failure.  Re = 3200 uses a 256x256 grid (Phase 5.3-1); the linear solvers can
+be swapped with --backend/--method (momentum) and --p-backend/--p-method
+(pressure) for the AMG vs BiCGSTAB-ILUT showcase recorded in
+docs/numerical.md.
 
-Run:  python python/examples/cavity.py [--re {100,400,1000}] [--test]
+Run:  python python/examples/cavity.py [--re {100,400,1000,3200}] [--test]
+      python python/examples/cavity.py --re 3200 --backend amgcl
 """
 
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -36,6 +41,17 @@ GHIA_U = {
     1000: [1.00000, 0.65928, 0.57492, 0.51117, 0.46604, 0.33304, 0.18719,
            0.05702, -0.06080, -0.10648, -0.27805, -0.38289, -0.29730,
            -0.22220, -0.20196, -0.18109, 0.00000],
+    # (y=0.4531, Re=3200): the original prints -0.86636, a widely reproduced
+    # erroneous outlier (non-physical between the -0.04272/-0.24427
+    # neighbours, breaks the monotone cross-Re trend -0.10648(1000) ->
+    # -0.07404(5000); flagged e.g. by Tomczak 2021, arXiv:2108.13241).
+    # Corrected to -0.07585 from our converged 256x256 solution (128x128
+    # probes: -0.07802/-0.07316 at relax_u 0.7/0.5); the station is excluded
+    # from the u error metrics (ANOMALOUS_STATIONS_U) since the correction
+    # is ours, not an independent reference.
+    3200: [1.00000, 0.53236, 0.48296, 0.46547, 0.46101, 0.34682, 0.19791,
+           0.07156, -0.04272, -0.07585, -0.24427, -0.34323, -0.41933,
+           -0.37827, -0.35344, -0.32407, 0.00000],
 }
 GHIA_X = [
     1.0000, 0.9688, 0.9609, 0.9531, 0.9453, 0.9063, 0.8594, 0.8047, 0.5000,
@@ -55,12 +71,28 @@ GHIA_V = {
     1000: [0.00000, -0.21388, -0.27669, -0.33714, -0.39188, -0.51500,
            -0.42665, -0.31966, 0.02526, 0.32235, 0.33075, 0.37095, 0.32627,
            0.30353, 0.29012, 0.27485, 0.00000],
+    3200: [0.00000, -0.39017, -0.47425, -0.52357, -0.54053, -0.44307,
+           -0.37401, -0.31184, 0.00999, 0.28188, 0.29030, 0.37119, 0.42768,
+           0.41906, 0.40917, 0.39560, 0.00000],
 }
 
+# Station indices (into GHIA_Y/GHIA_X) excluded from the error metrics:
+# entries whose printed reference value is a known transcription artifact
+# corrected above from our own solution -- keeping them would make the
+# comparison self-referential. The artifact is in the u table only; the
+# v-table value at the same station is a legitimate reference point.
+ANOMALOUS_STATIONS_U = {3200: (9,)}
+ANOMALOUS_STATIONS_V = {}
 
-def run(re):
-    """Solve the cavity at the given Re and return the centrelines."""
-    n = 128 if re == 1000 else 64
+
+def run(re, momentum_solver=None, pressure_solver=None):
+    """Solve the cavity at the given Re and return the centrelines.
+
+    momentum_solver / pressure_solver override the linear-solver
+    (backend, method) pair of the momentum and pressure equations; None
+    keeps the historical defaults (eigen BiCGSTAB / eigen CG).
+    """
+    n = 256 if re == 3200 else (128 if re == 1000 else 64)
     mesh = fvm.CartesianMesh(n, n, 0.0, 0.0, 1.0, 1.0)
     rho, mu = 1.0, 1.0 / re
 
@@ -82,20 +114,40 @@ def run(re):
     bc_p = fvm.BoundaryField(mesh)  # zero-gradient pressure on all walls
 
     cfg = fvm.SimpleConfig()
-    cfg.tolerance = 1e-6
-    cfg.max_iterations = 6000 if re == 1000 else 3000
+    # Re = 3200 (Phase 5.3-1): the outer criterion is loosened to 2e-5. At
+    # 256x256 the scaled u/v residuals stall in the 1e-6..1e-5 band for
+    # thousands of iterations (corner slow modes) while the centreline
+    # profiles are already Ghia-close (calibration: the residual crosses
+    # 2e-5 around iteration ~2560, profiles recorded in docs/numerical.md).
+    cfg.tolerance = 2e-5 if re == 3200 else 1e-6
+    cfg.max_iterations = 3000 if re == 3200 else (
+        6000 if re == 1000 else 3000)
     cfg.relaxation_u = 0.6 if re == 1000 else 0.7
     cfg.relaxation_p = 0.3
     cfg.scheme = fvm.ConvectionScheme.Central
     cfg.solver_config.tolerance = 1e-9
     cfg.solver_config.max_iterations = 2000
+    cfg.pressure_solver_config.tolerance = 1e-9
+    cfg.pressure_solver_config.max_iterations = 2000
+    if momentum_solver:
+        cfg.solver_config.backend, cfg.solver_config.method = momentum_solver
+    if pressure_solver:
+        cfg.pressure_solver_config.backend, \
+            cfg.pressure_solver_config.method = pressure_solver
 
+    t0 = time.perf_counter()
     result = fvm.solve_simple(mesh, rho, mu, bc_u, bc_v, bc_p, cfg,
                               velocity, pressure, flux)
+    wall = time.perf_counter() - t0
+    tag = ""
+    if momentum_solver:
+        tag = f", {momentum_solver[0]}/{momentum_solver[1]}"
+    if pressure_solver:
+        tag += f", p {pressure_solver[0]}/{pressure_solver[1]}"
     state = "converged" if result.converged else "NOT converged"
-    print(f"SIMPLE (Re = {re}, {n}x{n}): {state} in {result.iterations} "
-          f"iterations, continuity residual "
-          f"{result.history[-1].continuity:.3e}")
+    print(f"SIMPLE (Re = {re}, {n}x{n}{tag}): {state} in "
+          f"{result.iterations} iterations, continuity residual "
+          f"{result.history[-1].continuity:.3e}, {wall:.1f} s wall time")
 
     if not result.converged:
         raise RuntimeError(f"SIMPLE did not converge at Re = {re}")
@@ -123,8 +175,12 @@ def profile_errors(re, x, u_center, y, v_center):
     v_full = np.concatenate(([0.0], v_center, [0.0]))
     u_num = np.interp(GHIA_Y, y_full, u_full)
     v_num = np.interp(GHIA_X, x_full, v_full)
-    u_err = np.abs(u_num - np.array(GHIA_U[re]))
-    v_err = np.abs(v_num - np.array(GHIA_V[re]))
+    keep_u = [k for k in range(len(GHIA_Y))
+              if k not in ANOMALOUS_STATIONS_U.get(re, ())]
+    keep_v = [k for k in range(len(GHIA_X))
+              if k not in ANOMALOUS_STATIONS_V.get(re, ())]
+    u_err = np.abs(u_num[keep_u] - np.array(GHIA_U[re])[keep_u])
+    v_err = np.abs(v_num[keep_v] - np.array(GHIA_V[re])[keep_v])
     metrics = {
         "u_linf": u_err.max(),
         "u_l2": np.sqrt(np.mean(u_err ** 2)),
@@ -139,13 +195,34 @@ def profile_errors(re, x, u_center, y, v_center):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--re", type=int, choices=(100, 400, 1000), default=100)
+    parser.add_argument("--re", type=int, choices=(100, 400, 1000, 3200),
+                        default=100)
     parser.add_argument("--test", action="store_true",
                         help="assert the Ghia centrelines and exit non-zero "
                              "on failure")
+    parser.add_argument("--backend", choices=("eigen", "amgcl"),
+                        help="momentum linear-solver backend (default eigen)")
+    parser.add_argument("--method",
+                        choices=("bicgstab", "cg", "bicgstab_ilut"),
+                        help="momentum linear-solver method (default "
+                             "bicgstab)")
+    parser.add_argument("--p-backend", dest="p_backend",
+                        choices=("eigen", "amgcl"),
+                        help="pressure linear-solver backend (default eigen)")
+    parser.add_argument("--p-method", dest="p_method",
+                        choices=("cg", "bicgstab", "bicgstab_ilut"),
+                        help="pressure linear-solver method (default cg)")
     args = parser.parse_args()
 
-    mesh, velocity, pressure, (x, u_center, y, v_center) = run(args.re)
+    mom_solver = None
+    if args.backend or args.method:
+        mom_solver = (args.backend or "eigen", args.method or "bicgstab")
+    p_solver = None
+    if args.p_backend or args.p_method:
+        p_solver = (args.p_backend or "eigen", args.p_method or "cg")
+
+    mesh, velocity, pressure, (x, u_center, y, v_center) = run(
+        args.re, mom_solver, p_solver)
     metrics = profile_errors(args.re, x, u_center, y, v_center)
 
     output_dir = Path(__file__).resolve().parent / "output" / "cavity"
@@ -158,8 +235,12 @@ def main():
     if args.test:
         # Calibrated in Phase 2 (Central scheme); >= 2x headroom over the
         # observed maxima (L-inf: 8.6e-3 / 8.7e-3 / 1.2e-2, L2 half that).
+        # Re = 3200: observed at the 256x256 3000-iteration calibration run
+        # (worst L-inf 3.7e-2, L2 1.6e-2), times a 1.2 lag allowance for the
+        # earlier (~iteration 2560) tolerance-2e-5 stopping state, times 2
+        # (1.55e-2 * 1.2 * 2 = 3.7e-2).
         thresholds = {100: (2.0e-2, 1.0e-2), 400: (2.0e-2, 1.2e-2),
-                      1000: (3.0e-2, 1.5e-2)}
+                      1000: (3.0e-2, 1.5e-2), 3200: (9.0e-2, 3.7e-2)}
         limit, limit_l2 = thresholds[args.re]
         worst = max(metrics["u_linf"], metrics["v_linf"])
         worst_l2 = max(metrics["u_l2"], metrics["v_l2"])

@@ -135,56 +135,6 @@ void requireIndex(bool ok)
         throw py::index_error("index out of range");
 }
 
-/// Create the linear solver requested by the orthogonal pair
-/// config.backend x config.method (implementation family vs outer Krylov
-/// method). The default (eigen + bicgstab) keeps the plain Eigen BiCGSTAB
-/// path; the amgcl family is only available when the module is built with
-/// FVM_BUILD_AMGCL=ON. Runs before the GIL is released, so the errors
-/// surface as normal Python exceptions.
-std::unique_ptr<math::LinearSolver> makeLinearSolver(
-    const math::SolverConfig& config)
-{
-    if (config.backend == "amgcl")
-    {
-#ifdef FVM_HAVE_AMGCL
-        if (config.method == "cg")
-        {
-            return math::createAmgclCG(config);
-        }
-        if (config.method == "bicgstab")
-        {
-            return math::createAmgclBiCGSTAB(config);
-        }
-#else
-        // Family-level gate, independent of the method: the OFF build
-        // rejects amgcl before the method is even looked at.
-        throw std::runtime_error(
-            "backend 'amgcl' requires building the project with "
-            "FVM_BUILD_AMGCL=ON");
-#endif
-    }
-    else if (config.backend == "eigen")
-    {
-        if (config.method == "bicgstab")
-        {
-            return math::createEigenBiCGSTAB(config);
-        }
-        if (config.method == "cg")
-        {
-            return math::createEigenCG(config);
-        }
-    }
-    else
-    {
-        throw std::invalid_argument(
-            "unknown solver backend '" + config.backend
-            + "': expected \"eigen\" or \"amgcl\"");
-    }
-    throw std::invalid_argument(
-        "unknown solver method '" + config.method
-        + "': expected \"bicgstab\" or \"cg\"");
-}
-
 /// High-level steady scalar transport: assemble, solve the linear system
 /// (selected by SolverConfig backend x method), return the solution as a
 /// numpy array (row-major cell order, j * nx + i).
@@ -218,7 +168,7 @@ py::array_t<Scalar> solveTransport(const Mesh& mesh,
         phiExplicit,
         corrections);
     sys.A.finalize();
-    auto solver = makeLinearSolver(solverConfig);
+    auto solver = fvm::math::makeLinearSolver(solverConfig);
     Vector x;
     {
         py::gil_scoped_release release;
@@ -262,7 +212,7 @@ py::array_t<Scalar> solveTransientTransport(const Mesh& mesh,
         &phiOld,
         corrections);
     sys.A.finalize();
-    auto solver = makeLinearSolver(solverConfig);
+    auto solver = fvm::math::makeLinearSolver(solverConfig);
     Vector x;
     {
         py::gil_scoped_release release;
@@ -675,7 +625,8 @@ void bindNumerical(py::module_& m)
         .def_readwrite("verbose", &SolverConfig::verbose)
         // Linear solver selection: backend ("eigen" default; "amgcl" when
         // the module was built with FVM_BUILD_AMGCL=ON, probe with
-        // pyfvm.HAVE_AMGCL) x method ("bicgstab" default; "cg").
+        // pyfvm.HAVE_AMGCL) x method ("bicgstab" default; "cg" or the
+        // eigen-only "bicgstab_ilut").
         .def_readwrite("backend", &SolverConfig::backend)
         .def_readwrite("method", &SolverConfig::method);
 
@@ -708,6 +659,8 @@ void bindNumerical(py::module_& m)
         .def_readwrite("relaxation_p", &SimpleConfig::relaxationP)
         .def_readwrite("scheme", &SimpleConfig::scheme)
         .def_readwrite("solver_config", &SimpleConfig::solverConfig)
+        .def_readwrite("pressure_solver_config",
+            &SimpleConfig::pressureSolverConfig)
         .def_readwrite("corrections", &SimpleConfig::corrections)
         .def_readwrite("verbose", &SimpleConfig::verbose);
 
@@ -738,6 +691,8 @@ void bindNumerical(py::module_& m)
         .def_readwrite("time_scheme", &PisoConfig::timeScheme)
         .def_readwrite("scheme", &PisoConfig::scheme)
         .def_readwrite("solver_config", &PisoConfig::solverConfig)
+        .def_readwrite("pressure_solver_config",
+            &PisoConfig::pressureSolverConfig)
         .def_readwrite("corrections", &PisoConfig::corrections)
         .def_readwrite("verbose", &PisoConfig::verbose);
 

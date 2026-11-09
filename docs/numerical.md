@@ -401,9 +401,11 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P (\nabla p_{\text{sol}})_P$$
 
 | 类型 | 说明 |
 |------|------|
-| `SimpleConfig` | `maxIterations`、`tolerance`、`relaxationU`/`relaxationP`、`scheme`、`solverConfig`、`corrections`（`CorrectionOptions`）、`verbose` |
+| `SimpleConfig` | `maxIterations`、`tolerance`、`relaxationU`/`relaxationP`、`scheme`、`solverConfig`（动量方程线性求解器）、`pressureSolverConfig`（压力方程线性求解器，默认 eigen CG）、`corrections`（`CorrectionOptions`）、`verbose` |
 | `SimpleResiduals` | 每次迭代的残差快照：`continuity`、`u`/`v`、`pressure` |
 | `SimpleResult` | `converged`、`iterations`、`history` |
+
+动量与压力线性求解器经 `fvm::math::makeLinearSolver` 按 `solverConfig` / `pressureSolverConfig` **独立**分派（backend × method，见 `docs/math.md`）。两字段不设置时与历史硬编码（eigen BiCGSTAB + eigen CG）逐位一致；注意压力**不再继承** `solverConfig` 的容差/迭代数——需要紧压力内解的用例必须显式设置 `pressureSolverConfig`。
 
 ## Piso：瞬态驱动
 
@@ -418,7 +420,7 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P (\nabla p_{\text{sol}})_P$$
 
 | 类型 | 说明 |
 |------|------|
-| `PisoConfig` | `dt`、`nSteps`、`nCorrectors`（**必须 ≥ 2**，`solvePiso` 会拒绝更小的值——单修正子在一次扫掠后就到达不动点并发散）、`timeScheme`、`scheme`、`solverConfig`、`corrections`（`CorrectionOptions`）、`verbose` |
+| `PisoConfig` | `dt`、`nSteps`、`nCorrectors`（**必须 ≥ 2**，`solvePiso` 会拒绝更小的值——单修正子在一次扫掠后就到达不动点并发散）、`timeScheme`、`scheme`、`solverConfig`（动量）、`pressureSolverConfig`（压力，默认 eigen CG，独立分派，同 `SimpleConfig`）、`corrections`（`CorrectionOptions`）、`verbose` |
 | `PisoStepInfo` | 每步诊断：`time`、`continuity`（修正后真实连续性误差）、`maxSpeed` |
 | `PisoResult` | `steps`、`history` |
 
@@ -457,7 +459,36 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 >
 > **2026-10-07 重构**：压力方程由 $p'$ 增量形式改为 OpenFOAM 式的**绝对压力形式**（右端 `div(phiHbyA)`、Dirichlet 压力值直接进右端；`bcPrime` 与 `cumulativeVelocityCorrection` 已删除）；两者代数等价，推导见上文"压力方程（绝对压力形式）"。重构后全量测试仍为 50 用例 / 3271 断言全绿，单步指纹与 OpenFOAM 一致（数值见下文"与 OpenFOAM-14 的定量一致性"）。
 
+## 方腔 Re=3200 与线性求解器性能对照（5.3-1）
+
+### 算例设置与外容差放宽
+
+`python/examples/cavity.py --re 3200`：256×256 笛卡尔网格，`relax_u = 0.7` / `relax_p = 0.3`，Central 对流，内解 1e-9 / 2000 次。**外层收敛判据放宽到 2e-5**（其余 Re 保持 1e-6）：3000 迭代实测（5595 s）u/v 缩放残差停在 1.25e-5 / 1.14e-5——残差由**角区慢模**主导（底角/顶角次生涡的缓慢发展），而体区中心线剖面已 Ghia 收敛（盖面区误差从 128² 的 2.0e-2 降到 256² 的 1.2e-2，O(h)）；残差轨迹外推 2e-5 于约 2560 迭代穿过，迭代上限 3000。阈值 (L-inf 9e-2, L2 3.7e-2) = 3000 迭代观测 (3.7e-2 / 1.55e-2) × 1.2 停点滞后 × 2。128² 松弛探针：relax_u 0.7 优于 0.5（同预算剖面误差 2.1e-2 vs 2.6e-2），且 0.7 下残差单调无振荡。
+
+### Ghia (1982) Re=3200 表的 y=0.4531 伪值
+
+u 表 (y=0.4531) 原印刷值 −0.86636 是**文献级伪值**（Tomczak 2021, arXiv:2108.13241 明确标注异常；物理上夹在邻居 −0.04272 / −0.24427 之间不可能，且破坏跨 Re 单调趋势 −0.10648(1000) → −0.07404(5000)），在两份独立复现中同错，属原始论文级广泛转录错误。处置沿用 Re=400 v 表勘误先例（`cavity.py` 内注释）：以本求解 256² 收敛值 **−0.07585** 修正入表（128² 交叉验证：relax 0.7/0.5 下 −0.07802 / −0.07316），并把该站点从 u 误差度量中剔除（`ANOMALOUS_STATIONS_U`）——修正值来自本求解，保留在度量内会自指。v 表 (x=0.2344) 同位序号是合法参考值，不剔除。
+
+### 固定外迭代的线性求解器性能对照
+
+协议：256² Re=3200，固定 300 个 SIMPLE 外迭代（`tolerance = 0` 关闭提前停机）、内解 1e-9、同一初值——五配置外轨迹完全一致（终态 u 残差同为 5.07e-3），墙钟差即线性求解器成本差。i7 桌面单线程实测：
+
+| 配置（动量 / 压力） | wall (s) | 相对基线 |
+| --- | --- | --- |
+| eigen BiCGSTAB / eigen CG（基线） | 557.4 | 1.00× |
+| eigen BiCGSTAB / eigen BiCGSTAB-ILUT | 400.6 | 0.72× |
+| eigen BiCGSTAB-ILUT / eigen CG | 665.3 | 1.19× |
+| eigen BiCGSTAB / amgcl CG | 180.9 | 0.32× |
+| amgcl BiCGSTAB / amgcl CG | 172.1 | 0.31× |
+
+结论：此规模成本由**压力方程主导**（压力换单项即 0.32×，动量全换 AMGCL 仅再省 0.01×）；ILUT 对压力有效（0.72×）、对动量反效果（1.19×，逐外迭代重分解的 setup 成本超过迭代节省）；AMGCL 工厂无状态、每次 solve 重建层级（`docs/math.md`），在此规模仍全场最优。**CI 不含任何计时断言**——上表是单机记录，性能 showcase 由脚本参数承担（`cavity.py --backend/--method/--p-backend/--p-method`）。
+
+### SIMPLE 收敛判据下的轨迹依赖（实测发现）
+
+`tests/test_simple.cpp` 的独立求解器配置用例：(a) 默认方法对与 (b) 方法互换两路径均收敛到精确 Poiseuille 剖面（同一物理容差），但两收敛场交叉差（du 3.3e-4 / dp 9.3e-3）与**内解精度无关**（内解 1e-6 与 1e-9 下完全相同）——这不是线性求解器噪声，而是 SIMPLE 收敛判据（残差 < tol 即停）下不同 Krylov 路径停在各自慢模轨迹上的残余差异。交叉一致性界因此取 2e-3 / 5e-2 并在用例内注释；对精度敏感的对照应以物理误差（vs 精确解）而非路径间差值为准。
+
 ## 4.3a：网格抽象与零数值变化验证
+
 
 本次重构只改变网格表示与几何系数来源，不改变笛卡尔网格上的离散公式：
 

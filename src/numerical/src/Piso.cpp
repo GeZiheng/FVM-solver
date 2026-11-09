@@ -71,8 +71,8 @@ PisoResult solvePiso(const Mesh& mesh,
         flux,
         config.corrections);
 
-    auto momSolver = fvm::math::createEigenBiCGSTAB(config.solverConfig);
-    auto pSolver = fvm::math::createEigenCG(config.solverConfig);
+    auto momSolver = fvm::math::makeLinearSolver(config.solverConfig);
+    auto pSolver = fvm::math::makeLinearSolver(config.pressureSolverConfig);
 
     TimeTerm time;
     time.rho = rho;

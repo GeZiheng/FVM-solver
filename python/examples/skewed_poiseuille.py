@@ -100,6 +100,8 @@ def solve_case(mesh):
     cfg.corrections.n_non_orthogonal_correctors = 1
     cfg.solver_config.tolerance = 1e-9
     cfg.solver_config.max_iterations = 20000
+    cfg.pressure_solver_config.tolerance = 1e-9
+    cfg.pressure_solver_config.max_iterations = 20000
 
     result = fvm.solve_simple(mesh, 1.0, 1.0, bc_u, bc_v, bc_p, cfg,
                               velocity, pressure, flux)

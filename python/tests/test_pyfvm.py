@@ -390,6 +390,64 @@ class TestDriverSmokes(unittest.TestCase):
         self.assertTrue(np.isfinite(pressure.to_numpy()).all())
 
 
+class TestDriverSolverConfigs(unittest.TestCase):
+    """The NS drivers take two independent linear-solver configs:
+    solver_config (momentum) and pressure_solver_config (pressure). Both go
+    through the shared backend x method dispatch of fvm.math."""
+
+    def test_pressure_solver_config_defaults(self):
+        # Default pressure config: eigen x cg (the historical hardcoded
+        # pressure factory), independent of solver_config.
+        for make_config in (fvm.SimpleConfig, fvm.PisoConfig):
+            cfg = make_config()
+            self.assertEqual(cfg.pressure_solver_config.backend, "eigen")
+            self.assertEqual(cfg.pressure_solver_config.method, "cg")
+
+    def test_solve_simple_rejects_unknown_methods(self):
+        # Both configs are dispatched on entry, before any solve work: an
+        # unknown method raises ValueError (from C++ std::invalid_argument)
+        # immediately.
+        for attr in ("solver_config", "pressure_solver_config"):
+            with self.subTest(config=attr):
+                mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = \
+                    make_cavity_case(8)
+                cfg = fvm.SimpleConfig()
+                cfg.max_iterations = 5
+                getattr(cfg, attr).method = "bogus"
+                with self.assertRaises(ValueError):
+                    fvm.solve_simple(mesh, 1.0, 0.01, bc_u, bc_v, bc_p, cfg,
+                                     velocity, pressure, flux)
+
+    @unittest.skipIf(not getattr(fvm, "HAVE_AMGCL", False),
+                     "requires FVM_BUILD_AMGCL=ON")
+    def test_solve_simple_with_amgcl_momentum_backend(self):
+        # ON build: the NS path consumes the amgcl backend for the momentum
+        # equation; the pressure stays on the default eigen CG.
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = make_cavity_case(8)
+        cfg = fvm.SimpleConfig()
+        cfg.tolerance = 1e-4
+        cfg.max_iterations = 500
+        cfg.solver_config.tolerance = 1e-8
+        cfg.solver_config.backend = "amgcl"
+        result = fvm.solve_simple(mesh, 1.0, 0.01, bc_u, bc_v, bc_p, cfg,
+                                  velocity, pressure, flux)
+        self.assertTrue(result.converged)
+        self.assertTrue(np.isfinite(velocity.u.to_numpy()).all())
+
+    @unittest.skipIf(getattr(fvm, "HAVE_AMGCL", False),
+                     "the family gate only exists in OFF builds")
+    def test_solve_simple_rejects_amgcl_without_the_option(self):
+        # OFF build: the family-level gate rejects backend="amgcl" with
+        # RuntimeError before the method is even looked at.
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = make_cavity_case(8)
+        cfg = fvm.SimpleConfig()
+        cfg.max_iterations = 5
+        cfg.solver_config.backend = "amgcl"
+        with self.assertRaises(RuntimeError):
+            fvm.solve_simple(mesh, 1.0, 0.01, bc_u, bc_v, bc_p, cfg,
+                             velocity, pressure, flux)
+
+
 class TestMeshMismatch(unittest.TestCase):
     """Fields carry the mesh they were created on; passing one built on a
     different mesh to a mesh-taking entry point must raise ValueError."""

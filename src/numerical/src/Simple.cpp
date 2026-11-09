@@ -63,8 +63,8 @@ SimpleResult solveSimple(const Mesh& mesh,
         flux,
         config.corrections);
 
-    auto momSolver = createEigenBiCGSTAB(config.solverConfig);
-    auto pSolver = createEigenCG(config.solverConfig);
+    auto momSolver = makeLinearSolver(config.solverConfig);
+    auto pSolver = makeLinearSolver(config.pressureSolverConfig);
 
     SimpleResult result;
 
