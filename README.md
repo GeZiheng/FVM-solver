@@ -60,7 +60,8 @@ python/                  — pyfvm bindings (optional, -DFVM_BUILD_PYTHON=ON): p
                            overlay-ports/python3 (empty vcpkg port: link against system Python)
 ports/                   — vcpkg overlay port for amgcl (header-only, locked 1.5.0 +
                            SHA512, depends only on eigen3; linked when FVM_BUILD_AMGCL=ON)
-docs/                    — module docs (Chinese): core.md, math.md, io.md, numerical.md, python.md
+docs/                    — module docs (Chinese): core.md, math.md, io.md, numerical.md,
+                           python.md, tests.md
 ```
 
 ## 构建与测试
@@ -245,4 +246,5 @@ build-and-test 的分层与异步路径（`run=unit` 同步、`run=application` 
 - [`docs/io.md`](docs/io.md) — io 模块：VTK `.vti`/`.vtu` 输出。
 - [`docs/numerical.md`](docs/numerical.md) — numerical 模块：算子、SIMPLE/PISO 设计与 OpenFOAM cross-check 结论。
 - [`docs/python.md`](docs/python.md) — `pyfvm` bindings：机制、API、约定与测试分工。
+- [`docs/tests.md`](docs/tests.md) — 测试层：ctest 三层架构、注册点、分层验证粒度与已知坑。
 - 代码约定与 agent 工作流见 [`AGENTS.md`](AGENTS.md)。

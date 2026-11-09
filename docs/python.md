@@ -24,7 +24,7 @@ python/
 - **vcpkg feature**：`pybind11` 声明在 `vcpkg.json` 的 `"python"` feature 里；`-DFVM_BUILD_PYTHON=ON` 会在 `project()` 之前自动设置 `VCPKG_MANIFEST_FEATURES=python`，默认构建不拉取 pybind11。
 - **空 overlay 端口**：pybind11 端口声明依赖 vcpkg 的 `python3` 端口（会源码构建 CPython 3.12，但我们用不上）。`python/overlay-ports/python3` 是一个空端口，满足依赖图但不装任何东西；扩展模块始终对着**系统 Python** 编译。
 - **解释器选择**：扩展模块与 Python 版本绑定（cp314 的 `.pyd` 不能在 3.12 上 import）。configure 优先用 `-DPython_EXECUTABLE=...`，否则取 PATH 上第一个 `python3.14`/`python3`/`python`。pybind11 ≥ 3.0 才支持 Python 3.14（当前 vcpkg 端口 3.0.1）。
-- **产物**：`build/<dir>/python/pyfvm*.pyd`（Linux 为 `.so`）；`_path.py` 优先采用环境变量 `FVM_PYFVM_DIR`，该目录必须已含当前解释器标签的扩展，否则抛 `RuntimeError`；未设置时扫描 `build/*/python`，只接受当前解释器标签（Windows `cp3XX`、Linux `cpython-3XX`）的扩展，并在多个匹配目录间取其中文件 mtime 最新者。自动定位失败时抛 `RuntimeError`，错误信息列出解释器版本、标签模式和已扫描目录。示例和测试直接 `import _path` 后即可 `import pyfvm`。
+- **产物**：`build/<dir>/python/pyfvm*.pyd`（Linux 为 `.so`）；`_path.py` 优先采用环境变量 `FVM_PYFVM_DIR`，该目录必须已含当前解释器标签的扩展，否则抛 `RuntimeError`；未设置时扫描 `build/*/python`，只接受当前解释器标签（Windows `cp3XX`、Linux `cpython-3XX`）的扩展，并在多个匹配目录间取其中文件 mtime 最新者。自动定位失败时抛 `RuntimeError`，错误信息列出解释器版本、标签模式和已扫描目录。示例和测试直接 `import _path` 后即可 `import pyfvm`。多构建树并存时手工复跑测试须钉定该环境变量，见 `docs/tests.md` 已知坑。
 
 ## API 一览
 
@@ -84,6 +84,18 @@ io：
 时间相关但空间均匀的壁面值，标准用法是在每个时间步先更新 `BoundaryField.set(...)`，再把 `PisoConfig.n_steps` 置为 1 并调用 `solve_piso`（Stokes 振荡平板示例）。逐步调用与一次长调用语义等价：Couette 100 步两种调用方式的终态最大差为 `7.7e-12`（判据 `1e-9`）。
 
 ## 测试分工
+
+### 新增算例脚本
+
+新算例按以下约定加入：
+
+- **脚本模式**：`argparse` 参数化（如 `--re`、`--backend`），`--test` 开关启用精度断言；不带 `--test` 时只打印结果供人工检查。精度阈值锁定在脚本内。
+- **阈值校准**：余量一般不小于 2×（现有例外与各条目的校准值见下文）；网格研究数据记录在脚本注释或 `docs/numerical.md`。
+- **注册**：在根 `CMakeLists.txt` 用 `fvm_add_application_test(name script --test)` 添加，label/TIMEOUT 机制见 `docs/tests.md`；是否进 `application_default` 按"每物理家族/代码路径一条"取舍。
+- **网格**：非结构算例复用 `examples/mesh_su2.py` 的 SU2 文本生成 helper，不自建重复生成逻辑。
+- **证据**：算例设置、阈值校准与文献对照记录进 `docs/numerical.md`（或脚本注释）；手工复跑测试的坑见 `docs/tests.md`。
+
+### 现有条目
 
 `python/tests/test_pyfvm.py` 是**绑定契约测试**：numpy 零拷贝与索引顺序、网格几何、BC 默认值与非法参数、纯扩散线性精确解（`solve_transport` 全通路）、SIMPLE/PISO 粗网格冒烟、`write_vti` 冒烟。
 
