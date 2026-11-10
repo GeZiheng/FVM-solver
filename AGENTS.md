@@ -2,11 +2,11 @@
 
 ## Project State
 
-- **Status** (2026-11-09):
-  - **Delivered**: phases 1–4.2, 4.3a–c, application phases A–B, Phase 5.1 (per-face Dirichlet in `BoundaryField`), 5.2 (AMGCL backend, `FVM_BUILD_AMGCL=ON`), 5.3-1 (cavity Re=3200 @ 256x256 vs Ghia + driver-level solver dispatch), plus the early-landed 5.3-4 skewed-channel case.
-  - **Tests green**: 118 C++ cases (115 + 3 AMGCL in the ON build), `pyfvm_tests` (34; AMGCL subsets build-mode-gated), application layer 10/10 (`cavity_re3200` sits outside `application_default`).
+- **Status** (2026-11-10):
+  - **Delivered**: phases 1–4.2, 4.3a–c, application phases A–B, **Phase 5 complete** — 5.1 (per-face Dirichlet in `BoundaryField`), 5.2 (AMGCL backend, `FVM_BUILD_AMGCL=ON`), 5.3-1 (cavity Re=3200 @ 256x256 vs Ghia + driver-level solver dispatch), 5.3-2 (cylinder Re=20/40 rectangular domain, O-4 multiblock generator replacing `polar_ogrid`), 5.3-3 (BFS Re=389 parabolic inlet, Armaly-convention `mu=2/389`), 5.3-5 (Taylor-Green exact-BC transient, spatial 2nd order at fixed dt), 5.3-6 (Re=100 vortex shedding, St/Cd_mean/Cl_amp vs literature), plus the early-landed 5.3-4 skewed-channel case.
+  - **Tests green**: 118 C++ cases (115 + 3 AMGCL in the ON build), `pyfvm_tests` (34; AMGCL subsets build-mode-gated), application layer 13 entries (`cavity_re3200`, `backward_step_re389`, `taylor_green`, `vortex_shedding` sit outside `application_default`).
   - **Application phase A**: cavity Re=100/400/1000/3200 vs Ghia (Central; Re=3200 at 256x256 with a loosened 2e-5 outer tolerance; Upwind numerical diffusion is the key Re=400 limiter), planar Poiseuille, Stokes oscillating plate.
-  - **Application phase B**: backward-facing step + cylinder via the shared `mesh_su2` helper → `UnstructuredMesh` → SIMPLE → `.vtu`.
+  - **Application phase B + 5.3**: backward-facing step (Re=50/100 uniform-inlet legacy + Re=389 parabolic Armaly-convention), cylinder steady (5.3-2 rectangular O-4 mesh; Cd ~4% above Fornberg/D&C anchors from the finite-domain far-field; **Re=20 core-refinement stability frontier** — fine grid refines outer blocks only — evidence and excluded hypotheses in `docs/numerical.md`) and shedding (5.3-6, transient PISO has no such frontier at Re=100), Taylor-Green exact-BC transient (BC at t^{n+1}; spatial order at fixed dt, temporal non-monotone — dt²/h-like mixed term, open mechanism) — all via the shared `mesh_su2` helper / `CartesianMesh` → SIMPLE/PISO → `.vtu`/`.vti`.
   - **OpenFOAM oblique-trapezoidal cross-check**: L2 4.5e-4 at NC=8 (NC=2 gap = corrector lag; residual split dependence O(h²)) — `docs/numerical.md`.
 - **Capabilities & layout**: see `README.md`. No C++ demo executable.
 - **Solver structure**: reusable `predictMomentum` / `correctPressure` primitives (`Momentum`/`Pressure`); `Simple`/`Piso` are thin drivers — extend the primitives, not the loops.
@@ -133,4 +133,4 @@ Rules only; derivations and evidence: `docs/<module>.md` (mainly `docs/numerical
 
 Roadmap (single source of truth): see README.md §路线图 → Phase 5. This section tracks execution progress only — do not restate the roadmap here.
 
-Status (2026-11-09): Phase 5 is delivered in sub-batches. Batch order so far: 5.1 (with roadmap item 5.3-4 landing early as its demonstration case, 2026-11-03) → 5.2 (2026-11-04) → 5.3-1 (2026-11-05); plans under `.agents/plans/` (`skewed-parabolic-poiseuille` / `phase5-2-amgcl-backend` / `phase5-3-1-cavity-re3200`). Next batch: the remaining 5.3 items, per README.md §路线图 → Phase 5.
+Status (2026-11-10): **Phase 5 complete.** Batch order: 5.1 (with roadmap item 5.3-4 landing early as its demonstration case, 2026-11-03) → 5.2 (2026-11-04) → 5.3-1 (2026-11-05) → 5.3-2/-3/-5/-6 (2026-11-10, one overnight authorized session); plans under `.agents/plans/` (`skewed-parabolic-poiseuille` / `phase5-2-amgcl-backend` / `phase5-3-1-cavity-re3200` / `phase5-3-2-cylinder-rectangle` / `phase5-3-3-bfs-re389` / `phase5-3-5-taylor-green` / `phase5-3-6-vortex-shedding`). Roadmap beyond Phase 5: none agreed yet.

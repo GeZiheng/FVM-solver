@@ -183,6 +183,21 @@ if(FVM_BUILD_PYTHON)
     fvm_add_application_test(skewed_poiseuille skewed_poiseuille --test)
     fvm_add_application_test(cylinder_re40 cylinder --re 40 --test)
     fvm_add_application_test(cylinder_re20 cylinder --re 20 --test)
+    # Phase 5.3-3: Armaly-convention Re=389, parabolic inlet, Central;
+    # ~19 min at n=16 on the calibration machine.
+    fvm_add_application_test(backward_step_re389 backward_facing_step
+        --re 389 --test)
+    set_tests_properties(pyfvm_app_backward_step_re389
+        PROPERTIES TIMEOUT 3600)
+    # Phase 5.3-5: Taylor-Green spatial-convergence study (64^2 + 128^2
+    # at a shared small dt; --full adds 256^2), ~2.5 min cold.
+    fvm_add_application_test(taylor_green taylor_green --test)
+    set_tests_properties(pyfvm_app_taylor_green PROPERTIES TIMEOUT 1200)
+    # Phase 5.3-6: Re=100 vortex shedding, CI short version (coarse
+    # grid, dt=0.01, T=250; the medium full study runs via script args);
+    # ~11 min solo, TIMEOUT with load headroom.
+    fvm_add_application_test(vortex_shedding vortex_shedding --test)
+    set_tests_properties(pyfvm_app_vortex_shedding PROPERTIES TIMEOUT 3600)
 
     # The CI workflow (pull requests) and the build-and-test MCP server run
     # this labelled subset by default (`ctest -L application_default`): one

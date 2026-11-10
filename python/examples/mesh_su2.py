@@ -93,75 +93,242 @@ def l_shaped_bfs_grid(n):
     return "\n".join(lines) + "\n"
 
 
-def polar_ogrid(n_theta, n_r, r0, r1):
-    """Return a stretched polar O-grid around a circular cylinder.
+class _PointPool:
+    """Deduplicating pool of SU2 points keyed by exact coordinates.
 
-    Radial nodes are distributed geometrically from ``r0`` to ``r1`` and the
-    azimuthal direction is periodic.  Marker order is cylinder, inflow (the
-    x < 0 half of the outer boundary), and outflow (the x >= 0 half).
+    Multiblock generators share edge points between adjacent blocks; the
+    shared points are computed once and re-added, so exact float equality
+    identifies them.
     """
-    if not isinstance(n_theta, int) or n_theta < 3:
-        raise ValueError("n_theta must be an integer >= 3")
-    if not isinstance(n_r, int) or n_r <= 0:
-        raise ValueError("n_r must be a positive integer")
-    if r0 <= 0.0 or r1 <= r0:
-        raise ValueError("radii must satisfy 0 < r0 < r1")
 
-    q = (r1 / r0) ** (1.0 / n_r)
+    def __init__(self):
+        self._ids = {}
+        self.points = []
 
-    def coordinate(theta_index, radial_index):
-        theta = 2.0 * math.pi * theta_index / n_theta
-        radius = r0 * q ** radial_index
-        return radius * math.cos(theta), radius * math.sin(theta)
+    def add(self, x, y):
+        key = (x, y)
+        point_id = self._ids.get(key)
+        if point_id is None:
+            self.points.append(key)
+            point_id = len(self.points)
+            self._ids[key] = point_id
+        return point_id
 
-    def point_id(theta_index, radial_index):
-        return radial_index * n_theta + theta_index + 1
+    def id_of(self, x, y):
+        """Existing id for the coordinates; raises on unknown points."""
+        try:
+            return self._ids[(x, y)]
+        except KeyError:
+            raise KeyError(f"point ({x!r}, {y!r}) not in the pool") from None
 
-    lines = ["NDIME= 2", f"NPOIN= {n_theta * (n_r + 1)}"]
-    for radial_index in range(n_r + 1):
-        for theta_index in range(n_theta):
-            x, y = coordinate(theta_index, radial_index)
-            lines.append(f"{point_id(theta_index, radial_index)} "
-                         f"{x!r} {y!r}")
 
-    lines.append(f"NELEM= {n_theta * n_r}")
-    for radial_index in range(n_r):
-        for theta_index in range(n_theta):
-            next_theta = (theta_index + 1) % n_theta
-            # Counter-clockwise winding: radial out, azimuth on, radial in.
-            lines.append(
-                f"9 {point_id(next_theta, radial_index + 1)} "
-                f"{point_id(theta_index, radial_index + 1)} "
-                f"{point_id(theta_index, radial_index)} "
-                f"{point_id(next_theta, radial_index)}")
+def _geometric_intervals(length, n, first):
+    """Cumulative station list [0, length] of n geometric intervals.
 
-    inflow = []
-    outflow = []
-    for theta_index in range(n_theta):
-        edge = (point_id(theta_index, n_r),
-                point_id((theta_index + 1) % n_theta, n_r))
-        theta_mid = 2.0 * math.pi * (theta_index + 0.5) / n_theta
-        if math.cos(theta_mid) < 0.0:
-            inflow.append(edge)
+    Interval sizes grow by a common ratio from ``first`` at the start; the
+    ratio is solved by bisection so the total matches ``length`` exactly
+    (the final station is pinned).  Falls back to a uniform distribution
+    when ``n * first`` already exceeds ``length``.
+    """
+    if n <= 0:
+        raise ValueError("n must be a positive integer")
+    if first <= 0.0:
+        raise ValueError("first must be positive")
+    if n * first >= length:
+        return [length * i / n for i in range(n + 1)]
+
+    def total(ratio):
+        return first * (ratio ** n - 1.0) / (ratio - 1.0) if ratio != 1.0 \
+            else first * n
+
+    low, high = 1.0, 2.0
+    while total(high) < length:
+        high *= 2.0
+    for _ in range(200):
+        mid = 0.5 * (low + high)
+        if total(mid) < length:
+            low = mid
         else:
-            outflow.append(edge)
+            high = mid
+    ratio = 0.5 * (low + high)
+    stations = [0.0]
+    for i in range(1, n + 1):
+        stations.append(first * (ratio ** i - 1.0) / (ratio - 1.0)
+                        if i < n else length)
+    return stations
+
+
+def _stretched_axis(near, far, n, first):
+    """Ascending stations between the ``near`` (fine) and ``far`` ends.
+
+    Both endpoints are pinned exactly -- the fine end through a zero
+    first interval, the far end by overwriting the boundary station
+    (the last for an ascending axis, the first for a descending one) --
+    so block boundaries on the domain sides deduplicate in the pool.
+    """
+    intervals = _geometric_intervals(abs(far - near), n, first)
+    if near < far:
+        axis = [near + d for d in intervals]
+        axis[-1] = far
+        return axis
+    axis = [near - d for d in reversed(intervals)]
+    axis[0] = far
+    return axis
+
+
+def _tensor_block(pool, xs, ys):
+    """Emit the quad cells of a tensor block over the given axis stations.
+
+    ``xs`` and ``ys`` must be ascending; cells are wound counter-clockwise
+    (i, j), (i+1, j), (i+1, j+1), (i, j+1).  Points shared with adjacent
+    blocks resolve to their existing pool ids.
+    """
+    ids = [[pool.add(x, y) for y in ys] for x in xs]
+    cells = []
+    for i in range(len(xs) - 1):
+        for j in range(len(ys) - 1):
+            cells.append((ids[i][j], ids[i + 1][j],
+                          ids[i + 1][j + 1], ids[i][j + 1]))
+    return cells
+
+
+def cylinder_rectangle_grid(n_theta=96, n_r=40, radius=0.5, half=3.0,
+                            domain=(-10.0, 25.0, -10.0, 10.0),
+                            n_w=24, n_e=36, n_n=24, n_s=24):
+    """Return an O-4 multiblock cylinder grid in a rectangular domain.
+
+    Topology (classic square-in-rectangle): a polar core connects the
+    circle of ``radius`` to the square ``[-half, half]^2`` -- uniform
+    azimuths with per-ray geometric radial stretching to R(theta) =
+    half / max(|cos|, |sin|), the 45-degree rays landing exactly on the
+    square corners (the O-4 split).  Eight axis-aligned tensor blocks
+    (four strips plus four corners) extend the square edges to the
+    ``domain`` rectangle ``(x_min, x_max, y_min, y_max)``; their 1-D
+    stations are geometric with the first interval ``half*d_theta`` (the
+    square-edge transverse spacing), refined towards the square.  All
+    inter-block faces are point-conforming via a shared coordinate pool.
+
+    ``n_theta`` must be a multiple of 8 (45-degree rays on grid lines);
+    each square edge carries ``n_theta / 4`` cells.  Marker order is
+    cylinder, inlet (west), outlet (east), top, bottom.
+    """
+    x_min, x_max, y_min, y_max = domain
+    integer_args = {"n_theta": n_theta, "n_r": n_r, "n_w": n_w,
+                    "n_e": n_e, "n_n": n_n, "n_s": n_s}
+    for name, value in integer_args.items():
+        if not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if n_theta % 8 != 0:
+        raise ValueError("n_theta must be a multiple of 8")
+    if not 0.0 < radius < half:
+        raise ValueError("radii must satisfy 0 < radius < half")
+    if not x_min < -half or not half < x_max \
+            or not y_min < -half or not half < y_max:
+        raise ValueError("domain must strictly contain the square")
+
+    d_theta = 2.0 * math.pi / n_theta
+    pool = _PointPool()
+    cells = []
+
+    # Polar core: point ids [theta_index][radial_index].  The outermost
+    # ring is snapped onto the square analytically -- the 45-degree rays
+    # (i = eighth + m*quarter) hit the corners exactly, everything else
+    # lands on the edge via tan -- so its floats match the tensor-block
+    # corners and the shared pool deduplicates them.
+    eighth = n_theta // 8
+    quarter = n_theta // 4
+    core = []
+    for i in range(n_theta):
+        theta = d_theta * i
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        outer = half / max(abs(cos_t), abs(sin_t))
+        ratio = (outer / radius) ** (1.0 / n_r)
+        ring = []
+        for k in range(n_r + 1):
+            if k < n_r:
+                r = radius * ratio ** k
+                ring.append(pool.add(r * cos_t, r * sin_t))
+            elif (i - eighth) % quarter == 0:
+                ring.append(pool.add(half if cos_t > 0.0 else -half,
+                                     half if sin_t > 0.0 else -half))
+            elif abs(cos_t) >= abs(sin_t):
+                x = half if cos_t > 0.0 else -half
+                ring.append(pool.add(x, x * sin_t / cos_t))
+            else:
+                y = half if sin_t > 0.0 else -half
+                ring.append(pool.add(y * cos_t / sin_t, y))
+        core.append(ring)
+    for k in range(n_r):
+        for i in range(n_theta):
+            # Same winding as the retired polar O-grid (reader normalizes).
+            cells.append((core[(i + 1) % n_theta][k + 1], core[i][k + 1],
+                          core[i][k], core[(i + 1) % n_theta][k]))
+
+    # Square-edge point coordinates in ascending order, reused by the
+    # strips so the block interfaces are exactly conforming.
+    north_x = [pool.points[core[i][n_r] - 1][0]
+               for i in range(3 * eighth, eighth - 1, -1)]
+    east_y = [pool.points[core[i % n_theta][n_r] - 1][1]
+              for i in range(7 * eighth, 9 * eighth + 1)]
+    south_x = [pool.points[core[i][n_r] - 1][0]
+               for i in range(5 * eighth, 7 * eighth + 1)]
+    west_y = [pool.points[core[i][n_r] - 1][1]
+              for i in range(5 * eighth, 3 * eighth - 1, -1)]
+
+    first = half * d_theta
+    west_x = _stretched_axis(-half, x_min, n_w, first)
+    east_x = _stretched_axis(half, x_max, n_e, first)
+    north_y = _stretched_axis(half, y_max, n_n, first)
+    south_y = _stretched_axis(-half, y_min, n_s, first)
+
+    for xs, ys in ((west_x, north_y), (east_x, north_y),
+                   (west_x, south_y), (east_x, south_y),
+                   (west_x, west_y), (east_x, east_y),
+                   (north_x, north_y), (south_x, south_y)):
+        cells.extend(_tensor_block(pool, xs, ys))
 
     markers = [
-        ("cylinder", [(point_id(theta_index, 0),
-                       point_id((theta_index + 1) % n_theta, 0))
-                      for theta_index in range(n_theta)]),
-        ("inflow", inflow),
-        ("outflow", outflow),
+        ("cylinder", [(core[i][0], core[(i + 1) % n_theta][0])
+                      for i in range(n_theta)]),
+        ("inlet", _boundary_edges(pool, south_y + west_y[1:] + north_y[1:],
+                                  vertical=True, fixed=x_min)),
+        ("outlet", _boundary_edges(pool, south_y + east_y[1:] + north_y[1:],
+                                   vertical=True, fixed=x_max)),
+        ("top", _boundary_edges(pool, west_x + north_x[1:] + east_x[1:],
+                                vertical=False, fixed=y_max)),
+        ("bottom", _boundary_edges(pool, west_x + south_x[1:] + east_x[1:],
+                                   vertical=False, fixed=y_min)),
     ]
 
+    lines = ["NDIME= 2", f"NPOIN= {len(pool.points)}"]
+    for point_id, (x, y) in enumerate(pool.points, start=1):
+        lines.append(f"{point_id} {x!r} {y!r}")
+    lines.append(f"NELEM= {len(cells)}")
+    for loop in cells:
+        lines.append("9 " + " ".join(str(point) for point in loop))
     lines.append(f"NMARK= {len(markers)}")
     for name, faces in markers:
         lines.append(f"MARKER_TAG= {name}")
         lines.append(f"MARKER_ELEMS= {len(faces)}")
-        for first, second in faces:
-            lines.append(f"3 {first} {second}")
-
+        for first_id, second_id in faces:
+            lines.append(f"3 {first_id} {second_id}")
     return "\n".join(lines) + "\n"
+
+
+def _boundary_edges(pool, stations, vertical, fixed):
+    """Marker edge id pairs along one domain side, stations ascending.
+
+    The side points must already exist in the pool (tensor-block
+    boundaries); unknown coordinates raise instead of minting dangling
+    points.  ``vertical`` sides hold ``fixed`` x with ``stations`` as y
+    values, horizontal sides the transpose.
+    """
+    if vertical:
+        ids = [pool.id_of(fixed, value) for value in stations]
+    else:
+        ids = [pool.id_of(value, fixed) for value in stations]
+    return [(ids[i], ids[i + 1]) for i in range(len(ids) - 1)]
 
 
 def sheared_channel(n, shear=0.3):

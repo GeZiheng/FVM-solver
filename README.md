@@ -156,11 +156,11 @@ Phase 1–3 为路线图之前的基础：Phase 1 项目骨架（`Mesh`/`Field` 
 - ✅ **5.2 AMGCL 线性求解后端** — `FVM_BUILD_AMGCL=ON` 默认关闭、既有 CI 不变。选型依据（vs Hypre）、overlay port 与工厂细节见 [`docs/math.md`](docs/math.md)。
 - **5.3 更大规模/复杂算例**（按复杂度递增）：
   1. ✅ 方腔 Re=3200 @ 256×256（Ghia 对照；AMG vs BiCGSTAB-ILUT 性能 showcase——性能数据记录进 [`docs/numerical.md`](docs/numerical.md)，CI 只断言正确性）；
-  2. 圆柱 Re=20/40 稳态改矩形域 `[-10,25]×[-10,10]`（O-4 多块生成器，`polar_ogrid` 退役；对 Fornberg / Dennis & Chang 带重校准）；
-  3. 后向台阶 Re=389 充分发展（抛物线）入口（Armaly 1983 上带）；
+  2. ✅ 圆柱 Re=20/40 稳态改矩形域 `[-10,25]×[-10,10]`（O-4 多块生成器，`polar_ogrid` 退役；对 Fornberg / Dennis & Chang 带重校准）— 2026-11-10 完成；网格研究、文献锚偏移讨论与 **Re=20 核心加密稳定性边界**见 [`docs/numerical.md`](docs/numerical.md) 圆柱节；
+  3. ✅ 后向台阶 Re=389 充分发展（抛物线）入口（Armaly 1983 上带）— 2026-11-10 完成；Armaly 约定 `μ=2/389` 对齐后实测 x_r/h=8.10（2D 文献簇 8.2–8.6 / 实验 7.9），n=16→24 漂移 0.09%；
   4. ✅ 斜网格抛物线入口 Poiseuille（等截面斜切通道、两端逐面抛物线速度 + 全 Neumann 解析压力）— 2026-11-03 随 5.1 提前完成；实测斜面 Dirichlet-p 的 `Cb` 无补全偏移，见 [`docs/numerical.md`](docs/numerical.md)；
-  5. Taylor–Green 涡（瞬态 PISO、精确 BC、64²→128²→256² 网格收敛验证二阶精度）；
-  6. 圆柱 Re=100 卡门涡街（同矩形域生成器，瞬态 PISO + Central；断言 St（文献带 ≈0.164–0.167）、Cd_mean、Cl 振幅；ctest 跑缩短版，完整收敛研究由脚本参数承担）。
+  5. ✅ Taylor–Green 涡（瞬态 PISO、精确 BC、64²→128²→256² 网格收敛验证二阶精度）— 2026-11-10 完成；固定小 dt 下 64²→128² 实测空间阶 2.31；时间方向受 dt²/h 类混合项限制不单调（不断言），误差分解矩阵见 [`docs/numerical.md`](docs/numerical.md)；
+  6. ✅ 圆柱 Re=100 卡门涡街（同矩形域生成器，瞬态 PISO + Central；断言 St（文献带 ≈0.164–0.167）、Cd_mean、Cl 振幅；ctest 跑缩短版，完整收敛研究由脚本参数承担）— 2026-11-10 完成；CI 缩短版实测 St=0.159 / Cd_mean=1.369 / Cl_amp=0.351 全落 2D 文献簇。
 
 大算例（方腔 256²、涡街）标 `application` 但不进 `application_default`，保护默认 CI 时长。
 

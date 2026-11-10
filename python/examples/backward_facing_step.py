@@ -19,6 +19,8 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import _path  # noqa: F401,E402
 
+import numpy as np
+
 import pyfvm as fvm
 
 from mesh_su2 import l_shaped_bfs_grid
@@ -32,17 +34,38 @@ from mesh_su2 import l_shaped_bfs_grid
 # Grid-to-grid drift n=16 -> n=24 is 3.6%/4.5% (apparent order ~2.5,
 # Richardson extrapolation x_r(Re=100) ~ 4.7, inside the literature
 # cluster ~4.5-5); the trend ratio is 1.67 against the 1.5 limit.
-REATTACHMENT_BANDS = {50: (2.0, 4.0), 100: (3.0, 7.0)}
+# Calibration 2026-11-10 (Central, fully developed parabolic inlet,
+# Armaly-convention Re=389, Phase 5.3-3): x_r/h = 8.1025 (n=16),
+# 8.0949 (n=24) -- drift 0.09%, grid-converged.  Armaly et al. 1983
+# measure x_r/h ~ 7.9 at Re=389 (their Re = U_bulk*2h/nu, hence
+# nu = 2/389 here); 2D solutions sit in the 8.2-8.6 cluster (the
+# experiment turns 3D above Re ~ 400).  Band margins ~100x the drift.
+REATTACHMENT_BANDS = {50: (2.0, 4.0), 100: (3.0, 7.0), 389: (7.2, 9.0)}
+
+# Reynolds numbers using the fully developed parabolic inlet (bulk
+# velocity one over the unit-height inlet channel, so mu = 1/re keeps
+# the step-height Reynolds definition); lower ones stay uniform-inlet.
+PARABOLIC_INLET_RES = (389,)
 
 
-def configure_boundary_conditions(mesh):
+def configure_boundary_conditions(mesh, re):
     """Return velocity and pressure BCs; patch order follows the markers."""
     bc_u = fvm.BoundaryField(mesh)
     bc_v = fvm.BoundaryField(mesh)
     bc_p = fvm.BoundaryField(mesh)
 
-    # Patch 0: uniform inlet.
-    bc_u.set(0, fvm.BCType.Dirichlet, 1.0)
+    # Patch 0: uniform inlet (Re 50/100 historical calibration) or the
+    # fully developed profile u = 6 s (1 - s), s = y - 1 on the unit
+    # inlet channel (Phase 5.3-3).
+    if re in PARABOLIC_INLET_RES:
+        values = []
+        for face in mesh.patch_faces(0):
+            _, y = mesh.face_centroid(face)
+            s = y - 1.0
+            values.append(6.0 * s * (1.0 - s))
+        bc_u.set_values(0, fvm.BCType.Dirichlet, np.array(values))
+    else:
+        bc_u.set(0, fvm.BCType.Dirichlet, 1.0)
     bc_v.set(0, fvm.BCType.Dirichlet, 0.0)
     bc_p.set(0, fvm.BCType.Neumann, 0.0)
 
@@ -63,7 +86,13 @@ def configure_boundary_conditions(mesh):
 def solve_case(mesh, re):
     """Solve one Reynolds number and return the fields and SIMPLE result."""
     rho = 1.0
-    mu = 1.0 / re
+    # Armaly et al. (1983) define Re = U_bulk * D_h / nu with the inlet
+    # hydraulic diameter D_h = 2h (2D channel) and the parabolic-profile
+    # bulk velocity; with U_bulk = 1 and h = 1 the Armaly-Re benchmark
+    # point is nu = 2/re.  The legacy Re=50/100 uniform-inlet entries
+    # keep the step-height convention (U_bulk * h / nu = 1/re) they were
+    # calibrated under.
+    mu = (2.0 / re) if re in PARABOLIC_INLET_RES else (1.0 / re)
 
     velocity = fvm.VectorField(mesh, "velocity")
     pressure = fvm.ScalarField(mesh, "pressure")
@@ -73,11 +102,18 @@ def solve_case(mesh, re):
     pressure.set_constant(0.0)
     flux.set_zero()
 
-    bc_u, bc_v, bc_p = configure_boundary_conditions(mesh)
+    bc_u, bc_v, bc_p = configure_boundary_conditions(mesh, re)
     cfg = fvm.SimpleConfig()
-    cfg.scheme = fvm.ConvectionScheme.Upwind
+    # Re=389 uses Central (the long shear layer suffers under Upwind's
+    # numerical diffusion); the low-Re entries keep their calibrated
+    # Upwind setup.
+    if re in PARABOLIC_INLET_RES:
+        cfg.scheme = fvm.ConvectionScheme.Central
+        cfg.max_iterations = 8000
+    else:
+        cfg.scheme = fvm.ConvectionScheme.Upwind
+        cfg.max_iterations = 3000
     cfg.tolerance = 1e-6
-    cfg.max_iterations = 3000
     cfg.relaxation_u = 0.7
     cfg.relaxation_p = 0.3
     cfg.solver_config.tolerance = 1e-9
