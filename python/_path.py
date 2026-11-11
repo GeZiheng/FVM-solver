@@ -15,6 +15,9 @@ Selection rules:
   and the newest match wins -- several build trees can coexist (e.g.
   build/release-py from a manual configure and build/Release-agent-py
   from the build-and-test MCP server).
+- Only the native extension suffix for the running platform is
+  considered (.pyd on Windows, .so elsewhere) -- a WSL .so sharing the
+  build tree never shadows the Windows .pyd, and vice versa.
 """
 
 import glob
@@ -28,8 +31,10 @@ _TAG_PATTERNS = (f"cp{_V.major}{_V.minor}", f"cpython-{_V.major}{_V.minor}")
 
 def _extension_files(directory):
     """Extension files in `directory` that match the running interpreter."""
-    hits = glob.glob(os.path.join(directory, "pyfvm*.pyd"))
-    hits += glob.glob(os.path.join(directory, "pyfvm*.so"))
+    # Only the native extension suffix matches this platform (a WSL .so in
+    # the same build tree must never shadow the Windows .pyd, and vice versa).
+    suffix = ".pyd" if os.name == "nt" else ".so"
+    hits = glob.glob(os.path.join(directory, f"pyfvm*{suffix}"))
     return [p for p in hits
             if any(pattern in os.path.basename(p) for pattern in _TAG_PATTERNS)]
 

@@ -20,6 +20,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Find packages via vcpkg
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(doctest CONFIG REQUIRED)
+# Optional AMGCL backend: provided by the repo-local overlay port
+# ports/amgcl (see vcpkg-configuration.json). Guarded so the default OFF
+# configuration never runs find_package or any of the wiring below.
+if(FVM_BUILD_AMGCL)
+    find_package(amgcl CONFIG REQUIRED)
+endif()
 
 # Core library
 add_library(fvm_core STATIC)
@@ -46,6 +52,12 @@ target_sources(fvm_core
         src/numerical/src/Piso.cpp
 )
 
+# Optional AMGCL backend: the amgcl headers are heavy, so its translation
+# unit is only compiled when the backend is enabled (FVM_HAVE_AMGCL).
+if(FVM_BUILD_AMGCL)
+    target_sources(fvm_core PRIVATE src/math/src/AmgclSolver.cpp)
+endif()
+
 target_include_directories(fvm_core
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/include
@@ -58,6 +70,11 @@ target_link_libraries(fvm_core
     PUBLIC
         Eigen3::Eigen
 )
+
+if(FVM_BUILD_AMGCL)
+    target_link_libraries(fvm_core PUBLIC amgcl::amgcl)
+    target_compile_definitions(fvm_core PUBLIC FVM_HAVE_AMGCL)
+endif()
 
 # The static library is linked into the pyfvm shared module, so it must be
 # built as position-independent code on Linux (MSVC ignores this property).
@@ -82,10 +99,15 @@ target_sources(fvm_tests
         tests/test_convection.cpp
         tests/test_transport.cpp
         tests/test_simple.cpp
+        tests/test_boundary_face_values.cpp
         tests/test_transient.cpp
         tests/test_piso.cpp
         tests/main.cpp
 )
+
+if(FVM_BUILD_AMGCL)
+    target_sources(fvm_tests PRIVATE tests/test_amgcl_solver.cpp)
+endif()
 
 target_link_libraries(fvm_tests
     PRIVATE
@@ -98,6 +120,10 @@ add_test(NAME fvm_unit_tests COMMAND fvm_tests)
 # Python bindings (optional): pybind11 extension module `pyfvm`.
 # Configure with -DFVM_BUILD_PYTHON=ON; the .pyd lands in <build>/python.
 option(FVM_BUILD_PYTHON "Build the pyfvm Python bindings (pybind11)" OFF)
+# AMGCL linear solver backend (optional): header-only, wired through the
+# repo-local overlay port ports/amgcl. Configure with -DFVM_BUILD_AMGCL=ON;
+# OFF keeps the build byte-identical to the plain Eigen-only configuration.
+option(FVM_BUILD_AMGCL "Enable the AMGCL linear solver backend" OFF)
 if(FVM_BUILD_PYTHON)
     # The extension is version-locked to the interpreter it is built against
     # (a cp312 module does not import in 3.14). Honour an explicit
@@ -145,11 +171,33 @@ if(FVM_BUILD_PYTHON)
     fvm_add_application_test(cavity_re400 cavity --re 400 --test)
     fvm_add_application_test(cavity_re1000 cavity --re 1000 --test)
     set_tests_properties(pyfvm_app_cavity_re1000 PROPERTIES TIMEOUT 900)
+    # Phase 5.3-1: 256x256, ~80 min cold on the calibration machine
+    # (converges at the loosened 2e-5 outer tolerance around iteration
+    # 2560); large case kept out of application_default on purpose
+    # (docs/python.md).
+    fvm_add_application_test(cavity_re3200 cavity --re 3200 --test)
+    set_tests_properties(pyfvm_app_cavity_re3200 PROPERTIES TIMEOUT 10800)
     fvm_add_application_test(poiseuille poiseuille --test)
     fvm_add_application_test(stokes_oscillating stokes_oscillating --test)
     fvm_add_application_test(backward_step backward_facing_step --test)
+    fvm_add_application_test(skewed_poiseuille skewed_poiseuille --test)
     fvm_add_application_test(cylinder_re40 cylinder --re 40 --test)
     fvm_add_application_test(cylinder_re20 cylinder --re 20 --test)
+    # Phase 5.3-3: Armaly-convention Re=389, parabolic inlet, Central;
+    # ~19 min at n=16 on the calibration machine.
+    fvm_add_application_test(backward_step_re389 backward_facing_step
+        --re 389 --test)
+    set_tests_properties(pyfvm_app_backward_step_re389
+        PROPERTIES TIMEOUT 3600)
+    # Phase 5.3-5: Taylor-Green spatial-convergence study (64^2 + 128^2
+    # at a shared small dt; --full adds 256^2), ~2.5 min cold.
+    fvm_add_application_test(taylor_green taylor_green --test)
+    set_tests_properties(pyfvm_app_taylor_green PROPERTIES TIMEOUT 1200)
+    # Phase 5.3-6: Re=100 vortex shedding, CI short version (coarse
+    # grid, dt=0.01, T=250; the medium full study runs via script args);
+    # ~11 min solo, TIMEOUT with load headroom.
+    fvm_add_application_test(vortex_shedding vortex_shedding --test)
+    set_tests_properties(pyfvm_app_vortex_shedding PROPERTIES TIMEOUT 3600)
 
     # The CI workflow (pull requests) and the build-and-test MCP server run
     # this labelled subset by default (`ctest -L application_default`): one

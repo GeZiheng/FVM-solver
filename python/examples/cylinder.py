@@ -1,37 +1,57 @@
-"""Two-dimensional circular-cylinder flow via SIMPLE.
+"""Steady flow past a circular cylinder in a rectangular domain via SIMPLE.
 
-The O-grid has diameter D = 1 and an outer radius of 15 (blockage ratio
-1/30).  Drag is evaluated from the cylinder patch with the project's
-owner-relative boundary-face convention: the area vector points from the
-adjacent fluid cell into the cylinder.
+The O-4 multiblock grid (see mesh_su2.cylinder_rectangle_grid) covers the
+domain [-10, 25] x [-10, 10] (blockage 1/20) around a cylinder of
+diameter D = 1.  Drag is evaluated from the cylinder patch with the
+project's owner-relative boundary-face convention: the area vector points
+from the adjacent fluid cell into the cylinder.
 
 Run:  python python/examples/cylinder.py
-      [--re RE] [--ntheta N] [--nr N] [--test]
+      [--re RE] [--grid {coarse,medium,fine}] [--test]
 """
 
 import argparse
 import math
-import os
-import sys
-import tempfile
-from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import _path  # noqa: F401,E402
+from _common import (fvm, print_simple_status, read_su2_text, report_test,
+                     write_results)
 
-import pyfvm as fvm
+from mesh_su2 import cylinder_rectangle_grid
 
-from mesh_su2 import polar_ogrid
+# Calibration 2026-11-10 (Central, rectangular domain [-10,25]x[-10,10],
+# far-field Dirichlet; full study in docs/numerical.md):
+#   Re=40: Cd = 1.6007 (coarse) / 1.6064 (medium) / 1.6066 (fine, outer
+#          refinement); core-Richardson ~1.611 (a converged 128x56 core
+#          gives 1.6096).  L_w/D = 1.750 / 1.953 / 1.953, core trend ~2.2.
+#   Re=20: Cd = 2.1547 / 2.1638 / 2.1639.  L_w/D = 0.848 / 0.870 / 0.870.
+# Literature anchors: Fornberg 1980 Cd = 1.550 (Re=40), ~2.00 (Re=20);
+# Dennis & Chang 1970 Cd = 1.522, L_w/D ~ 2.28 (Re=40).  The measured Cd
+# sits ~4% above the anchors: the finite domain (blockage 1/20) with
+# far-field velocity Dirichlet sides; a symmetry-side variant lowers Cd
+# by only 0.25%, and the old r=15 O-grid's semicircular p=0 outflow
+# (which cut through the streamlines) reads ~1.562.
+# Band margins vs the CI medium values: Cd(40) 27x/20x and Cd(20)
+# 23x/15x the coarse->medium drift; L_w lower bound keeps 0.15 on the
+# medium value (the refinement direction lengthens the wake).
+CD_BANDS = {20: (1.95, 2.30), 40: (1.45, 1.72)}
+WAKE_LENGTH_BAND = (1.80, 2.65)
+WAKE_TOLERANCE = 0.25
 
-# Calibration 2026-10-31 (Central, O-grid 96x64 -> 128x80):
-#   Re=40: Cd 1.5592 -> 1.5618 (grid drift 0.17%), L_w/D 2.028 -> 2.069
-#   Re=20: Cd 2.0901 -> 2.0944 (grid drift 0.21%)
-# Literature anchors: Fornberg 1980 Cd = 1.550 (Re=40) and ~2.00 (Re=20);
-# Dennis & Chang 1.522 (Re=40).  The bands keep >50x the observed drift.
-CD_BANDS = {20: (1.80, 2.30), 40: (1.40, 1.72)}
-WAKE_LENGTH_BAND = (1.8, 2.8)
 CYLINDER_RADIUS = 0.5
-OUTER_RADIUS = 15.0
+SQUARE_HALF = 3.0
+DOMAIN = (-10.0, 25.0, -10.0, 10.0)
+
+# (n_theta, n_r, n_w, n_e, n_n, n_s); n_theta must be a multiple of 8.
+# The grid study refines the core (coarse -> medium) and then the outer
+# blocks (medium -> fine): refining the polar core beyond 96x40 at
+# relaxation 0.7/0.3 (and at any tested lower relaxation) destabilizes
+# the steady SIMPLE outer loop at Re=20 -- see docs/numerical.md for the
+# isolation evidence.
+GRIDS = {
+    "coarse": (64, 28, 16, 24, 16, 16),
+    "medium": (96, 40, 24, 36, 24, 24),
+    "fine": (96, 40, 32, 48, 32, 32),
+}
 
 
 def configure_boundary_conditions(mesh):
@@ -45,15 +65,21 @@ def configure_boundary_conditions(mesh):
     bc_v.set(0, fvm.BCType.Dirichlet, 0.0)
     bc_p.set(0, fvm.BCType.Neumann, 0.0)
 
-    # Patch 1: uniform inflow on the upstream semicircle.
+    # Patch 1: uniform far-field inflow on the west side.
     bc_u.set(1, fvm.BCType.Dirichlet, 1.0)
     bc_v.set(1, fvm.BCType.Dirichlet, 0.0)
     bc_p.set(1, fvm.BCType.Neumann, 0.0)
 
-    # Patch 2: pressure outflow on the downstream semicircle.
+    # Patch 2: pressure outflow on the east side.
     bc_u.set(2, fvm.BCType.Neumann, 0.0)
     bc_v.set(2, fvm.BCType.Neumann, 0.0)
     bc_p.set(2, fvm.BCType.Dirichlet, 0.0)
+
+    # Patches 3/4: far-field velocity on the top/bottom sides.
+    for patch in (3, 4):
+        bc_u.set(patch, fvm.BCType.Dirichlet, 1.0)
+        bc_v.set(patch, fvm.BCType.Dirichlet, 0.0)
+        bc_p.set(patch, fvm.BCType.Neumann, 0.0)
 
     return bc_u, bc_v, bc_p
 
@@ -80,13 +106,12 @@ def solve_case(mesh, re):
     cfg.relaxation_p = 0.3
     cfg.solver_config.tolerance = 1e-9
     cfg.solver_config.max_iterations = 20000
+    cfg.pressure_solver_config.tolerance = 1e-9
+    cfg.pressure_solver_config.max_iterations = 20000
 
     result = fvm.solve_simple(mesh, rho, mu, bc_u, bc_v, bc_p, cfg,
                               velocity, pressure, flux)
-    state = "converged" if result.converged else "NOT converged"
-    print(f"SIMPLE (Re = {re}, cells = {mesh.cell_count()}): {state} in "
-          f"{result.iterations} iterations, continuity residual "
-          f"{result.history[-1].continuity:.3e}")
+    print_simple_status(f"Re = {re}, cells = {mesh.cell_count()}", result)
     if not result.converged:
         raise RuntimeError(f"SIMPLE did not converge at Re = {re}")
     return velocity, pressure, result
@@ -127,68 +152,58 @@ def force_coefficients(mesh, velocity, pressure, rho, mu,
     return 2.0 * force_x / dynamic_scale, 2.0 * force_y / dynamic_scale
 
 
-def wake_length(mesh, velocity, n_theta, cylinder_radius=CYLINDER_RADIUS):
+def wake_length(mesh, velocity, tolerance=WAKE_TOLERANCE):
     """Find the furthest reversed-flow cell near the wake centreline.
 
-    The near-centreline tolerance is the local azimuthal cell spacing
-    (``r_c * 2*pi/n_theta``), scaled by 0.75; the O-grid geometry is known
-    here because this is post-processing only.
+    A cell counts when its centroid satisfies x > r (downstream of the
+    rear stagnation point), |y| <= tolerance (roughly two thirds of the
+    Re=40 recirculation-bubble half-width, one to two cell rows on the
+    default grids) and u < 0.  The length is measured from the cylinder
+    rear (x = r).
     """
     u = velocity.u.to_numpy()
     furthest_x = None
-    angular_spacing = 2.0 * math.pi / n_theta
     for cell in range(mesh.cell_count()):
         x, y = mesh.cell_centroid(cell)
-        radius = math.hypot(x, y)
-        if (x > cylinder_radius and abs(y) < 0.75 * radius * angular_spacing
-                and u[cell] < 0.0):
+        if x > CYLINDER_RADIUS and abs(y) <= tolerance and u[cell] < 0.0:
             furthest_x = x if furthest_x is None else max(furthest_x, x)
     if furthest_x is None:
         return None
-    return furthest_x - cylinder_radius
+    return furthest_x - CYLINDER_RADIUS
 
 
-def write_result(mesh, velocity, pressure, re):
-    output_dir = Path(__file__).resolve().parent / "output" / "cylinder"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"cylinder_re{re}.vtu"
-    fvm.write_vtu(str(output_path), mesh,
-                  {"pressure": pressure}, {"velocity": velocity})
-    print(f"Wrote {output_path}")
-
-
-def run_case(re, n_theta, n_r):
+def run_case(re, grid):
     """Generate, solve, post-process, and write one case."""
-    cylinder_radius, outer_radius = CYLINDER_RADIUS, OUTER_RADIUS
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "cylinder.su2")
-        with open(path, "w", encoding="ascii") as fh:
-            fh.write(polar_ogrid(n_theta, n_r, cylinder_radius, outer_radius))
-        mesh = fvm.read_su2(path)
+    n_theta, n_r, n_w, n_e, n_n, n_s = GRIDS[grid]
+    mesh = read_su2_text(cylinder_rectangle_grid(
+        n_theta=n_theta, n_r=n_r, radius=CYLINDER_RADIUS,
+        half=SQUARE_HALF, domain=DOMAIN,
+        n_w=n_w, n_e=n_e, n_n=n_n, n_s=n_s), name="cylinder.su2")
 
     velocity, pressure, result = solve_case(mesh, re)
     cd, cl = force_coefficients(mesh, velocity, pressure,
                                 rho=1.0, mu=1.0 / re)
-    wake = wake_length(mesh, velocity, n_theta)
+    wake = wake_length(mesh, velocity)
     wake_text = "nan" if wake is None else f"{wake:.6f}"
-    print(f"Re={re} ntheta={n_theta}xnr={n_r} cells={mesh.cell_count()} "
-          f"iterations={result.iterations} converged={result.converged} "
-          f"Cd={cd:.6f} Cl={cl:+.6f} L_w/D={wake_text}")
-    write_result(mesh, velocity, pressure, re)
+    print(f"Re={re} grid={grid} ntheta={n_theta}xnr={n_r} "
+          f"cells={mesh.cell_count()} iterations={result.iterations} "
+          f"converged={result.converged} Cd={cd:.6f} Cl={cl:+.6f} "
+          f"L_w/D={wake_text}")
+    write_results(mesh, velocity, pressure, "cylinder",
+                  f"cylinder_re{re}_{grid}.vtu")
     return cd, cl, wake
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--re", type=int, default=40)
-    parser.add_argument("--ntheta", type=int, default=96)
-    parser.add_argument("--nr", type=int, default=64)
+    parser.add_argument("--grid", choices=sorted(GRIDS), default="medium")
     parser.add_argument("--test", action="store_true",
                         help="assert the benchmark checks and exit non-zero "
                              "on failure")
     args = parser.parse_args()
 
-    cd, cl, wake = run_case(args.re, args.ntheta, args.nr)
+    cd, cl, wake = run_case(args.re, args.grid)
     if args.test:
         band = CD_BANDS.get(args.re)
         if args.re == 40:
@@ -203,9 +218,7 @@ def main():
         else:
             ok = False
             detail = "no thresholds for this Reynolds number"
-        print(f"application test: {'PASS' if ok else 'FAIL'} ({detail})")
-        if not ok:
-            sys.exit(1)
+        report_test(ok, f"({detail})")
 
 
 if __name__ == "__main__":

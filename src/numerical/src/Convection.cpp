@@ -104,9 +104,11 @@ void computeMassFlux(const Mesh& mesh,
             const auto [uOwner, vOwner] = velocity(owner);
 
             const BoundaryCondition& uCond = bcU.get(patch);
-            uf = (uCond.type == BCType::Dirichlet) ? uCond.value : uOwner;
+            uf = (uCond.type == BCType::Dirichlet) ? bcU.valueAt(face)
+                                                    : uOwner;
             const BoundaryCondition& vCond = bcV.get(patch);
-            vf = (vCond.type == BCType::Dirichlet) ? vCond.value : vOwner;
+            vf = (vCond.type == BCType::Dirichlet) ? bcV.valueAt(face)
+                                                    : vOwner;
         }
         else
         {
@@ -265,7 +267,7 @@ void assembleConvection(const Mesh& mesh,
             const BoundaryCondition& cond = bc.get(mesh.facePatch(face));
             if (cond.type == BCType::Dirichlet)
             {
-                b(owner) -= F * cond.value; // known incoming flux -> RHS
+                b(owner) -= F * bc.valueAt(face); // known incoming flux -> RHS
             }
             else
             {

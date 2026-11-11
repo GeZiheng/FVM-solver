@@ -8,7 +8,7 @@
 python/
   pyfvm.cpp              — 全部绑定（单文件；Python 侧命名 snake_case）
   _path.py               — sys.path 引导：按当前解释器标签扫描 build/*/python 定位 pyfvm 扩展
-  examples/              — 算例脚本（见下）
+  examples/              — 算例脚本 + 共享 helper _common.py（见下）
   tests/test_pyfvm.py    — 绑定契约测试（unittest；ctest 条目 pyfvm_tests）
   overlay-ports/python3/ — 空 vcpkg overlay 端口（机制见下）
 ```
@@ -24,7 +24,7 @@ python/
 - **vcpkg feature**：`pybind11` 声明在 `vcpkg.json` 的 `"python"` feature 里；`-DFVM_BUILD_PYTHON=ON` 会在 `project()` 之前自动设置 `VCPKG_MANIFEST_FEATURES=python`，默认构建不拉取 pybind11。
 - **空 overlay 端口**：pybind11 端口声明依赖 vcpkg 的 `python3` 端口（会源码构建 CPython 3.12，但我们用不上）。`python/overlay-ports/python3` 是一个空端口，满足依赖图但不装任何东西；扩展模块始终对着**系统 Python** 编译。
 - **解释器选择**：扩展模块与 Python 版本绑定（cp314 的 `.pyd` 不能在 3.12 上 import）。configure 优先用 `-DPython_EXECUTABLE=...`，否则取 PATH 上第一个 `python3.14`/`python3`/`python`。pybind11 ≥ 3.0 才支持 Python 3.14（当前 vcpkg 端口 3.0.1）。
-- **产物**：`build/<dir>/python/pyfvm*.pyd`（Linux 为 `.so`）；`_path.py` 优先采用环境变量 `FVM_PYFVM_DIR`，该目录必须已含当前解释器标签的扩展，否则抛 `RuntimeError`；未设置时扫描 `build/*/python`，只接受当前解释器标签（Windows `cp3XX`、Linux `cpython-3XX`）的扩展，并在多个匹配目录间取其中文件 mtime 最新者。自动定位失败时抛 `RuntimeError`，错误信息列出解释器版本、标签模式和已扫描目录。示例和测试直接 `import _path` 后即可 `import pyfvm`。
+- **产物**：`build/<dir>/python/pyfvm*.pyd`（Linux 为 `.so`）；`_path.py` 优先采用环境变量 `FVM_PYFVM_DIR`，该目录必须已含当前解释器标签的扩展，否则抛 `RuntimeError`；未设置时扫描 `build/*/python`，只接受当前平台的原生扩展后缀（Windows `.pyd`、Linux `.so`，另一平台产物永不参选——否则共享 build 树时 WSL 的 `.so` 会在 Windows 上遮蔽 `.pyd`）且匹配当前解释器标签（Windows `cp3XX`、Linux `cpython-3XX`）的扩展，并在多个匹配目录间取其中文件 mtime 最新者。自动定位失败时抛 `RuntimeError`，错误信息列出解释器版本、标签模式和已扫描目录。绑定测试直接 `import _path` 后即可 `import pyfvm`；算例脚本经 `examples/_common.py` 引导，由它内部完成 `import _path`。多构建树并存时手工复跑测试须钉定该环境变量，见 `docs/tests.md` 已知坑。
 
 ## API 一览
 
@@ -42,12 +42,12 @@ core：
 
 numerical：
 
-- 边界：`BoundaryField(mesh)` + `.set(patch, type, value)` / `.get(patch)` / `.patch_count()`；patch 常量 `BoundaryField.East/North/West/South` 只对应笛卡尔 patch 顺序，越界 patch 抛 `IndexError`；类型 `BCType.Dirichlet/Neumann`。默认全部 patch 零梯度 Neumann。
+- 边界：`BoundaryField(mesh)` + `.set(patch, type, value)` / `.get(patch)` / `.patch_count()`；patch 常量 `BoundaryField.East/North/West/South` 只对应笛卡尔 patch 顺序，越界 patch 抛 `IndexError`；类型 `BCType.Dirichlet/Neumann`。默认全部 patch 零梯度 Neumann。逐面值用 `.set_values(patch, type, values)` 设置：`values` 为 1-D numpy 数组，长度必须等于该 patch 面数，顺序遵循 `mesh.patch_faces(patch)` 遍历序；非 1-D 或长度不符抛 `ValueError`，patch 越界抛 `IndexError`。`.value_at(face)` 优先返回逐面值，否则回退 patch 常数。逐面值的含义与 C++ 侧一致：Dirichlet 为面值，Neumann 为法向导数。
 - 枚举：`ConvectionScheme.Upwind/Central`、`TimeScheme.Euler/CrankNicolson`、`NonOrthSplit.MinimumCorrection/OverRelaxed`。
-- `SolverConfig`：`tolerance`（相对残差）/ `max_iterations` / `verbose`。
+- `SolverConfig`：`tolerance`（相对残差）/ `max_iterations` / `verbose` / `backend`（`"eigen"` 默认 | `"amgcl"`，后者需 `FVM_BUILD_AMGCL=ON` 构建，用 `pyfvm.HAVE_AMGCL` 布尔探测）/ `method`（`"bicgstab"` 默认 | `"cg"` | `"bicgstab_ilut"`，最后一个仅 eigen 族支持）。未知组合抛 `ValueError`；OFF 构建选 amgcl 抛 `RuntimeError`（与方法无关）。
 - `CorrectionOptions`：`non_orthogonal_diffusion=True`、`skew_interpolation=True`、`n_non_orthogonal_correctors=0`、`non_orth_split=NonOrthSplit.MinimumCorrection`。笛卡尔网格上修正量恒为零，默认行为保持零数值变化（旋转正交网格上压力 `crossP` 仍含各向异性补全项，见 `docs/numerical.md` 压力方程一节）。`n_non_orthogonal_correctors` 是压力求解子循环附加数（0 表示一次压力求解），负值会被拒绝。`non_orth_split` 永远控制内部面 $(\alpha,k)$；`non_orthogonal_diffusion` 只门控显式交叉项，因此“关闭修正 + OverRelaxed”表示 over 隐式、无显式修正。示例：`corrections.non_orth_split = NonOrthSplit.OverRelaxed`。
-- `solve_simple(mesh, rho, mu, bc_u, bc_v, bc_p, config, velocity, pressure, flux)` → `SimpleResult`（`converged` / `iterations` / `history`）；`SimpleConfig`：`max_iterations` / `tolerance` / `relaxation_u` / `relaxation_p` / `scheme` / `solver_config` / `corrections` / `verbose`。
-- `solve_piso(...)`（签名同上）→ `PisoResult`（`steps` / `history`）；`PisoConfig`：`dt` / `n_steps` / `n_correctors`（≥2）/ `time_scheme` / `scheme` / `solver_config` / `corrections` / `verbose`。
+- `solve_simple(mesh, rho, mu, bc_u, bc_v, bc_p, config, velocity, pressure, flux)` → `SimpleResult`（`converged` / `iterations` / `history`）；`SimpleConfig`：`max_iterations` / `tolerance` / `relaxation_u` / `relaxation_p` / `scheme` / `solver_config`（动量方程线性求解器）/ `pressure_solver_config`（压力方程线性求解器，默认 eigen×cg）/ `corrections` / `verbose`。**行为变化（5.3-1）**：两个 solver config 完全独立，压力**不再继承** `solver_config` 的容差/迭代数——依赖旧行为的脚本必须显式设置 `pressure_solver_config`（仓库 `python/examples/` 全部脚本已同步）。
+- `solve_piso(...)`（签名同上）→ `PisoResult`（`steps` / `history`）；`PisoConfig`：`dt` / `n_steps` / `n_correctors`（≥2）/ `time_scheme` / `scheme` / `solver_config`（动量）/ `pressure_solver_config`（压力，独立分派同上）/ `corrections` / `verbose`。
 - `solve_transport(mesh, flux, gamma, scheme, bc, solver_config=..., Sc=None, Sp=None, phi_explicit=None, corrections=...)`：高层稳态输运（装配 + BiCGSTAB），返回 numpy 解向量。稳态交叉扩散需要 `phi_explicit` 提供冻结的显式场；未提供时该修正保持惰性。`solve_transient_transport(..., phi_old, dt, time_scheme, ..., corrections=...)` 为单个隐式 theta 时间步，`corrections` 沿用同一选项。
 - 通量工具：`interpolate_cell_velocity_flux(mesh, velocity, rho, corrections=...)`、`compute_mass_flux(..., corrections=...)`、`initialize_mass_flux(..., corrections=...)`、`check_flux_compatibility(flux, rel_tol=1e-10)`、`has_dirichlet_pressure(bc_p)`。
 
@@ -71,19 +71,35 @@ io：
 
 基础与解析基准 Python 算例的用途、参数与运行方式见 README.md 的“示例”。
 
-- `cavity.py` 支持 `--re {100,400,1000}`，用 Ghia et al. (1982) 中心线数据做 L∞/L2 对照，`--test` 启用精度断言。
+- `cavity.py` 支持 `--re {100,400,1000,3200}`，用 Ghia et al. (1982) 中心线数据做 L∞/L2 对照，`--test` 启用精度断言。`--re 3200`（Phase 5.3-1）为 256×256 大算例：外容差放宽至 2e-5、迭代上限 3000、本机冷态约 80 min，Ghia 3200 u 表的 y=0.4531 文献伪值按勘误先例修正并从度量剔除（见 `docs/numerical.md`）。`--backend/--method` 与 `--p-backend/--p-method` 分别指定动量/压力线性求解器（AMGCL 性能 showcase 用，对照数据记录在 `docs/numerical.md`）。
 - `poiseuille.py` 检验平面 Poiseuille 的充分发展抛物线剖面与压降斜率。
-- `stokes_oscillating.py` 检验 Stokes 第二问题的周期稳态解。
-- `mesh_su2.py` 是 Phase B 算例共享的纯 Python SU2 文本生成 helper，提供 `l_shaped_bfs_grid(n)` 与 `polar_ogrid(...)`；生成文本由算例临时落盘后交给 `read_su2`。
-- `backward_facing_step.py` 求解扩张比 2、入口段 10h 的后向台阶（Re=50/100，Upwind），断言再附长度的文献量级带与 Re 趋势，网格研究数据记录在脚本注释中。
-- `cylinder.py` 求解 96×64 极坐标 O-grid 圆柱绕流（Re=20/40，稳态 SIMPLE + Central），逐面积分 Cd、测量尾迹长度并断言文献阈值带；`Cl` 仅作对称性诊断打印（校准值约 `-5e-5`），不断言。
+- `stokes_oscillating.py` 检验 Stokes 第二问题的周期稳态解；非测试模式全程每 50 步写一帧（`--frames-every K`，0 关闭），序列覆盖起振到周期稳态。
+- `mesh_su2.py` 是 Phase B 算例共享的纯 Python SU2 文本生成 helper，提供 `l_shaped_bfs_grid(n)`、`cylinder_rectangle_grid(...)`（O-4 多块：极坐标核心 + 8 个张量块，块间共享坐标池逐点共形）与 `sheared_channel(n, shear)`；生成文本经 `examples/_common.py` 的 `read_su2_text` 临时落盘后交给 `read_su2`。
+- `backward_facing_step.py` 求解扩张比 2、入口段 10h 的后向台阶：Re=50/100（均匀入口，Upwind，历史校准）与 5.3-3 的 Re=389（逐面抛物线入口 `u=6s(1−s)`、Central；**Armaly 1983 约定** `Re=U_bulk·2h/ν` 即 `μ=2/389`，实测 x_r/h=8.10 与 2D 文献簇 8.2–8.6 / 实验 7.9 对齐），断言再附长度的文献量级带与 Re 趋势，网格研究数据记录在脚本注释中。
+- `cylinder.py`（5.3-2 矩形域版）求解 `[-10,25]×[-10,10]` 圆柱绕流（Re=20/40，稳态 SIMPLE + Central，O-4 多块网格，`--grid {coarse,medium,fine}` 三档；fine 只加密外围——Re=20 下核心加密有稳定性边界，见 `docs/numerical.md` 圆柱节），逐面积分 Cd、测量尾迹长度并断言文献阈值带；`Cl` 仅作对称性诊断打印（校准值 ~±2e-4），不断言。
+- `skewed_poiseuille.py` 是 5.1 逐面 Dirichlet 的定量示例（Phase 5.3 #4 提前完成）：等截面斜切平行四边形通道（端面倾角 atan(0.3)），两端逐面抛物线速度 `u=4y(1-y)`，压力全 Neumann 解析值 + 参考单元定规（刻意避开斜面 Dirichlet-p 的 `Cb` 无补全偏移，见 `docs/numerical.md`），`nNonOrthogonalCorrectors=1`。断言：入口通量与离散解析和精确相等、下游剖面 vs 抛物线 O(h) 带（n=16 校准 1.412e-2，带 3e-2；n=32 实测 6.784e-3，比值 2.1）。
+- `taylor_green.py`（5.3-5）是精确边界瞬态算例：`[0,π]²` 衰减单模 TG，四边逐面 Dirichlet 精确 u/v/p（t^{n+1} 时刻），逐步 PISO + CN；固定小 dt（0.00125）的 64²→128² 空间收敛研究断言二阶（实测比值 4.96），`--full` 附加 256² 点（128→256 停滞、只报告不断言）；时间方向非单调（dt²/h 类混合项），证据矩阵见 `docs/numerical.md` Taylor–Green 节。非测试模式仅在 64² 档输出帧序列（`--frames-every`，默认 50）。
+- `vortex_shedding.py`（5.3-6）是 Re=100 卡门涡街：复用 cylinder.py 网格/BC/力系数，确定性反对称种子，后 60% 时段窗口测 St/Cd_mean/Cl 振幅；CI 缩短版（coarse、dt=0.01、T=250，约 11 min）断言三带，medium 完整研究由脚本参数承担；非测试模式输出帧序列（`--frames-every`，默认 50，长算例间隔自动拉伸、总量 ≤~50 帧）。
 
 `python/examples/piso_nonortho_channel.py` 是 4.3c 斜交算例：由 bilinear 映射生成 $16\times16$ 梯形收缩通道 SU2 网格（顶边收窄到 $[0.3,0.7]$），运行单步压力驱动 PISO，打印 $p(0,0)$、入口单位长度通量与连续性误差。默认开启修正并使用两个 PISO corrector；`--no-corrections` 关闭三项修正，`--correctors N` 覆盖 corrector 数。该脚本用于复现 `docs/numerical.md` “斜交网格对照（未决）”中的算例设置。
 
-时间相关但空间均匀的壁面值，标准用法是在每个时间步先更新 `BoundaryField.set(...)`，再把 `PisoConfig.n_steps` 置为 1 并调用 `solve_piso`（Stokes 振荡平板示例）。逐步调用与一次长调用语义等价：Couette 100 步两种调用方式的终态最大差为 `7.7e-12`（判据 `1e-9`）。
+时间相关但空间均匀的壁面值，标准用法是在每个时间步先更新 `BoundaryField.set(...)`，再把 `PisoConfig.n_steps` 置为 1 并调用 `solve_piso`（Stokes 振荡平板示例）。逐步调用与一次长调用语义等价：Couette 100 步两种调用方式的终态最大差为 `7.7e-12`（判据 `1e-9`）。`impulsive_couette.py` 即采用逐步调用模式，并按 `frame_interval(100)`=50 输出 3 帧序列（t=0/0.25/0.5）。
 
 ## 测试分工
 
+### 新增算例脚本
+
+新算例按以下约定加入：
+
+- **脚本模式**：`argparse` 参数化（如 `--re`、`--backend`），`--test` 开关启用精度断言；不带 `--test` 时只打印结果供人工检查。精度阈值锁定在脚本内。
+- **共享胶水**：sys.path/`_path` 引导、VTK 输出（`write_results`）、SU2 临时落盘（`read_su2_text`）、SIMPLE 收敛状态行（`print_simple_status`）与 `--test` PASS/FAIL 尾部（`report_test`）一律用 `examples/_common.py`，不在脚本内重写。瞬态多帧输出用 `write_frame`（写 `stem_{index:04d}.<ext>`，ParaView 按文件序列识别）+ `frame_interval`（默认每 50 步一帧；步数已知的算例间隔自动拉伸、序列总量 ≤~50 帧），序列含 t=0 初值帧与终态帧（末步去重），`--frames-every K` 控制（0 关闭），`--test` 模式不写帧。
+- **阈值校准**：余量一般不小于 2×（现有例外与各条目的校准值见下文）；网格研究数据记录在脚本注释或 `docs/numerical.md`。
+- **注册**：在根 `CMakeLists.txt` 用 `fvm_add_application_test(name script --test)` 添加，label/TIMEOUT 机制见 `docs/tests.md`；是否进 `application_default` 按"每物理家族/代码路径一条"取舍。
+- **网格**：非结构算例复用 `examples/mesh_su2.py` 的 SU2 文本生成 helper，不自建重复生成逻辑。
+- **证据**：算例设置、阈值校准与文献对照记录进 `docs/numerical.md`（或脚本注释）；手工复跑测试的坑见 `docs/tests.md`。
+
+### 现有条目
+
 `python/tests/test_pyfvm.py` 是**绑定契约测试**：numpy 零拷贝与索引顺序、网格几何、BC 默认值与非法参数、纯扩散线性精确解（`solve_transport` 全通路）、SIMPLE/PISO 粗网格冒烟、`write_vti` 冒烟。
 
-application 层由 8 个带 `application` 标签的 ctest 条目组成：阶段 A 的 `pyfvm_app_cavity_re100` / `_re400` / `_re1000` / `pyfvm_app_poiseuille` / `pyfvm_app_stokes_oscillating`，以及阶段 B 的 `pyfvm_app_backward_step` / `pyfvm_app_cylinder_re40` / `pyfvm_app_cylinder_re20`（用 `ctest -L application` 运行），负责整算例精度回归；精度阈值锁定在示例脚本中。阈值校准余量一般不小于 2×，Stokes 为 1.4×。阶段 B 中，BFS 的 Re=50/100 再附长度带分别为 `[2,4]` / `[3,7]`，另要求 `x_r(100) >= 1.5*x_r(50)`；n=8/16/24 校准值为 3.841/4.374/4.569（Re=100，表观阶约 2.5、外推约 4.7），对应 20% 自洽护栏的实测余量约 4.5×。圆柱 Re=40 断言 `Cd∈[1.40,1.72]`、`L_w/D∈[1.8,2.8]`，Re=20 断言 `Cd∈[1.80,2.30]`；96×64→128×80 的 Cd 漂移实测 0.17–0.21%（Cd(40)=1.559、Cd(20)=2.090）。application 层串行全跑约 1 小时；本机冷态实测 backward_step 229s、cavity_re1000 368s、stokes 38s，持续满载后各条目可能变慢 2–15×，个别 TIMEOUT 余量薄。默认子集为 `application_default` 标签的 5 条（`cavity_re100`、`stokes_oscillating`、`backward_step`、`cylinder_re40`、`cylinder_re20`，成员在 `CMakeLists.txt` 注册处维护）：CI（GitHub Actions `CMake Build and Test` 的 linux 腿，带 `FVM_BUILD_PYTHON` 构建）每个 PR 跑单元 + 绑定 + 该子集，`workflow_dispatch` 的 `run_full` 输入改为全部 8 条；本地 MCP `build_and_test(run=application)` 同样默认该子集，`full=true` 跑整层。该层不改变 `fvm_unit_tests` 与 `pyfvm_tests` 的语义。
+application 层由 13 个带 `application` 标签的 ctest 条目组成：阶段 A 的 `pyfvm_app_cavity_re100` / `_re400` / `_re1000` / `pyfvm_app_poiseuille` / `pyfvm_app_stokes_oscillating`，阶段 B 的 `pyfvm_app_backward_step` / `pyfvm_app_cylinder_re40` / `pyfvm_app_cylinder_re20`，Phase 5.3 的 `pyfvm_app_skewed_poiseuille`、`pyfvm_app_backward_step_re389`、`pyfvm_app_taylor_green`、`pyfvm_app_vortex_shedding`，以及 5.3-1 的 `pyfvm_app_cavity_re3200`（256×256，约 80 min，`TIMEOUT 10800`，**不在默认子集**；用 `ctest -L application` 运行），负责整算例精度回归；精度阈值锁定在示例脚本中。阈值校准余量一般不小于 2×，Stokes 为 1.4×。阶段 B 中，BFS 的 Re=50/100 再附长度带分别为 `[2,4]` / `[3,7]`，另要求 `x_r(100) >= 1.5*x_r(50)`；n=8/16/24 校准值为 3.841/4.374/4.569（Re=100，表观阶约 2.5、外推约 4.7），对应 20% 自洽护栏的实测余量约 4.5×；5.3-3 的 Re=389（抛物线入口，Armaly 约定 `μ=2/389`）断言 `x_r/h∈[7.2,9.0]`（n=16/24 实测 8.103/8.095，漂移 0.09%）。Taylor–Green（5.3-5）断言 64²→128² 空间阶 ∈[1.7,2.5] 与 64² 绝对 L2(u) ≤4e-4（实测阶 2.31）。涡街（5.3-6）断言 `St∈[0.145,0.185]`、`Cd_mean∈[1.20,1.55]`、`Cl_amp∈[0.25,0.45]`（coarse 实测 0.159/1.369/0.351）。圆柱（5.3-2 矩形域重校准）Re=40 断言 `Cd∈[1.45,1.72]`、`L_w/D∈[1.80,2.65]`，Re=20 断言 `Cd∈[1.95,2.30]`；medium 档实测 Cd(40)=1.606、Cd(20)=2.164（coarse→medium 漂移 0.6%/0.4%，fine 外围加密对 Cd 影响 <2e-4），完整网格研究与文献锚偏移讨论见 `docs/numerical.md` 圆柱节；单条约 65 s（TIMEOUT 600）。application 层串行全跑约 3.5–4 小时（`cavity_re3200` 约 80 min、`vortex_shedding` 约 11 min、`backward_step_re389` 约 19 min、`taylor_green` 约 2.5 min，其余更快）；持续满载后各条目可能变慢 2–15×，个别 TIMEOUT 余量薄。默认子集为 `application_default` 标签的 5 条（`cavity_re100`、`stokes_oscillating`、`backward_step`、`cylinder_re40`、`cylinder_re20`，成员在 `CMakeLists.txt` 注册处维护）：CI（GitHub Actions `CMake Build and Test` 的 linux 腿，带 `FVM_BUILD_PYTHON` 构建）每个 PR 跑单元 + 绑定 + 该子集，`workflow_dispatch` 的 `run_full` 输入改为全部 13 条；本地 MCP `build_and_test(run=application)` 同样默认该子集，`full=true` 跑整层。该层不改变 `fvm_unit_tests` 与 `pyfvm_tests` 的语义。

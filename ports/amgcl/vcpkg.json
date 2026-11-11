@@ -1,0 +1,9 @@
+{
+  "name": "amgcl",
+  "version": "1.5.0",
+  "port-version": 0,
+  "description": "Header-only C++ algebraic multigrid (AMG) linear solver library",
+  "homepage": "https://github.com/ddemidov/amgcl",
+  "license": "MIT",
+  "dependencies": [ "eigen3" ]
+}

@@ -334,3 +334,83 @@ TEST_CASE("PISO: transient pressure-driven channel reaches Poiseuille flow")
     CHECK(maxAbsV < 0.01);
     CHECK(maxFluxImbalance < 1e-7);
 }
+
+TEST_CASE("PISO: independent pressure solver config")
+{
+    // Defaults: eigen x cg (the historical hardcoded pressure factory),
+    // independent of the momentum solverConfig.
+    const PisoConfig defaults;
+    CHECK(defaults.pressureSolverConfig.backend == "eigen");
+    CHECK(defaults.pressureSolverConfig.method == "cg");
+
+    // Override the pressure config and run a few steps through the
+    // dispatched momentum/pressure solvers.
+    const UnstructuredMesh mesh(makeShearedTriMesh(4));
+    const Mesh& base = mesh;
+
+    BoundaryField bcU(base);
+    BoundaryField bcV(base);
+    BoundaryField bcP(base);
+    setShearedChannelBCs(base, bcU, bcV, bcP);
+
+    VectorField velocity(base, "velocity");
+    ScalarField pressure(base, "pressure");
+    FaceFluxField flux(base, "flux");
+
+    PisoConfig config;
+    config.dt = 0.01;
+    config.nSteps = 3;
+    config.nCorrectors = 2;
+    config.scheme = ConvectionScheme::Upwind;
+    config.solverConfig.tolerance = 1.0e-10;
+    config.solverConfig.maxIterations = 10000;
+    config.pressureSolverConfig.method = "bicgstab";
+    config.pressureSolverConfig.tolerance = 1.0e-11;
+    config.pressureSolverConfig.maxIterations = 10000;
+
+    const PisoResult result = solvePiso(base,
+        1.0,
+        0.01,
+        bcU,
+        bcV,
+        bcP,
+        config,
+        velocity,
+        pressure,
+        flux);
+
+    REQUIRE(result.history.size() == 3);
+    CHECK(result.history.back().continuity <= 1.0e-6);
+    CHECK(std::abs(netBoundaryFlux(base, flux)) <= 1.0e-6);
+
+    // Unknown methods are dispatched on entry and throw before any step.
+    PisoConfig badMomentum;
+    badMomentum.nSteps = 1;
+    badMomentum.solverConfig.method = "bogus";
+    CHECK_THROWS_AS(solvePiso(base,
+                        1.0,
+                        0.01,
+                        bcU,
+                        bcV,
+                        bcP,
+                        badMomentum,
+                        velocity,
+                        pressure,
+                        flux),
+        std::invalid_argument);
+
+    PisoConfig badPressure;
+    badPressure.nSteps = 1;
+    badPressure.pressureSolverConfig.method = "bogus";
+    CHECK_THROWS_AS(solvePiso(base,
+                        1.0,
+                        0.01,
+                        bcU,
+                        bcV,
+                        bcP,
+                        badPressure,
+                        velocity,
+                        pressure,
+                        flux),
+        std::invalid_argument);
+}

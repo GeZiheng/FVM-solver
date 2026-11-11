@@ -26,7 +26,8 @@ Scalar cellGradient(const Mesh& mesh,
         if (mesh.isBoundaryFace(face))
         {
             const BoundaryCondition& cond = bc.get(mesh.facePatch(face));
-            phiF = (cond.type == BCType::Dirichlet) ? cond.value : phi(P);
+            phiF = (cond.type == BCType::Dirichlet) ? bc.valueAt(face)
+                                                     : phi(P);
         }
         else
         {
@@ -94,7 +95,7 @@ std::vector<Point2> leastSquaresGradients(const Mesh& mesh,
                     faceCentroid.y - cellCentroid.y };
                 if (condition.type == BCType::Dirichlet)
                 {
-                    residual = condition.value - phi(P);
+                    residual = bc.valueAt(face) - phi(P);
                     weight = 1.0
                         / std::hypot(direction.x, direction.y);
                 }
@@ -103,7 +104,7 @@ std::vector<Point2> leastSquaresGradients(const Mesh& mesh,
                     const Point2 area = mesh.faceAreaVector(face);
                     const Scalar areaNorm = std::hypot(area.x, area.y);
                     direction = { area.x / areaNorm, area.y / areaNorm };
-                    residual = condition.value;
+                    residual = bc.valueAt(face);
                     weight = 1.0;
                 }
             }

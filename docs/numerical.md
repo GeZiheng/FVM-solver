@@ -23,7 +23,7 @@ $$\underbrace{\sum_f F_f \phi_f}_{\text{convection}} = \underbrace{\sum_f D_f (\
 | 插值权重 $g_f$ | $\lVert x_f-x_N\rVert/\lVert x_P-x_N\rVert$ | $1/2$ |
 | 边界质量通量 | $F_b=\rho (u_b\mathbf S_x+v_b\mathbf S_y)$ | 与旧的分量/面规则一致 |
 
-边界速度 $u_b/v_b$ 取该 patch 的 Dirichlet 值；未给定时取 owner 值（零梯度）。非正交分解中的 $\mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f$ 已由扩散矩阵的隐式正交部分和显式交叉项共同使用：矩阵保持正交扩散形式，$\mathbf k_f$ 只产生进入右端的 deferred-correction 项。
+边界速度 $u_b/v_b$ 取该 patch 的 Dirichlet 条件经 `valueAt(face)` 解析的面值；未给定时取 owner 值（零梯度）。非正交分解中的 $\mathbf k_f=\mathbf S_f-\alpha_f\mathbf d_f$ 已由扩散矩阵的隐式正交部分和显式交叉项共同使用：矩阵保持正交扩散形式，$\mathbf k_f$ 只产生进入右端的 deferred-correction 项。
 
 ## BoundaryCondition：边界条件
 
@@ -31,6 +31,10 @@ $$\underbrace{\sum_f F_f \phi_f}_{\text{convection}} = \underbrace{\sum_f D_f (\
 - `BoundaryField(mesh)` 按 mesh 的 patch 存储边界条件，默认全部为零通量 Neumann（$g=0$）。
 - `BoundaryField::East/North/West/South` 常量仅对 `CartesianMesh` 的 patch 顺序有效（$0/1/2/3$）；非结构网格以 `patchName/patchFaces` 为准。
 - `set/get` 对越界 patch 抛异常；同一 patch 上所有边界面共享一个条件。
+- 逐面值 API：`setValues(patch, type, values)` 按 `mesh.patchFaces(patch)` 遍历序把 `values` 散射进全局面下标存储（`valueAt(face)` 为 O(1)）；长度不符抛 `std::invalid_argument`。
+- `valueAt(face)` 先取该面的逐面值；未设置时回退 patch 常数。内部面抛 `std::invalid_argument`。未调用 `setValues` 时，`valueAt(face)` 与 patch 常数处处相等，默认装配路径零变化。
+- 逐面值语义与 BC 语义一致：Dirichlet 值为该面 $\phi_b$，Neumann 值为该面外法向导数 $\mathrm{d}\phi/\mathrm{d}n$；BC type 仍是 patch 级。
+- divergence、LSQ 梯度、对流边界速度与入流 RHS、扩散边界 RHS、压力 `phiHbyA` 与 Dirichlet-p 的 `C_b·p_b` 等全部边界消费点统一经 `valueAt(face)` 取值。
 
 ## GridOperators：公共离散算子
 
@@ -91,7 +95,7 @@ $$\alpha_{\min}=\frac{\mathbf S_f\cdot\mathbf d_f}{\mathbf d_f\cdot\mathbf d_f},
 
   $$D_b = \gamma_P \beta_f,\qquad \beta_f=\frac{\mathbf S_f\cdot\mathbf S_f}{\mathbf S_f\cdot\boldsymbol\delta},\quad \boldsymbol\delta=x_f-x_P$$
 
-  均匀笛卡尔网格上 $\beta_f=S_f/d_{Pb}$。
+  均匀笛卡尔网格上 $\beta_f=S_f/d_{Pb}$。$\phi_b$ 与 $g$ 均按 `valueAt(face)` 逐面解析。
 
   ```
   A(P,P) += D_b,   b(P) += D_b·φ_b
@@ -162,7 +166,7 @@ $$\phi_f=g_f\phi_O+(1-g_f)\phi_N+\mathbf G_f\cdot\mathbf s_f .$$
 | 情况 | 处理 | 含义 |
 |------|------|------|
 | $F_b > 0$（出流） | `A(P,P) += F_b` | 面值由单元值外插（迎风），通量未知留在矩阵 |
-| $F_b < 0$（入流）+ Dirichlet | `b(P) −= F_b·φ_b` | 入流携带已知值，通量完全已知移入右端项（注意 $F_b < 0$，故为减量） |
+| $F_b < 0$（入流）+ Dirichlet | `b(P) −= F_b·φ_b` | 入流携带 `valueAt(face)` 解析的已知值，通量完全已知移入右端项（注意 $F_b < 0$，故为减量） |
 | $F_b < 0$（入流）+ Neumann | `A(P,P) += F_b` | 假设法向零梯度，面值取 $\phi_P$ |
 
 ## TransportEquation：标量输运装配
@@ -397,9 +401,11 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P (\nabla p_{\text{sol}})_P$$
 
 | 类型 | 说明 |
 |------|------|
-| `SimpleConfig` | `maxIterations`、`tolerance`、`relaxationU`/`relaxationP`、`scheme`、`solverConfig`、`corrections`（`CorrectionOptions`）、`verbose` |
+| `SimpleConfig` | `maxIterations`、`tolerance`、`relaxationU`/`relaxationP`、`scheme`、`solverConfig`（动量方程线性求解器）、`pressureSolverConfig`（压力方程线性求解器，默认 eigen CG）、`corrections`（`CorrectionOptions`）、`verbose` |
 | `SimpleResiduals` | 每次迭代的残差快照：`continuity`、`u`/`v`、`pressure` |
 | `SimpleResult` | `converged`、`iterations`、`history` |
+
+动量与压力线性求解器经 `fvm::math::makeLinearSolver` 按 `solverConfig` / `pressureSolverConfig` **独立**分派（backend × method，见 `docs/math.md`）。两字段不设置时与历史硬编码（eigen BiCGSTAB + eigen CG）逐位一致；注意压力**不再继承** `solverConfig` 的容差/迭代数——需要紧压力内解的用例必须显式设置 `pressureSolverConfig`。
 
 ## Piso：瞬态驱动
 
@@ -414,7 +420,7 @@ $$\mathbf{u}_P \leftarrow \hat{\mathbf{u}}_P - d_P (\nabla p_{\text{sol}})_P$$
 
 | 类型 | 说明 |
 |------|------|
-| `PisoConfig` | `dt`、`nSteps`、`nCorrectors`（**必须 ≥ 2**，`solvePiso` 会拒绝更小的值——单修正子在一次扫掠后就到达不动点并发散）、`timeScheme`、`scheme`、`solverConfig`、`corrections`（`CorrectionOptions`）、`verbose` |
+| `PisoConfig` | `dt`、`nSteps`、`nCorrectors`（**必须 ≥ 2**，`solvePiso` 会拒绝更小的值——单修正子在一次扫掠后就到达不动点并发散）、`timeScheme`、`scheme`、`solverConfig`（动量）、`pressureSolverConfig`（压力，默认 eigen CG，独立分派，同 `SimpleConfig`）、`corrections`（`CorrectionOptions`）、`verbose` |
 | `PisoStepInfo` | 每步诊断：`time`、`continuity`（修正后真实连续性误差）、`maxSpeed` |
 | `PisoResult` | `steps`、`history` |
 
@@ -453,7 +459,118 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 >
 > **2026-10-07 重构**：压力方程由 $p'$ 增量形式改为 OpenFOAM 式的**绝对压力形式**（右端 `div(phiHbyA)`、Dirichlet 压力值直接进右端；`bcPrime` 与 `cumulativeVelocityCorrection` 已删除）；两者代数等价，推导见上文"压力方程（绝对压力形式）"。重构后全量测试仍为 50 用例 / 3271 断言全绿，单步指纹与 OpenFOAM 一致（数值见下文"与 OpenFOAM-14 的定量一致性"）。
 
+## 方腔 Re=3200 与线性求解器性能对照（5.3-1）
+
+### 算例设置与外容差放宽
+
+`python/examples/cavity.py --re 3200`：256×256 笛卡尔网格，`relax_u = 0.7` / `relax_p = 0.3`，Central 对流，内解 1e-9 / 2000 次。**外层收敛判据放宽到 2e-5**（其余 Re 保持 1e-6）：3000 迭代实测（5595 s）u/v 缩放残差停在 1.25e-5 / 1.14e-5——残差由**角区慢模**主导（底角/顶角次生涡的缓慢发展），而体区中心线剖面已 Ghia 收敛（盖面区误差从 128² 的 2.0e-2 降到 256² 的 1.2e-2，O(h)）；残差轨迹外推 2e-5 于约 2560 迭代穿过，迭代上限 3000。阈值 (L-inf 9e-2, L2 3.7e-2) = 3000 迭代观测 (3.7e-2 / 1.55e-2) × 1.2 停点滞后 × 2。128² 松弛探针：relax_u 0.7 优于 0.5（同预算剖面误差 2.1e-2 vs 2.6e-2），且 0.7 下残差单调无振荡。
+
+### Ghia (1982) Re=3200 表的 y=0.4531 伪值
+
+u 表 (y=0.4531) 原印刷值 −0.86636 是**文献级伪值**（Tomczak 2021, arXiv:2108.13241 明确标注异常；物理上夹在邻居 −0.04272 / −0.24427 之间不可能，且破坏跨 Re 单调趋势 −0.10648(1000) → −0.07404(5000)），在两份独立复现中同错，属原始论文级广泛转录错误。处置沿用 Re=400 v 表勘误先例（`cavity.py` 内注释）：以本求解 256² 收敛值 **−0.07585** 修正入表（128² 交叉验证：relax 0.7/0.5 下 −0.07802 / −0.07316），并把该站点从 u 误差度量中剔除（`ANOMALOUS_STATIONS_U`）——修正值来自本求解，保留在度量内会自指。v 表 (x=0.2344) 同位序号是合法参考值，不剔除。
+
+### 固定外迭代的线性求解器性能对照
+
+协议：256² Re=3200，固定 300 个 SIMPLE 外迭代（`tolerance = 0` 关闭提前停机）、内解 1e-9、同一初值——五配置外轨迹完全一致（终态 u 残差同为 5.07e-3），墙钟差即线性求解器成本差。i7 桌面单线程实测：
+
+| 配置（动量 / 压力） | wall (s) | 相对基线 |
+| --- | --- | --- |
+| eigen BiCGSTAB / eigen CG（基线） | 557.4 | 1.00× |
+| eigen BiCGSTAB / eigen BiCGSTAB-ILUT | 400.6 | 0.72× |
+| eigen BiCGSTAB-ILUT / eigen CG | 665.3 | 1.19× |
+| eigen BiCGSTAB / amgcl CG | 180.9 | 0.32× |
+| amgcl BiCGSTAB / amgcl CG | 172.1 | 0.31× |
+
+结论：此规模成本由**压力方程主导**（压力换单项即 0.32×，动量全换 AMGCL 仅再省 0.01×）；ILUT 对压力有效（0.72×）、对动量反效果（1.19×，逐外迭代重分解的 setup 成本超过迭代节省）；AMGCL 工厂无状态、每次 solve 重建层级（`docs/math.md`），在此规模仍全场最优。**CI 不含任何计时断言**——上表是单机记录，性能 showcase 由脚本参数承担（`cavity.py --backend/--method/--p-backend/--p-method`）。
+
+### SIMPLE 收敛判据下的轨迹依赖（实测发现）
+
+`tests/test_simple.cpp` 的独立求解器配置用例：(a) 默认方法对与 (b) 方法互换两路径均收敛到精确 Poiseuille 剖面（同一物理容差），但两收敛场交叉差（du 3.3e-4 / dp 9.3e-3）与**内解精度无关**（内解 1e-6 与 1e-9 下完全相同）——这不是线性求解器噪声，而是 SIMPLE 收敛判据（残差 < tol 即停）下不同 Krylov 路径停在各自慢模轨迹上的残余差异。交叉一致性界因此取 2e-3 / 5e-2 并在用例内注释；对精度敏感的对照应以物理误差（vs 精确解）而非路径间差值为准。
+
+## 圆柱矩形域稳态算例与 Re=20 核心加密稳定性边界（5.3-2，2026-11-10）
+
+### 算例设置
+
+`python/examples/cylinder.py`：矩形域 `[-10,25]×[-10,10]`（blockage 1/20），D=1 圆柱。网格为 `mesh_su2.cylinder_rectangle_grid` 的 O-4 多块拓扑：极坐标核心（圆 r0=0.5 → 方形 `[-3,3]²`，均匀方位角 + 逐射线等比径向，45° 射线精确落角点，最外圈解析贴合方形）+ 8 个轴对齐张量块（4 条带 + 4 角块，1-D 等比拉伸、方形侧细）。全部块间界面经共享坐标池逐点共形。BC：入流 Dirichlet u=1、出流 p=0、上下远场 Dirichlet u=1（对称 BC 对照仅降 Cd 0.25%，见下）、圆柱无滑移。Central + SIMPLE（0.7/0.3，内解 1e-9，外容差 1e-6）。网格档位（n_theta×n_r + 外围 W/E/N/S）：coarse 64×28+16/24/16/16、medium 96×40+24/36/24/24、fine 96×40+32/48/32/32（**fine 只加密外围**，原因见稳定性边界）。
+
+### 网格研究与阈值带
+
+| 量 | coarse | medium | fine(外围) | 核心方向 Richardson | 文献锚 |
+|---|---|---|---|---|---|
+| Cd (Re=40) | 1.6007 | 1.6064 | 1.6066 | ≈1.611（128×56 核心收敛点 1.6096） | Fornberg 1980: 1.550；Dennis & Chang 1970: 1.522 |
+| L_w/D (Re=40) | 1.750 | 1.953 | 1.953 | ≈2.2（128×56 收敛点 2.098） | D&C 2.28；C&B 1977 实验 2.13 |
+| Cd (Re=20) | 2.1547 | 2.1638 | 2.1639 | （核心 fine 不可用，见下） | Fornberg ~2.00；D&C ~2.05 |
+| L_w/D (Re=20) | 0.848 | 0.870 | 0.870 | 同上 | ~0.9 |
+
+CI（medium）断言带：Cd(40)∈[1.45,1.72]、Cd(20)∈[1.95,2.30]、L_w/D(40)∈[1.80,2.65]。余量对 coarse→medium 漂移：Cd(40) 27×/20×、Cd(20) 23×/15×；L_w 下界距 medium 值 0.15（加密方向使尾迹变长，下界风险方向保守）。
+
+**实测 Cd 比文献锚高 ~4% 的归因**：有限域（1/20 blockage）+ 远场速度 Dirichlet 的组合效应。证据：①上下边改对称 BC（u Neumann + v Dirichlet 0）只降 0.25%（1.6023 vs 1.6064），排除"BC 类型"主导；②旧 r=15 极坐标 O-grid 同方案 Cd≈1.562——其出流半圆的 p=0 边界在 θ≈±90° 处**切于流线**，起侧面泄压作用、压低形阻，属旧域伪影；新域平面入流/出流在拓扑上更干净。有限域 Dirichlet 远场的 Cd 上偏是文献中该类设置的常见量级（矩形域 + 速度远场的已发表 FVM 值多在 1.60–1.65）。
+
+### Re=20 下核心加密的稳定性边界（实测，机理未定）
+
+稳态 SIMPLE 外迭代在 **Re=20 + 核心网格超过 96×40** 时失稳；Re=40 全档（含 128×56）正常。隔离矩阵（外围均 medium 档、0.7/0.3、Central，除非另注）：
+
+| 核心网格 | Re=20 结果 |
+|---|---|
+| 64×28（coarse） | 收敛 223 迭代 |
+| 96×40（medium） | 收敛 430 迭代 |
+| 96×48 / 96×64 | 发散（外迭代 ~3 步起残差增长，~90 步后线性求解器弃） |
+| 112×48 / 128×56 | 发散；h=2.0 仍发散 |
+| 128×40 | 有界极限环（continuity ~0.35 振荡 4500+ 迭代不收敛不爆炸） |
+| 96×40 × 外围 fine | **收敛 434 迭代**（= 现 fine 档） |
+
+**已排除假设（不要重复试错）**：降松弛（0.5/0.25、0.35/0.2、0.4/0.25、0.3/0.15 均不救，增长率与松弛无关 → 排除经典 SIMPLE 慢模放大）；换 Upwind（dp 残差反而指数爆炸 → 排除对流格式）；动量换 ILUT（同样发散 → 排除预条件）；`nNonOrthogonalCorrectors=1`（不救）；壁面单元尺寸（旧 O-grid 在同壁面切向间距 0.0245 的 128×80 下 Re=20 收敛过）；网格质量（最差非正交 43.1°、最差偏斜 0.493，均低于 driver 告警线，远低于已登记限制器话题的 70° 阈）。爆源定位（场尸检）：核心方形角部交界区（如 (2.3,−2.5) 一带）。机理开放——5.3-6 涡街（Re=100，瞬态 PISO）在同一拓扑上的行为将是下一步证据；若届时复现，再开专项调查（候选方向：角部交界单元的 Rhie–Chow d 插值与 45° 非正交显式补全的交互）。
+
+### 尾迹长度判据
+
+去极坐标几何假设：统计 `x>0.5 且 |y|≤0.25 且 u<0` 的最大质心 x，减 0.5（后驻点起算，与旧口径一致）。0.25 ≈ Re=40 回流泡半宽的 2/3，medium 档覆盖中轴附近 1–2 排单元；仅 Re=40 断言。
+
+## Taylor–Green 精确边界瞬态算例（5.3-5，2026-11-10）
+
+`python/examples/taylor_green.py`：`[0,π]²`、ν=0.1、T=1 的衰减单模 TG，四边逐面
+Dirichlet 精确 u/v/p（解析值），逐步 `n_steps=1` PISO（CN、Central、2 corrector）。
+断言空间二阶（64²→128²）。
+
+**BC 时间层对照（64²/128²/256²，dt=0.01/0.005/0.0025）**：BC 取 t^{n+1}（隐式算子时刻）
+全面优于 t^{n+θ}（误差约减半）；uv 的 BC 时序主导该差异，p 的时序影响微弱。脚本采用
+t^{n+1}。
+
+**时间/空间误差分解（实测矩阵）**：
+
+| 协议 | 结果 | 结论 |
+|---|---|---|
+| dt∝h（0.01/0.005/0.0025） | 比值 2.83→2.65→…（表观阶 ~1.4） | 存在 dt²/h 类混合项（瞬态 Rhie–Chow 家族截断） |
+| 固定 dt=0.01 加密 h | 误差不降反微升（比值 0.89） | 时间误差主导、不随 h 收敛 |
+| 固定 h=64²、dt 减半 | 比值 2.13→1.15，更小 dt 反而回升 | 每步投影累积项 ∝ 步数，时间方向非单调 |
+| **固定 dt=0.00125 加密 h** | **64²→128² 比值 4.96（阶 2.31）** | **空间二阶成立——CI 断言此对** |
+| 同上至 256² | 128²→256² 比值 2.07（阶 1.05） | 256² 处时间项追上空间项 |
+| 256²、dt 减半（6.25e-4） | E: 1.875e-5 → 9.21e-6（÷2.04） | **停滞为时间项**：E≈c·dt 线性，空间项在该档 <1e-6 |
+
+**误差模型（实证拟合）**：E ≈ 空间项（dt→0 极限，64²→128²→256² ≈ 1.7e-4 → 1.9e-5 →
+<1e-6，不慢于二阶）+ **一阶时间项 c·dt，其系数随网格加密放大（~dt/h² 型，瞬态
+Rhie–Chow / 压力投影截断家族）**。dt∝h 时该混合项 ~1/h 表现为一阶——实测表观阶
+~1.4 的来源；固定小 dt 协议下它在 64²/128² 可忽略（空间项主导）、在 256² 追平。
+
+**已排除假设**：线性求解器噪声（1e-10 内解，ncorr=3 无变化 8.08e-5 vs 8.16e-5）、
+BC 时序（矩阵首行）、Euler/CN 混淆（CN 全程）。**开放问题**：一阶时间项的精确形式
+（d=V/a_P 在 a_P 由 ρV/dt 主导时的界面插值截断为首要候选）；CI 断言空间阶 + 绝对
+上限，时间阶不断言、`--full` 的 256² 点只报告。
+
+## 圆柱 Re=100 卡门涡街（5.3-6，2026-11-10）
+
+`python/examples/vortex_shedding.py`：复用 5.3-2 矩形域网格与远场 BC，Re=100 瞬态
+PISO（CN、Central、2 corrector），确定性反对称种子 v=1e-3·sin(πx/6)·e^{−r²}（网格与
+BC 完全对称，必须显式播种）。Cl(t)/Cd(t) 逐 10 步采样，后 60% 时段窗口取
+St（Cl 峰间隔均值）、Cd_mean、Cl 振幅。coarse（CI，dt=0.01/T=250，24 峰）实测
+St=0.1593、Cd_mean=1.3689、Cl_amp=0.3505，全部落在 2D 文献簇（St 0.164–0.167、
+Cd 1.32–1.40、Cl 0.30–0.38；coarse 的 St 低 ~3% 属预期网格偏移）。断言带
+St∈[0.145,0.185]、Cd∈[1.20,1.55]、Cl_amp∈[0.25,0.45]。medium 完整研究
+（dt=0.005/T=300，30 峰）实测 St=0.1651、Cd_mean=1.3796、Cl_amp=0.3476——coarse→medium
+漂移 St +0.006 / Cd +0.011 / Cl_amp −0.003，medium 值落在文献带中心。瞬态 PISO 在
+Re=100 无 5.3-2 稳态 SIMPLE 的核心加密稳定性问题（时间步进阻尼外迭代病理）。
+
 ## 4.3a：网格抽象与零数值变化验证
+
 
 本次重构只改变网格表示与几何系数来源，不改变笛卡尔网格上的离散公式：
 
@@ -585,7 +702,7 @@ $$\hat u_1 = u^* + d\nabla p^{(0)} \Longrightarrow u^{(1)} = \hat u_1 - d\nabla 
 
    是 $O(h^2)$ 的 split 依赖项，与 OpenFOAM 对照 NC=8 的 $4.5\times10^{-4}$ 残余同源（新增 deferred-sweep 测试锁定的正是这一层）；
 3. **迭代中间态**：显式项滞后一个迭代求值，不同分裂给出不同迭代矩阵和不同轨迹；线性场收敛到同一固定点，一般场收敛到相差上述 $O(h^2)$ 项的固定点。
-4. **内部面 vs 边界面**：内部面有显式补全项 $k\cdot G$，任意 $\alpha$ 与 $k=S-\alpha d$ 都只是把同一全梯度通量重新记账；边界面没有这个补全项（本项目与 OpenFOAM 的 `corrVecs` 均为零），$C_b/\beta_f$ 形式就是边界通量本身，因此两种形式的不动点不同。over 对纯法向梯度在任意倾斜面上精确；minimum 会把该法向通量乘 $\cos^2\theta$（$17^\circ$ 损失约 $8\%$，$70^\circ$ 损失约 $88\%$）且没有补全项补偿。over 加分母下限仍保证系数恒正并给锚定力保留下限；OpenFOAM 边界即 over，扩散 $\beta_f$ 与之同型。因此本项目的边界在两种 `nonOrthSplit` 下都保持 over；若将来要边界可选，必须先引入边界显式补全（$k_b\cdot\nabla\phi_b$ 的单侧边界梯度重构），这是已登记的后续题。
+4. **内部面 vs 边界面**：内部面有显式补全项 $k\cdot G$，任意 $\alpha$ 与 $k=S-\alpha d$ 都只是把同一全梯度通量重新记账；边界面没有这个补全项（本项目与 OpenFOAM 的 `corrVecs` 均为零），$C_b/\beta_f$ 形式就是边界通量本身，因此两种形式的不动点不同。over 对纯法向梯度在任意倾斜面上精确；minimum 会把该法向通量乘 $\cos^2\theta$（$17^\circ$ 损失约 $8\%$，$70^\circ$ 损失约 $88\%$）且没有补全项补偿。over 加分母下限仍保证系数恒正并给锚定力保留下限；OpenFOAM 边界即 over，扩散 $\beta_f$ 与之同型。因此本项目的边界在两种 `nonOrthSplit` 下都保持 over；若将来要边界可选，必须先引入边界显式补全（$k_b\cdot\nabla\phi_b$ 的单侧边界梯度重构），这是已登记的后续题。**实测证据（2026-11-03，斜切通道 Poiseuille，`python/examples/skewed_poiseuille.py`）**：把 Dirichlet-p 放在倾角 $\arctan 0.3\approx16.7^\circ$ 的斜端面上，收敛解的剖面偏移约 $7\%$，与 $h$ 无关、随倾角正弦放大（n=16→32 误差不降），且剪切增大后 SIMPLE 发散；改为两端逐面速度 + 全 Neumann 解析压力后误差降为 $O(h)$（Dirichlet-u 切向截断，系数小），入口通量与离散解析和精确相等。这正是边界补全缺失的直接后果，为登记后续题提供优先级证据。
 
 第 3 条就是"斜交网格对照"一节 NC=2 差异的来源。实测（梯形网格、$\Delta t=0.002$）：NC=2 时双方距各自固定点基本等距（$L_2$ 7.1e-2 vs 7.4e-2），互距 9.6e-2；NC=8 时互距降到 4.5e-4。多步运行把每步迭代截断误差几何冲刷（我方 NC2−NC8 的 $L_2$：单步 7.1e-2 → 10 步 1.4e-3 → 200 步 2.5e-6，OpenFOAM 同样）；发展流阶段双方残余约 1e-2 的差属于两个二阶格式间的 $O(h^2)$ 正常距离，与迭代路径无关。
 **已登记后续题：修正限制器（limited correction，2026-10-27 登记、暂缓）**：deferred correction 的显式/隐式比约为 $\tan\theta$（$45^\circ\to1$、$70^\circ\to2.75$、$85^\circ\to11.4$），$\theta\gtrsim70^\circ$ 的病态网格上外迭代/正确子迭代可能极慢或发散；OpenFOAM 的 `limited` snGrad/laplacian 用 $l\in[0,1]$ 混合系数截断显式项换稳定（$l=1$ 全修正，$l=0$ 纯 over 隐式）。当前无此类网格（斜交梯形对照在 $l=1$ 下已收敛，$L_2$ 4.5e-4@NC=8），且已有 OverRelaxed split（隐式恒正）与 `nNonOrthogonalCorrectors`（刷新滞后）两个部分缓解，故不加；出现真实病态网格案例时再加，默认 $l=1$ 保持既有行为与全部测试不变。

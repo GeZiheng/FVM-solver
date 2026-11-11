@@ -1,0 +1,2 @@
+The package amgcl is header-only.
+Use find_package(amgcl CONFIG REQUIRED) and target_link_libraries(main PRIVATE amgcl::amgcl).

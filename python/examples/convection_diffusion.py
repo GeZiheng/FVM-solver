@@ -5,15 +5,9 @@ west wall hot (T = 1), east wall cold (T = 0), north/south adiabatic.
 Run:  python python/examples/convection_diffusion.py
 """
 
-import os
-import sys
-from pathlib import Path
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import _path  # noqa: F401,E402  (adds the pyfvm build dir to sys.path)
-
 import numpy as np
-import pyfvm as fvm
+
+from _common import fvm, write_results
 
 
 def main():
@@ -48,12 +42,9 @@ def main():
     temperature = fvm.ScalarField(mesh, "temperature")
     temperature.to_numpy()[:] = sol
 
-    output_dir = Path(__file__).resolve().parent / "output" / "convection_diffusion"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "convection_diffusion.vti"
-    fvm.write_vti(str(output_path), mesh,
-                  {"temperature": temperature}, {"velocity": velocity})
-    print(f"Wrote {output_path}")
+    write_results(mesh, velocity, None, "convection_diffusion",
+                  "convection_diffusion.vti",
+                  scalars={"temperature": temperature})
     print(f"T range: [{sol.min():.6f}, {sol.max():.6f}]")
 
 

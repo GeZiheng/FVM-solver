@@ -135,8 +135,9 @@ void requireIndex(bool ok)
         throw py::index_error("index out of range");
 }
 
-/// High-level steady scalar transport: assemble, solve with BiCGSTAB,
-/// return the solution as a numpy array (row-major cell order, j * nx + i).
+/// High-level steady scalar transport: assemble, solve the linear system
+/// (selected by SolverConfig backend x method), return the solution as a
+/// numpy array (row-major cell order, j * nx + i).
 py::array_t<Scalar> solveTransport(const Mesh& mesh,
     const FaceFluxField& flux,
     const ScalarField& gamma,
@@ -167,7 +168,7 @@ py::array_t<Scalar> solveTransport(const Mesh& mesh,
         phiExplicit,
         corrections);
     sys.A.finalize();
-    auto solver = math::createEigenBiCGSTAB(solverConfig);
+    auto solver = fvm::math::makeLinearSolver(solverConfig);
     Vector x;
     {
         py::gil_scoped_release release;
@@ -211,7 +212,7 @@ py::array_t<Scalar> solveTransientTransport(const Mesh& mesh,
         &phiOld,
         corrections);
     sys.A.finalize();
-    auto solver = math::createEigenBiCGSTAB(solverConfig);
+    auto solver = fvm::math::makeLinearSolver(solverConfig);
     Vector x;
     {
         py::gil_scoped_release release;
@@ -578,6 +579,39 @@ void bindNumerical(py::module_& m)
             py::arg("side"), py::arg("type"), py::arg("value"))
         .def("get", &BoundaryField::get, py::arg("side"),
             py::return_value_policy::copy);
+    pyBoundaryField.def(
+        "set_values",
+        [](BoundaryField& self, Index patch, BCType type,
+            py::array_t<Scalar, py::array::c_style | py::array::forcecast>
+                values) {
+            if (values.ndim() != 1)
+            {
+                throw py::value_error("boundary values must be one-dimensional");
+            }
+            if (patch >= self.mesh().patchCount())
+            {
+                throw std::out_of_range(
+                    "boundary patch index is out of range");
+            }
+            const auto faces = self.mesh().patchFaces(patch);
+            if (static_cast<std::size_t>(values.size()) != faces.size())
+            {
+                throw py::value_error(
+                    "per-face value count must equal the patch face count");
+            }
+
+            std::vector<Scalar> copied;
+            copied.reserve(static_cast<std::size_t>(values.size()));
+            auto raw = values.unchecked<1>();
+            for (py::ssize_t k = 0; k < raw.size(); ++k)
+            {
+                copied.push_back(static_cast<Scalar>(raw(k)));
+            }
+            self.setValues(patch, type, std::move(copied));
+        },
+        py::arg("side"), py::arg("type"), py::arg("values"));
+    pyBoundaryField.def("value_at", &BoundaryField::valueAt,
+        py::arg("face"));
     pyBoundaryField.def("patch_count", &BoundaryField::patchCount);
     pyBoundaryField.attr("East") = py::int_(BoundaryField::East);
     pyBoundaryField.attr("North") = py::int_(BoundaryField::North);
@@ -588,7 +622,13 @@ void bindNumerical(py::module_& m)
         .def(py::init<>())
         .def_readwrite("tolerance", &SolverConfig::tolerance)
         .def_readwrite("max_iterations", &SolverConfig::maxIterations)
-        .def_readwrite("verbose", &SolverConfig::verbose);
+        .def_readwrite("verbose", &SolverConfig::verbose)
+        // Linear solver selection: backend ("eigen" default; "amgcl" when
+        // the module was built with FVM_BUILD_AMGCL=ON, probe with
+        // pyfvm.HAVE_AMGCL) x method ("bicgstab" default; "cg" or the
+        // eigen-only "bicgstab_ilut").
+        .def_readwrite("backend", &SolverConfig::backend)
+        .def_readwrite("method", &SolverConfig::method);
 
     py::class_<CorrectionOptions>(m,
         "CorrectionOptions",
@@ -619,6 +659,8 @@ void bindNumerical(py::module_& m)
         .def_readwrite("relaxation_p", &SimpleConfig::relaxationP)
         .def_readwrite("scheme", &SimpleConfig::scheme)
         .def_readwrite("solver_config", &SimpleConfig::solverConfig)
+        .def_readwrite("pressure_solver_config",
+            &SimpleConfig::pressureSolverConfig)
         .def_readwrite("corrections", &SimpleConfig::corrections)
         .def_readwrite("verbose", &SimpleConfig::verbose);
 
@@ -649,6 +691,8 @@ void bindNumerical(py::module_& m)
         .def_readwrite("time_scheme", &PisoConfig::timeScheme)
         .def_readwrite("scheme", &PisoConfig::scheme)
         .def_readwrite("solver_config", &PisoConfig::solverConfig)
+        .def_readwrite("pressure_solver_config",
+            &PisoConfig::pressureSolverConfig)
         .def_readwrite("corrections", &PisoConfig::corrections)
         .def_readwrite("verbose", &PisoConfig::verbose);
 
@@ -735,5 +779,13 @@ PYBIND11_MODULE(pyfvm, m)
               "convection-diffusion transport, SIMPLE, PISO). Meshes may be "
               "Cartesian or SU2-read unstructured meshes. Fluxes use a "
               "single per-face array; BoundaryField requires a mesh.";
+    // Build-time probe for the Python side: SolverConfig backend values
+    // other than "eigen" are only usable when this is true.
+    m.attr("HAVE_AMGCL") =
+#ifdef FVM_HAVE_AMGCL
+        true;
+#else
+        false;
+#endif
     fvm::python::bindAll(m);
 }

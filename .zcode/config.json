@@ -1,0 +1,19 @@
+{
+  "mcp": {
+    "servers": {
+      "build-and-test": {
+        "command": "python",
+        "args": [".agents/mcp/build_and_test_server.py"],
+        "env": {"FVM_MCP_SYNC_ONLY": "1"}
+      },
+      "build-and-test-wsl": {
+        "command": "wsl.exe",
+        "args": ["-e", "bash", "-lc", "exec python3 .agents/mcp/build_and_test_server.py"]
+      },
+      "openfoam": {
+        "command": "python",
+        "args": [".agents/mcp/openfoam_server.py"]
+      }
+    }
+  }
+}

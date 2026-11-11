@@ -35,6 +35,18 @@ model_reasoning_effort = "high"
 command = "python"
 args = ['.agents/mcp/build_and_test_server.py']
 
+# Same implementation, WSL host: reproduces the Linux build path locally
+# (e.g. the -fPIC requirements of the pyfvm shared module) before CI.
+# wsl.exe inherits the repo cwd as /mnt/<drive>/..., so the relative script
+# path stays portable. Auto-approved for the same reason as above: writes
+# stay inside build/ (directories suffixed -wsl, or the FVM_BUILD_ROOT
+# override) and the WSL vcpkg cache. Requires python3/cmake/ninja/compiler
+# and VCPKG_ROOT (exported in ~/.profile; `bash -lc` never sees .bashrc
+# exports) in the default distro.
+[mcp_servers.build-and-test-wsl]
+command = "wsl.exe"
+args = ['-e', 'bash', '-lc', 'exec python3 .agents/mcp/build_and_test_server.py']
+
 [mcp_servers.openfoam]
 command = "python"
 args = ['.agents/mcp/openfoam_server.py']

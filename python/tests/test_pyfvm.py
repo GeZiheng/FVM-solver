@@ -144,6 +144,91 @@ class TestTransportBinding(unittest.TestCase):
         np.testing.assert_allclose(sol.reshape(n, n),
                                    np.tile(1.0 - x, (n, 1)), atol=1e-8)
 
+    def test_solve_transport_backend_method_combos(self):
+        # Mirror of test_pure_diffusion_linear_profile_exact across all four
+        # (backend, method) combos of the two orthogonal SolverConfig fields
+        # (implementation family "eigen" | "amgcl", outer Krylov method
+        # "bicgstab" | "cg"). The pure-diffusion system is SPD, so every
+        # combo solves it. The amgcl rows are skipped unless the module was
+        # built with FVM_BUILD_AMGCL=ON; the eigen rows (the default path
+        # and the newly reachable Eigen CG) always run.
+        n = 16
+        mesh = fvm.CartesianMesh(n, n, 0.0, 0.0, 1.0, 1.0)
+        gamma = fvm.ScalarField(mesh, "gamma")
+        gamma.set_constant(1.0)
+        velocity = fvm.VectorField(mesh, "velocity")  # stays zero
+
+        bc = fvm.BoundaryField(mesh)
+        bc.set(fvm.BoundaryField.West, fvm.BCType.Dirichlet, 1.0)
+        bc.set(fvm.BoundaryField.East, fvm.BCType.Dirichlet, 0.0)
+
+        flux = fvm.interpolate_cell_velocity_flux(mesh, velocity, 1.0)
+        x = (np.arange(n) + 0.5) * mesh.dx()
+        expected = np.tile(1.0 - x, (n, 1))
+
+        for backend, method in (("eigen", "bicgstab"), ("eigen", "cg"),
+                                ("amgcl", "bicgstab"), ("amgcl", "cg")):
+            with self.subTest(backend=backend, method=method):
+                if (not getattr(fvm, "HAVE_AMGCL", False)
+                        and backend == "amgcl"):
+                    self.skipTest("requires FVM_BUILD_AMGCL=ON")
+                solver_cfg = fvm.SolverConfig()
+                solver_cfg.tolerance = 1e-12
+                solver_cfg.backend = backend
+                solver_cfg.method = method
+                sol = fvm.solve_transport(mesh, flux, gamma,
+                                          fvm.ConvectionScheme.Upwind, bc,
+                                          solver_cfg)
+                np.testing.assert_allclose(sol.reshape(n, n), expected,
+                                           atol=1e-8)
+
+    def test_solve_transport_rejects_unknown_backend_and_method(self):
+        # Invalid values of either field raise ValueError (from C++
+        # std::invalid_argument) while the solver is selected, before any
+        # solve work happens. Runs unchanged in both OFF and ON builds.
+        n = 4
+        mesh = fvm.CartesianMesh(n, n, 0.0, 0.0, 1.0, 1.0)
+        gamma = fvm.ScalarField(mesh, "gamma")
+        gamma.set_constant(1.0)
+        velocity = fvm.VectorField(mesh, "velocity")
+        bc = fvm.BoundaryField(mesh)
+        bc.set(fvm.BoundaryField.West, fvm.BCType.Dirichlet, 1.0)
+        bc.set(fvm.BoundaryField.East, fvm.BCType.Dirichlet, 0.0)
+        flux = fvm.interpolate_cell_velocity_flux(mesh, velocity, 1.0)
+
+        solver_cfg = fvm.SolverConfig()
+        solver_cfg.backend = "cuda"
+        with self.assertRaises(ValueError):
+            fvm.solve_transport(mesh, flux, gamma,
+                                fvm.ConvectionScheme.Upwind, bc, solver_cfg)
+
+        solver_cfg = fvm.SolverConfig()
+        solver_cfg.method = "sor"
+        with self.assertRaises(ValueError):
+            fvm.solve_transport(mesh, flux, gamma,
+                                fvm.ConvectionScheme.Upwind, bc, solver_cfg)
+
+    @unittest.skipIf(getattr(fvm, "HAVE_AMGCL", False),
+                     "the family gate only exists in OFF builds")
+    def test_solve_transport_rejects_amgcl_without_the_option(self):
+        # Family-level gate: an OFF build rejects backend="amgcl" with
+        # RuntimeError regardless of the method, before any solve work.
+        n = 4
+        mesh = fvm.CartesianMesh(n, n, 0.0, 0.0, 1.0, 1.0)
+        gamma = fvm.ScalarField(mesh, "gamma")
+        gamma.set_constant(1.0)
+        velocity = fvm.VectorField(mesh, "velocity")
+        bc = fvm.BoundaryField(mesh)
+        bc.set(fvm.BoundaryField.West, fvm.BCType.Dirichlet, 1.0)
+        bc.set(fvm.BoundaryField.East, fvm.BCType.Dirichlet, 0.0)
+        flux = fvm.interpolate_cell_velocity_flux(mesh, velocity, 1.0)
+
+        solver_cfg = fvm.SolverConfig()
+        solver_cfg.backend = "amgcl"
+        with self.assertRaises(RuntimeError):
+            fvm.solve_transport(mesh, flux, gamma,
+                                fvm.ConvectionScheme.Upwind, bc, solver_cfg)
+
     def test_correction_options_plumbing_and_zero_change(self):
         options = fvm.CorrectionOptions()
         self.assertTrue(options.non_orthogonal_diffusion)
@@ -215,6 +300,78 @@ class TestTransportBinding(unittest.TestCase):
         np.testing.assert_allclose(base, corrected, atol=1e-12)
 
 
+class TestBoundaryFaceValues(unittest.TestCase):
+    """Contract tests for BoundaryField's per-face value API."""
+
+    def test_set_values_follows_patch_face_order(self):
+        mesh = fvm.CartesianMesh(3, 4, 0.0, 0.0, 1.0, 1.0)
+        bc = fvm.BoundaryField(mesh)
+        values = np.array([1.0, 2.0, 3.0, 4.0])
+        bc.set_values(fvm.BoundaryField.West, fvm.BCType.Dirichlet,
+                      values)
+
+        faces = mesh.patch_faces(fvm.BoundaryField.West)
+        self.assertEqual(len(faces), len(values))
+        for face, expected in zip(faces, values):
+            self.assertEqual(bc.value_at(face), expected)
+
+    def test_set_values_rejects_the_wrong_length(self):
+        mesh = fvm.CartesianMesh(3, 4, 0.0, 0.0, 1.0, 1.0)
+        bc = fvm.BoundaryField(mesh)
+        with self.assertRaises(ValueError):
+            bc.set_values(fvm.BoundaryField.West, fvm.BCType.Dirichlet,
+                          np.array([1.0, 2.0]))
+
+    def test_set_values_rejects_non_1d_arrays(self):
+        mesh = fvm.CartesianMesh(3, 4, 0.0, 0.0, 1.0, 1.0)
+        bc = fvm.BoundaryField(mesh)
+        with self.assertRaises(ValueError):
+            bc.set_values(fvm.BoundaryField.West, fvm.BCType.Dirichlet,
+                          np.zeros((2, 2)))
+
+    def test_set_values_rejects_invalid_patches(self):
+        mesh = fvm.CartesianMesh(3, 4, 0.0, 0.0, 1.0, 1.0)
+        bc = fvm.BoundaryField(mesh)
+        with self.assertRaises(IndexError):
+            bc.set_values(99, fvm.BCType.Dirichlet, np.zeros(4))
+
+    def test_simple_smoke_with_a_set_values_inlet(self):
+        nx, ny = 8, 4
+        mesh = fvm.CartesianMesh(nx, ny, 0.0, 0.0, 1.0, 1.0)
+        velocity = fvm.VectorField(mesh, "velocity")
+        pressure = fvm.ScalarField(mesh, "pressure")
+        flux = fvm.FaceFluxField(mesh, "phi")
+
+        inlet = np.array([0.5 * y * (1.0 - y)
+                          for y in (mesh.face_centroid(face)[1]
+                                    for face in
+                                    mesh.patch_faces(
+                                        fvm.BoundaryField.West))])
+        bc_u = fvm.BoundaryField(mesh)
+        bc_u.set_values(fvm.BoundaryField.West, fvm.BCType.Dirichlet,
+                        inlet)
+        bc_u.set(fvm.BoundaryField.East, fvm.BCType.Neumann, 0.0)
+        for side in (fvm.BoundaryField.North, fvm.BoundaryField.South):
+            bc_u.set(side, fvm.BCType.Dirichlet, 0.0)
+
+        bc_v = fvm.BoundaryField(mesh)
+        for side in (fvm.BoundaryField.West, fvm.BoundaryField.East,
+                     fvm.BoundaryField.North, fvm.BoundaryField.South):
+            bc_v.set(side, fvm.BCType.Dirichlet, 0.0)
+        bc_p = fvm.BoundaryField(mesh)
+        bc_p.set(fvm.BoundaryField.East, fvm.BCType.Dirichlet, 0.0)
+
+        cfg = fvm.SimpleConfig()
+        cfg.tolerance = 1e-5
+        cfg.max_iterations = 1000
+        cfg.relaxation_u = 0.7
+        cfg.relaxation_p = 0.3
+        result = fvm.solve_simple(mesh, 1.0, 0.01, bc_u, bc_v, bc_p, cfg,
+                                  velocity, pressure, flux)
+        self.assertTrue(result.converged)
+        self.assertTrue(np.isfinite(velocity.u.to_numpy()).all())
+
+
 class TestDriverSmokes(unittest.TestCase):
     """End-to-end smokes: the drivers run to completion through the
     bindings and produce finite, sane fields. Quantitative physics
@@ -231,6 +388,64 @@ class TestDriverSmokes(unittest.TestCase):
         self.assertGreater(result.iterations, 0)
         self.assertTrue(np.isfinite(velocity.u.to_numpy()).all())
         self.assertTrue(np.isfinite(pressure.to_numpy()).all())
+
+
+class TestDriverSolverConfigs(unittest.TestCase):
+    """The NS drivers take two independent linear-solver configs:
+    solver_config (momentum) and pressure_solver_config (pressure). Both go
+    through the shared backend x method dispatch of fvm.math."""
+
+    def test_pressure_solver_config_defaults(self):
+        # Default pressure config: eigen x cg (the historical hardcoded
+        # pressure factory), independent of solver_config.
+        for make_config in (fvm.SimpleConfig, fvm.PisoConfig):
+            cfg = make_config()
+            self.assertEqual(cfg.pressure_solver_config.backend, "eigen")
+            self.assertEqual(cfg.pressure_solver_config.method, "cg")
+
+    def test_solve_simple_rejects_unknown_methods(self):
+        # Both configs are dispatched on entry, before any solve work: an
+        # unknown method raises ValueError (from C++ std::invalid_argument)
+        # immediately.
+        for attr in ("solver_config", "pressure_solver_config"):
+            with self.subTest(config=attr):
+                mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = \
+                    make_cavity_case(8)
+                cfg = fvm.SimpleConfig()
+                cfg.max_iterations = 5
+                getattr(cfg, attr).method = "bogus"
+                with self.assertRaises(ValueError):
+                    fvm.solve_simple(mesh, 1.0, 0.01, bc_u, bc_v, bc_p, cfg,
+                                     velocity, pressure, flux)
+
+    @unittest.skipIf(not getattr(fvm, "HAVE_AMGCL", False),
+                     "requires FVM_BUILD_AMGCL=ON")
+    def test_solve_simple_with_amgcl_momentum_backend(self):
+        # ON build: the NS path consumes the amgcl backend for the momentum
+        # equation; the pressure stays on the default eigen CG.
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = make_cavity_case(8)
+        cfg = fvm.SimpleConfig()
+        cfg.tolerance = 1e-4
+        cfg.max_iterations = 500
+        cfg.solver_config.tolerance = 1e-8
+        cfg.solver_config.backend = "amgcl"
+        result = fvm.solve_simple(mesh, 1.0, 0.01, bc_u, bc_v, bc_p, cfg,
+                                  velocity, pressure, flux)
+        self.assertTrue(result.converged)
+        self.assertTrue(np.isfinite(velocity.u.to_numpy()).all())
+
+    @unittest.skipIf(getattr(fvm, "HAVE_AMGCL", False),
+                     "the family gate only exists in OFF builds")
+    def test_solve_simple_rejects_amgcl_without_the_option(self):
+        # OFF build: the family-level gate rejects backend="amgcl" with
+        # RuntimeError before the method is even looked at.
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = make_cavity_case(8)
+        cfg = fvm.SimpleConfig()
+        cfg.max_iterations = 5
+        cfg.solver_config.backend = "amgcl"
+        with self.assertRaises(RuntimeError):
+            fvm.solve_simple(mesh, 1.0, 0.01, bc_u, bc_v, bc_p, cfg,
+                             velocity, pressure, flux)
 
 
 class TestMeshMismatch(unittest.TestCase):

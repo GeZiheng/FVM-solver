@@ -18,15 +18,10 @@ Run:  python python/examples/stokes_oscillating.py [--test]
 """
 
 import argparse
-import os
-import sys
-from pathlib import Path
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import _path  # noqa: F401,E402
 
 import numpy as np
-import pyfvm as fvm
+
+from _common import (fvm, report_test, write_frame, write_results)
 
 RHO, MU = 1.0, 0.1          # nu = 0.1
 DT = 0.005
@@ -45,8 +40,13 @@ def make_fields(nx, ny, lx, ly):
     return mesh, velocity, pressure, flux
 
 
-def oscillating_run(max_cycles=40, steady_tol=1e-6):
-    """March to the periodic steady state; return the final fields."""
+def oscillating_run(max_cycles=40, steady_tol=1e-6, frame_every=None):
+    """March to the periodic steady state; return the final fields.
+
+    With `frame_every` set, a VTK frame is written every `frame_every`
+    steps (plain cadence; the steady-state break makes the total step
+    count unknown, so there is no stretch cap).
+    """
     nx, ny = NX, NY
     mesh, velocity, pressure, flux = make_fields(nx, ny, 2.0, 2.0)
 
@@ -71,10 +71,21 @@ def oscillating_run(max_cycles=40, steady_tol=1e-6):
     cfg.time_scheme = fvm.TimeScheme.Euler
     cfg.solver_config.tolerance = 1e-9
     cfg.solver_config.max_iterations = 20000
+    cfg.pressure_solver_config.tolerance = 1e-9
+    cfg.pressure_solver_config.max_iterations = 20000
 
     step = 0
     prev = None
     steady_cycle = None
+    frame_index = 0
+    last_frame_step = None
+    if frame_every is not None:
+        # Frame 0 is the t = 0 initial field (steps counted from 0).
+        print(f"frame {frame_index}: t = {0.0:.2f}")
+        write_frame(mesh, velocity, pressure, "stokes", "stokes_oscillating",
+                    frame_index)
+        frame_index += 1
+        last_frame_step = 0
     for cycle in range(1, max_cycles + 1):
         for _ in range(STEPS_PER_PERIOD):
             step += 1
@@ -83,6 +94,12 @@ def oscillating_run(max_cycles=40, steady_tol=1e-6):
                      np.cos(OMEGA * DT * step))
             fvm.solve_piso(mesh, RHO, MU, bc_u, bc_v, bc_p, cfg,
                            velocity, pressure, flux)
+            if frame_every is not None and step % frame_every == 0:
+                print(f"frame {frame_index}: t = {DT * step:.2f}")
+                write_frame(mesh, velocity, pressure, "stokes",
+                            "stokes_oscillating", frame_index)
+                frame_index += 1
+                last_frame_step = step
         u = velocity.u.to_numpy().reshape(ny, nx).copy()
         if prev is not None and np.abs(u - prev).max() < steady_tol:
             print(f"periodic steady state after {cycle} cycles "
@@ -100,6 +117,17 @@ def oscillating_run(max_cycles=40, steady_tol=1e-6):
                  np.cos(OMEGA * DT * step))
         fvm.solve_piso(mesh, RHO, MU, bc_u, bc_v, bc_p, cfg,
                        velocity, pressure, flux)
+        if frame_every is not None and step % frame_every == 0:
+            print(f"frame {frame_index}: t = {DT * step:.2f}")
+            write_frame(mesh, velocity, pressure, "stokes",
+                        "stokes_oscillating", frame_index)
+            frame_index += 1
+            last_frame_step = step
+    # The series always ends at the final state; skip if already written.
+    if frame_every is not None and last_frame_step != step:
+        print(f"frame {frame_index}: t = {DT * step:.2f}")
+        write_frame(mesh, velocity, pressure, "stokes", "stokes_oscillating",
+                    frame_index)
     return mesh, velocity, pressure
 
 
@@ -141,6 +169,8 @@ def couette_stepwise_sanity():
         cfg.time_scheme = fvm.TimeScheme.Euler
         cfg.solver_config.tolerance = 1e-9
         cfg.solver_config.max_iterations = 20000
+        cfg.pressure_solver_config.tolerance = 1e-9
+        cfg.pressure_solver_config.max_iterations = 20000
         return mesh, velocity, pressure, flux, bc_u, bc_v, bc_p, cfg
 
     mesh, velocity, pressure, flux, bc_u, bc_v, bc_p, cfg = setup()
@@ -166,32 +196,25 @@ def main():
     parser.add_argument("--test", action="store_true",
                         help="assert the exact-solution and stepwise-calling "
                              "checks and exit non-zero on failure")
+    parser.add_argument("--frames-every", type=int, default=50,
+                        help="write a VTK frame every K steps (0 disables)")
     args = parser.parse_args()
 
-    mesh, velocity, pressure = oscillating_run()
+    frame_every = None if args.test else (args.frames_every or None)
+    mesh, velocity, pressure = oscillating_run(frame_every=frame_every)
     metrics = oscillating_metrics(mesh, velocity)
 
-    output_dir = Path(__file__).resolve().parent / "output" / "stokes"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "oscillating.vti"
-    fvm.write_vti(str(output_path), mesh,
-                  {"pressure": pressure}, {"velocity": velocity})
-    print(f"Wrote {output_path}")
+    if frame_every is None:
+        write_results(mesh, velocity, pressure, "stokes", "oscillating.vti")
 
     if args.test:
         # Calibrated in Phase 2: observed 2.8e-3 (mixed first-order Euler
         # temporal error and near-plate discretisation); 1.4x headroom.
         ok = metrics["linf"] <= 4.0e-3
-        print(f"application test: {'PASS' if ok else 'FAIL'} "
-              f"(profile L-inf {metrics['linf']:.4e} <= 4.0e-3)")
-        if not ok:
-            sys.exit(1)
+        report_test(ok, f"(profile L-inf {metrics['linf']:.4e} <= 4.0e-3)")
         diff = couette_stepwise_sanity()
         ok = diff <= 1.0e-9
-        print(f"application test: {'PASS' if ok else 'FAIL'} "
-              f"(stepwise difference {diff:.3e} <= 1e-9)")
-        if not ok:
-            sys.exit(1)
+        report_test(ok, f"(stepwise difference {diff:.3e} <= 1e-9)")
 
 
 if __name__ == "__main__":
