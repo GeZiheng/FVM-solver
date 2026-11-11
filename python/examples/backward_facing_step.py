@@ -11,17 +11,11 @@ Run:  python python/examples/backward_facing_step.py
 """
 
 import argparse
-import os
-import sys
-import tempfile
-from pathlib import Path
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import _path  # noqa: F401,E402
 
 import numpy as np
 
-import pyfvm as fvm
+from _common import (fvm, print_simple_status, read_su2_text, report_test,
+                     write_results)
 
 from mesh_su2 import l_shaped_bfs_grid
 
@@ -123,10 +117,7 @@ def solve_case(mesh, re):
 
     result = fvm.solve_simple(mesh, rho, mu, bc_u, bc_v, bc_p, cfg,
                               velocity, pressure, flux)
-    state = "converged" if result.converged else "NOT converged"
-    print(f"SIMPLE (Re = {re}, n = {mesh.cell_count()} cells): {state} in "
-          f"{result.iterations} iterations, continuity residual "
-          f"{result.history[-1].continuity:.3e}")
+    print_simple_status(f"Re = {re}, n = {mesh.cell_count()} cells", result)
     if not result.converged:
         raise RuntimeError(f"SIMPLE did not converge at Re = {re}")
     return velocity, pressure, result
@@ -152,29 +143,16 @@ def reattachment_length(mesh, velocity):
     raise RuntimeError("no reattachment point found on the downstream floor")
 
 
-def write_result(mesh, velocity, pressure, re):
-    output_dir = Path(__file__).resolve().parent / "output" / \
-        "backward_facing_step"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"bfs_re{re}.vtu"
-    fvm.write_vtu(str(output_path), mesh,
-                  {"pressure": pressure}, {"velocity": velocity})
-    print(f"Wrote {output_path}")
-
-
 def run_case(re, n):
     """Generate, solve, post-process, and write one case."""
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "backward_facing_step.su2")
-        with open(path, "w", encoding="ascii") as fh:
-            fh.write(l_shaped_bfs_grid(n))
-        mesh = fvm.read_su2(path)
+    mesh = read_su2_text(l_shaped_bfs_grid(n), name="backward_facing_step.su2")
 
     velocity, pressure, result = solve_case(mesh, re)
     x_r = reattachment_length(mesh, velocity)
     print(f"Re={re} n={n} iterations={result.iterations} "
           f"converged={result.converged} x_r/h={x_r:.6f}")
-    write_result(mesh, velocity, pressure, re)
+    write_results(mesh, velocity, pressure, "backward_facing_step",
+                  f"bfs_re{re}.vtu")
     return x_r
 
 
@@ -201,10 +179,7 @@ def main():
         if len(reattachment) == 2:
             trend_ok = reattachment[100] >= 1.5 * reattachment[50]
         ok = all(range_ok.values()) and trend_ok
-        print(f"application test: {'PASS' if ok else 'FAIL'} "
-              f"(range={range_ok}, trend={trend_ok})")
-        if not ok:
-            sys.exit(1)
+        report_test(ok, f"(range={range_ok}, trend={trend_ok})")
 
 
 if __name__ == "__main__":

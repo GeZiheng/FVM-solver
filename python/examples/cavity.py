@@ -14,16 +14,11 @@ Run:  python python/examples/cavity.py [--re {100,400,1000,3200}] [--test]
 """
 
 import argparse
-import os
-import sys
 import time
-from pathlib import Path
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import _path  # noqa: F401,E402
 
 import numpy as np
-import pyfvm as fvm
+
+from _common import (fvm, print_simple_status, report_test, write_results)
 
 # Ghia, Ghia & Shin (1982), Tables I/II: centreline velocity profiles on a
 # 129x129 grid.  Columns are Re = 100 / 400 / 1000.
@@ -144,10 +139,8 @@ def run(re, momentum_solver=None, pressure_solver=None):
         tag = f", {momentum_solver[0]}/{momentum_solver[1]}"
     if pressure_solver:
         tag += f", p {pressure_solver[0]}/{pressure_solver[1]}"
-    state = "converged" if result.converged else "NOT converged"
-    print(f"SIMPLE (Re = {re}, {n}x{n}{tag}): {state} in "
-          f"{result.iterations} iterations, continuity residual "
-          f"{result.history[-1].continuity:.3e}, {wall:.1f} s wall time")
+    print_simple_status(f"Re = {re}, {n}x{n}{tag}", result,
+                        suffix=f", {wall:.1f} s wall time")
 
     if not result.converged:
         raise RuntimeError(f"SIMPLE did not converge at Re = {re}")
@@ -225,12 +218,8 @@ def main():
         args.re, mom_solver, p_solver)
     metrics = profile_errors(args.re, x, u_center, y, v_center)
 
-    output_dir = Path(__file__).resolve().parent / "output" / "cavity"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"cavity_re{args.re}.vti"
-    fvm.write_vti(str(output_path), mesh,
-                  {"pressure": pressure}, {"velocity": velocity})
-    print(f"Wrote {output_path}")
+    write_results(mesh, velocity, pressure, "cavity",
+                  f"cavity_re{args.re}.vti")
 
     if args.test:
         # Calibrated in Phase 2 (Central scheme); >= 2x headroom over the
@@ -245,11 +234,8 @@ def main():
         worst = max(metrics["u_linf"], metrics["v_linf"])
         worst_l2 = max(metrics["u_l2"], metrics["v_l2"])
         ok = worst <= limit and worst_l2 <= limit_l2
-        print(f"application test: {'PASS' if ok else 'FAIL'} "
-              f"(max profile L-inf {worst:.4e} <= {limit:.1e}, "
-              f"L2 {worst_l2:.4e} <= {limit_l2:.1e})")
-        if not ok:
-            sys.exit(1)
+        report_test(ok, f"(max profile L-inf {worst:.4e} <= {limit:.1e}, "
+                        f"L2 {worst_l2:.4e} <= {limit_l2:.1e})")
 
 
 if __name__ == "__main__":

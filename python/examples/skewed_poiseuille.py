@@ -21,16 +21,11 @@ Run:  python python/examples/skewed_poiseuille.py [--n N] [--test]
 
 import argparse
 import math
-import os
-import sys
-import tempfile
-from pathlib import Path
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import _path  # noqa: F401,E402
 
 import numpy as np
-import pyfvm as fvm
+
+from _common import (fvm, print_simple_status, read_su2_text, report_test,
+                     write_results)
 
 from mesh_su2 import sheared_channel
 
@@ -105,10 +100,7 @@ def solve_case(mesh):
 
     result = fvm.solve_simple(mesh, 1.0, 1.0, bc_u, bc_v, bc_p, cfg,
                               velocity, pressure, flux)
-    state = "converged" if result.converged else "NOT converged"
-    print(f"SIMPLE ({mesh.cell_count()} cells): {state} in "
-          f"{result.iterations} iterations, continuity residual "
-          f"{result.history[-1].continuity:.3e}")
+    print_simple_status(f"{mesh.cell_count()} cells", result)
     if not result.converged:
         raise RuntimeError("SIMPLE did not converge")
     return velocity, pressure, flux
@@ -159,27 +151,14 @@ def diagnostics(mesh, velocity, flux, n):
     return flux_mismatch, quadrature_gap, profile_error, v_error
 
 
-def write_result(mesh, velocity, pressure, n):
-    output_dir = Path(__file__).resolve().parent / "output" / \
-        "skewed_poiseuille"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"skewed_poiseuille_n{n}.vtu"
-    fvm.write_vtu(str(output_path), mesh,
-                  {"pressure": pressure}, {"velocity": velocity})
-    print(f"Wrote {output_path}")
-
-
 def run_case(n, write=True):
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "sheared_channel.su2")
-        with open(path, "w", encoding="ascii") as fh:
-            fh.write(sheared_channel(n, SHEAR))
-        mesh = fvm.read_su2(path)
+    mesh = read_su2_text(sheared_channel(n, SHEAR), name="sheared_channel.su2")
 
     velocity, pressure, flux = solve_case(mesh)
     measures = diagnostics(mesh, velocity, flux, n)
     if write:
-        write_result(mesh, velocity, pressure, n)
+        write_results(mesh, velocity, pressure, "skewed_poiseuille",
+                      f"skewed_poiseuille_n{n}.vtu")
     return measures
 
 
@@ -203,9 +182,7 @@ def main():
             "cross_flow": v_error <= V_BAND,
         }
         ok = all(checks.values())
-        print(f"application test: {'PASS' if ok else 'FAIL'} {checks}")
-        if not ok:
-            sys.exit(1)
+        report_test(ok, checks)
 
 
 if __name__ == "__main__":

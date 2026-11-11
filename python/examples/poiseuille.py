@@ -10,15 +10,10 @@ Run:  python python/examples/poiseuille.py [--test]
 """
 
 import argparse
-import os
-import sys
-from pathlib import Path
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import _path  # noqa: F401,E402
 
 import numpy as np
-import pyfvm as fvm
+
+from _common import (fvm, print_simple_status, report_test, write_results)
 
 
 def run():
@@ -60,9 +55,7 @@ def run():
 
     result = fvm.solve_simple(mesh, rho, mu, bc_u, bc_v, bc_p, cfg,
                               velocity, pressure, flux)
-    state = "converged" if result.converged else "NOT converged"
-    print(f"SIMPLE: {state} in {result.iterations} iterations, continuity "
-          f"residual {result.history[-1].continuity:.3e}")
+    print_simple_status("", result)
     if not result.converged:
         raise RuntimeError("SIMPLE did not converge")
 
@@ -103,23 +96,15 @@ def main():
     mesh, velocity, pressure, u_bulk, mu = run()
     metrics = channel_metrics(mesh, velocity, pressure, u_bulk, mu)
 
-    output_dir = Path(__file__).resolve().parent / "output" / "poiseuille"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "poiseuille.vti"
-    fvm.write_vti(str(output_path), mesh,
-                  {"pressure": pressure}, {"velocity": velocity})
-    print(f"Wrote {output_path}")
+    write_results(mesh, velocity, pressure, "poiseuille", "poiseuille.vti")
 
     if args.test:
         profile_ok = metrics["profile_linf"] <= 3.0e-3
         slope_ok = metrics["slope_rel"] <= 1.0e-2
         ok = profile_ok and slope_ok
-        print(f"application test: {'PASS' if ok else 'FAIL'} "
-              f"(profile {metrics['profile_linf']:.4e} <= 3.0e-3: "
-              f"{profile_ok}; slope rel {metrics['slope_rel']:.4e} "
-              f"<= 1e-2: {slope_ok})")
-        if not ok:
-            sys.exit(1)
+        report_test(ok, f"(profile {metrics['profile_linf']:.4e} <= 3.0e-3: "
+                        f"{profile_ok}; slope rel {metrics['slope_rel']:.4e} "
+                        f"<= 1e-2: {slope_ok})")
 
 
 if __name__ == "__main__":

@@ -24,16 +24,11 @@ Run:  python python/examples/taylor_green.py
 
 import argparse
 import math
-import os
-import sys
-from pathlib import Path
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import _path  # noqa: F401,E402
 
 import numpy as np
 
-import pyfvm as fvm
+from _common import (fvm, frame_interval, report_test, write_frame,
+                     write_results)
 
 RHO = 1.0
 NU = 0.1
@@ -94,8 +89,13 @@ def l2_error(computed, exact):
     return math.sqrt(float(np.mean(diff * diff)))
 
 
-def run_level(nx, dt):
-    """Integrate one grid level to END_TIME; return (errors, fields)."""
+def run_level(nx, dt, frame_every=None):
+    """Integrate one grid level to END_TIME; return (errors, fields).
+
+    With `frame_every` set, frames are written every `frame_interval`
+    steps (stretched so long levels stay within ~50 frames) plus one
+    final frame.
+    """
     mesh = fvm.CartesianMesh(nx, nx, 0.0, 0.0, math.pi, math.pi)
     velocity = fvm.VectorField(mesh, "velocity")
     pressure = fvm.ScalarField(mesh, "pressure")
@@ -122,6 +122,16 @@ def run_level(nx, dt):
     cfg.pressure_solver_config.max_iterations = 20000
 
     steps = round(END_TIME / dt)
+    interval = frame_interval(steps) if frame_every is not None else None
+    frame_index = 0
+    last_frame_step = None
+    if interval is not None:
+        # Frame 0 is the t = 0 initial field (steps counted from 0).
+        print(f"frame {frame_index}: t = {0.0:.4f}")
+        write_frame(mesh, velocity, pressure, "taylor_green",
+                    f"taylor_green_{nx}", frame_index)
+        frame_index += 1
+        last_frame_step = 0
     for step in range(steps):
         # BCs at the end-of-step level of the implicit operator
         # (empirically the most accurate choice; see module docstring).
@@ -129,6 +139,18 @@ def run_level(nx, dt):
                                     (step + 1) * dt)
         fvm.solve_piso(mesh, RHO, NU, bc_u, bc_v, bc_p, cfg,
                        velocity, pressure, flux)
+        if interval is not None and (step + 1) % interval == 0:
+            print(f"frame {frame_index}: t = {(step + 1) * dt:.4f}",
+                  flush=True)
+            write_frame(mesh, velocity, pressure, "taylor_green",
+                        f"taylor_green_{nx}", frame_index)
+            frame_index += 1
+            last_frame_step = step + 1
+    # The series always ends at the final state; skip if already written.
+    if interval is not None and last_frame_step != steps:
+        print(f"frame {frame_index}: t = {steps * dt:.4f}", flush=True)
+        write_frame(mesh, velocity, pressure, "taylor_green",
+                    f"taylor_green_{nx}", frame_index)
 
     u_exact, v_exact, p_exact = exact_fields(mesh, END_TIME)
     errors = (l2_error(velocity.u.to_numpy(), u_exact),
@@ -140,15 +162,6 @@ def run_level(nx, dt):
     return errors, mesh, velocity, pressure
 
 
-def write_result(mesh, velocity, pressure, nx):
-    output_dir = Path(__file__).resolve().parent / "output" / "taylor_green"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"taylor_green_{nx}.vti"
-    fvm.write_vti(str(output_path), mesh,
-                  {"pressure": pressure}, {"velocity": velocity})
-    print(f"Wrote {output_path}")
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--full", action="store_true",
@@ -156,15 +169,22 @@ def main():
     parser.add_argument("--test", action="store_true",
                         help="assert the convergence checks and exit "
                              "non-zero on failure")
+    parser.add_argument("--frames-every", type=int, default=50,
+                        help="write a VTK frame every K steps on the first "
+                             "grid level (0 disables)")
     args = parser.parse_args()
 
+    frame_every = None if args.test else (args.frames_every or None)
     levels = LEVELS if args.full else LEVELS[:2]
-    results = [run_level(nx, dt) for nx, dt in levels]
+    results = [run_level(nx, dt, frame_every=frame_every if i == 0 else None)
+               for i, (nx, dt) in enumerate(levels)]
     errors = [result[0] for result in results]
 
     if not args.test:
-        errors_0, mesh, velocity, pressure = results[0]
-        write_result(mesh, velocity, pressure, levels[0][0])
+        if frame_every is None:
+            errors_0, mesh, velocity, pressure = results[0]
+            write_results(mesh, velocity, pressure, "taylor_green",
+                          f"taylor_green_{levels[0][0]}.vti")
         return
 
     order = math.log(errors[0][0] / errors[1][0]) / math.log(2.0)
@@ -179,9 +199,7 @@ def main():
         # comment and docs/numerical.md for the discriminator evidence.
         order2 = math.log(errors[1][0] / errors[2][0]) / math.log(2.0)
         detail += f", order(128->256)={order2:.3f} (reported, unasserted)"
-    print(f"application test: {'PASS' if ok else 'FAIL'} ({detail})")
-    if not ok:
-        sys.exit(1)
+    report_test(ok, f"({detail})")
 
 
 if __name__ == "__main__":

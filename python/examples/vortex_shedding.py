@@ -26,15 +26,9 @@ Run:  python python/examples/vortex_shedding.py
 
 import argparse
 import math
-import os
-import sys
-import tempfile
-from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import _path  # noqa: F401,E402
-
-import pyfvm as fvm
+from _common import (fvm, frame_interval, read_su2_text, report_test,
+                     write_frame, write_results)
 
 from mesh_su2 import cylinder_rectangle_grid
 from cylinder import (CYLINDER_RADIUS, DOMAIN, GRIDS, SQUARE_HALF,
@@ -61,18 +55,19 @@ PERIODIC_WINDOW = 0.6  # last 60% of the samples form the measurement window
 
 def make_mesh(grid):
     n_theta, n_r, n_w, n_e, n_n, n_s = GRIDS[grid]
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "cylinder.su2")
-        with open(path, "w", encoding="ascii") as fh:
-            fh.write(cylinder_rectangle_grid(
-                n_theta=n_theta, n_r=n_r, radius=CYLINDER_RADIUS,
-                half=SQUARE_HALF, domain=DOMAIN,
-                n_w=n_w, n_e=n_e, n_n=n_n, n_s=n_s))
-        return fvm.read_su2(path)
+    return read_su2_text(cylinder_rectangle_grid(
+        n_theta=n_theta, n_r=n_r, radius=CYLINDER_RADIUS,
+        half=SQUARE_HALF, domain=DOMAIN,
+        n_w=n_w, n_e=n_e, n_n=n_n, n_s=n_s), name="cylinder.su2")
 
 
-def run_case(re, grid, dt, end_time, sample):
-    """Integrate the shedding flow and return the coefficient history."""
+def run_case(re, grid, dt, end_time, sample, frame_every=None):
+    """Integrate the shedding flow and return the coefficient history.
+
+    With `frame_every` set, frames are written every `frame_interval`
+    steps (stretched so long runs stay within ~50 frames) plus one
+    final frame.
+    """
     mesh = make_mesh(grid)
     rho = 1.0
     mu = rho / re
@@ -103,16 +98,38 @@ def run_case(re, grid, dt, end_time, sample):
     cfg.pressure_solver_config.max_iterations = 20000
 
     steps = round(end_time / dt)
+    interval = frame_interval(steps) if frame_every is not None else None
     history = []
+    frame_index = 0
+    last_frame_step = None
+    if interval is not None:
+        # Frame 0 is the t = 0 initial field (steps counted from 0).
+        print(f"frame {frame_index}: t = {0.0:.2f}", flush=True)
+        write_frame(mesh, velocity, pressure, "vortex", "vortex_shedding",
+                    frame_index)
+        frame_index += 1
+        last_frame_step = 0
     for step in range(steps):
         fvm.solve_piso(mesh, rho, mu, bc_u, bc_v, bc_p, cfg,
                        velocity, pressure, flux)
+        if interval is not None and (step + 1) % interval == 0:
+            print(f"frame {frame_index}: t = {(step + 1) * dt:.2f}",
+                  flush=True)
+            write_frame(mesh, velocity, pressure, "vortex",
+                        "vortex_shedding", frame_index)
+            frame_index += 1
+            last_frame_step = step + 1
         if (step + 1) % sample == 0:
             cd, cl = force_coefficients(mesh, velocity, pressure,
                                         rho=rho, mu=mu)
             history.append(((step + 1) * dt, cd, cl))
             print(f"t={(step + 1) * dt:7.2f}  Cd={cd:+.6f}  Cl={cl:+.6f}",
                   flush=True)
+    # The series always ends at the final state; skip if already written.
+    if interval is not None and last_frame_step != steps:
+        print(f"frame {frame_index}: t = {steps * dt:.2f}", flush=True)
+        write_frame(mesh, velocity, pressure, "vortex", "vortex_shedding",
+                    frame_index)
     return mesh, velocity, pressure, history
 
 
@@ -141,15 +158,6 @@ def periodic_metrics(history):
     return strouhal, cd_mean, cl_amplitude, len(peaks)
 
 
-def write_result(mesh, velocity, pressure, grid):
-    output_dir = Path(__file__).resolve().parent / "output" / "vortex"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"vortex_re100_{grid}.vtu"
-    fvm.write_vtu(str(output_path), mesh,
-                  {"pressure": pressure}, {"velocity": velocity})
-    print(f"Wrote {output_path}")
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--grid", choices=sorted(GRIDS), default="coarse")
@@ -160,15 +168,21 @@ def main():
     parser.add_argument("--test", action="store_true",
                         help="assert the shedding checks and exit non-zero "
                              "on failure")
+    parser.add_argument("--frames-every", type=int, default=50,
+                        help="write a VTK frame every K steps (0 disables)")
     args = parser.parse_args()
 
+    frame_every = None if args.test else (args.frames_every or None)
     mesh, velocity, pressure, history = run_case(
-        args.re, args.grid, args.dt, args.end_time, args.sample)
+        args.re, args.grid, args.dt, args.end_time, args.sample,
+        frame_every=frame_every)
     strouhal, cd_mean, cl_amplitude, peaks = periodic_metrics(history)
     print(f"grid={args.grid} dt={args.dt} T={args.end_time} peaks={peaks}: "
           f"St={strouhal:.4f} Cd_mean={cd_mean:.4f} "
           f"Cl_amp={cl_amplitude:.4f}")
-    write_result(mesh, velocity, pressure, args.grid)
+    if frame_every is None:
+        write_results(mesh, velocity, pressure, "vortex",
+                      f"vortex_re100_{args.grid}.vtu")
 
     if args.test:
         checks = {
@@ -185,9 +199,7 @@ def main():
                  ("Cl_amp", cl_amplitude, CL_AMPLITUDE_BAND)),
                 checks.values()))
         ok = all(checks.values())
-        print(f"application test: {'PASS' if ok else 'FAIL'} ({detail})")
-        if not ok:
-            sys.exit(1)
+        report_test(ok, f"({detail})")
 
 
 if __name__ == "__main__":

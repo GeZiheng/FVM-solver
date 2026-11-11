@@ -12,15 +12,9 @@ Run:  python python/examples/cylinder.py
 
 import argparse
 import math
-import os
-import sys
-import tempfile
-from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import _path  # noqa: F401,E402
-
-import pyfvm as fvm
+from _common import (fvm, print_simple_status, read_su2_text, report_test,
+                     write_results)
 
 from mesh_su2 import cylinder_rectangle_grid
 
@@ -117,10 +111,7 @@ def solve_case(mesh, re):
 
     result = fvm.solve_simple(mesh, rho, mu, bc_u, bc_v, bc_p, cfg,
                               velocity, pressure, flux)
-    state = "converged" if result.converged else "NOT converged"
-    print(f"SIMPLE (Re = {re}, cells = {mesh.cell_count()}): {state} in "
-          f"{result.iterations} iterations, continuity residual "
-          f"{result.history[-1].continuity:.3e}")
+    print_simple_status(f"Re = {re}, cells = {mesh.cell_count()}", result)
     if not result.converged:
         raise RuntimeError(f"SIMPLE did not converge at Re = {re}")
     return velocity, pressure, result
@@ -181,26 +172,13 @@ def wake_length(mesh, velocity, tolerance=WAKE_TOLERANCE):
     return furthest_x - CYLINDER_RADIUS
 
 
-def write_result(mesh, velocity, pressure, re, grid):
-    output_dir = Path(__file__).resolve().parent / "output" / "cylinder"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"cylinder_re{re}_{grid}.vtu"
-    fvm.write_vtu(str(output_path), mesh,
-                  {"pressure": pressure}, {"velocity": velocity})
-    print(f"Wrote {output_path}")
-
-
 def run_case(re, grid):
     """Generate, solve, post-process, and write one case."""
     n_theta, n_r, n_w, n_e, n_n, n_s = GRIDS[grid]
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "cylinder.su2")
-        with open(path, "w", encoding="ascii") as fh:
-            fh.write(cylinder_rectangle_grid(
-                n_theta=n_theta, n_r=n_r, radius=CYLINDER_RADIUS,
-                half=SQUARE_HALF, domain=DOMAIN,
-                n_w=n_w, n_e=n_e, n_n=n_n, n_s=n_s))
-        mesh = fvm.read_su2(path)
+    mesh = read_su2_text(cylinder_rectangle_grid(
+        n_theta=n_theta, n_r=n_r, radius=CYLINDER_RADIUS,
+        half=SQUARE_HALF, domain=DOMAIN,
+        n_w=n_w, n_e=n_e, n_n=n_n, n_s=n_s), name="cylinder.su2")
 
     velocity, pressure, result = solve_case(mesh, re)
     cd, cl = force_coefficients(mesh, velocity, pressure,
@@ -211,7 +189,8 @@ def run_case(re, grid):
           f"cells={mesh.cell_count()} iterations={result.iterations} "
           f"converged={result.converged} Cd={cd:.6f} Cl={cl:+.6f} "
           f"L_w/D={wake_text}")
-    write_result(mesh, velocity, pressure, re, grid)
+    write_results(mesh, velocity, pressure, "cylinder",
+                  f"cylinder_re{re}_{grid}.vtu")
     return cd, cl, wake
 
 
@@ -239,9 +218,7 @@ def main():
         else:
             ok = False
             detail = "no thresholds for this Reynolds number"
-        print(f"application test: {'PASS' if ok else 'FAIL'} ({detail})")
-        if not ok:
-            sys.exit(1)
+        report_test(ok, f"({detail})")
 
 
 if __name__ == "__main__":

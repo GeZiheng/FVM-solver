@@ -119,13 +119,13 @@ python python/examples/<name>.py
 
 ## 示例
 
-基础算例与解析基准算例运行后 vti 写到 `python/examples/output/<算例名>/`，与当前工作目录无关：
+基础算例与解析基准算例运行后 vti/vtu 写到 `python/examples/output/<算例名>/`，与当前工作目录无关；瞬态算例（Couette、Stokes、Taylor–Green、涡街）在非测试模式另输出多帧序列 `<stem>_0000.<ext>…`（ParaView 按文件序列打开即得流场演化动画），默认约每 50 步一帧、长算例自动拉伸封顶 ~50 帧（`--frames-every K`，0 关闭）：
 
 - **convection_diffusion.py**：单位方域稳态对流-扩散。无散度回流速度场（流函数 ψ = sin(πx)·sin(πy) 派生），γ = 0.01（Pe ~ 100），西墙 T=1、东墙 T=0、南北绝热。演示 `solve_transport` 与 numpy 填场。
 - **cavity.py**：顶盖驱动方腔流 `--re {100,400,1000}`（默认 100；Re≤400 用 64×64，Re=1000 用 128×128，SIMPLE + Central）；对照 Ghia et al. (1982) 中心线基准并报告 L∞/L2，`--test` 执行精度断言。输出 `cavity_re<Re>.vti` 可在 ParaView 看主涡与角隅二次涡。
-- **impulsive_couette.py**：瞬态 Couette 启动（PISO，ν=0.1，dt=0.005 × 100 步到 t=0.5），与精确 Fourier 级数解对比打印误差。
+- **impulsive_couette.py**：瞬态 Couette 启动（PISO，ν=0.1，dt=0.005 × 100 步到 t=0.5），与精确 Fourier 级数解对比打印误差；逐步调用模式下输出 3 帧序列（t=0/0.25/0.5）展示边界层成长。
 - **poiseuille.py**：平面 Poiseuille 通道（L=10/H=1、Re=20、320×32，SIMPLE + Central；入口速度 Dirichlet、出口压力 Dirichlet 0），检验充分发展抛物线剖面与压降斜率。
-- **stokes_oscillating.py**：Stokes 第二问题振荡平板（顶板速度 `cos(ωt)`，PISO Euler），在周期稳态后对照半无限域解析剖面；附带逐步调用与长调用等价性检查。
+- **stokes_oscillating.py**：Stokes 第二问题振荡平板（顶板速度 `cos(ωt)`，PISO Euler），在周期稳态后对照半无限域解析剖面；附带逐步调用与长调用等价性检查。非测试模式输出帧序列（默认每 50 步）。
 - **piso_nonortho_channel.py**：4.3c 梯形收缩通道单步 PISO 算例，用于复现非正交/skewness 修正对照；`--no-corrections` 关闭修正，`--correctors N` 调整 corrector 数。
 
 ## 依赖

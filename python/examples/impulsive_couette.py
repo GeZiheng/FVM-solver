@@ -7,15 +7,9 @@ t = 0. Compares against the exact Fourier-series solution at t = 0.5.
 Run:  python python/examples/impulsive_couette.py
 """
 
-import os
-import sys
-from pathlib import Path
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import _path  # noqa: F401,E402
-
 import numpy as np
-import pyfvm as fvm
+
+from _common import fvm, frame_interval, write_frame
 
 
 def exact_couette(y, t, nu):
@@ -49,7 +43,7 @@ def main():
 
     cfg = fvm.PisoConfig()
     cfg.dt = 0.005
-    cfg.n_steps = 100  # t = 0.5
+    cfg.n_steps = 1  # per-step calls; the march below writes frames
     cfg.n_correctors = 2
     cfg.time_scheme = fvm.TimeScheme.Euler
     cfg.solver_config.tolerance = 1e-9
@@ -57,25 +51,40 @@ def main():
     cfg.pressure_solver_config.tolerance = 1e-9
     cfg.pressure_solver_config.max_iterations = 20000
 
-    result = fvm.solve_piso(mesh, rho, mu, bc_u, bc_v, bc_p, cfg,
-                            velocity, pressure, flux)
+    steps = 100  # t = 0.5
+    interval = frame_interval(steps)
+    frame_index = 0
+    last_frame_step = None
+    # Frame 0 is the t = 0 initial field (steps counted from 0).
+    print(f"frame {frame_index}: t = {0.0:.3f}")
+    write_frame(mesh, velocity, pressure, "impulsive_couette",
+                "impulsive_couette", frame_index)
+    frame_index += 1
+    last_frame_step = 0
+    for step in range(steps):
+        result = fvm.solve_piso(mesh, rho, mu, bc_u, bc_v, bc_p, cfg,
+                                velocity, pressure, flux)
+        if (step + 1) % interval == 0:
+            print(f"frame {frame_index}: t = {(step + 1) * cfg.dt:.3f}")
+            write_frame(mesh, velocity, pressure, "impulsive_couette",
+                        "impulsive_couette", frame_index)
+            frame_index += 1
+            last_frame_step = step + 1
+    # The series always ends at the final state; skip if already written.
+    if last_frame_step != steps:
+        print(f"frame {frame_index}: t = {steps * cfg.dt:.3f}")
+        write_frame(mesh, velocity, pressure, "impulsive_couette",
+                    "impulsive_couette", frame_index)
 
-    t_end = cfg.dt * cfg.n_steps
+    t_end = cfg.dt * steps
     y = (np.arange(n) + 0.5) * mesh.dy()
     u_exact = exact_couette(y, t_end, mu / rho)
     u_num = velocity.u.to_numpy().reshape(n, n)  # row j = profile at y_j
     max_err = np.abs(u_num - u_exact[:, None]).max()
 
-    print(f"PISO: {result.steps} steps to t = {t_end}, "
+    print(f"PISO: {steps} steps to t = {t_end}, "
           f"max |u - u_exact| = {max_err:.4f}")
     print(f"final continuity residual: {result.history[-1].continuity:.3e}")
-
-    output_dir = Path(__file__).resolve().parent / "output" / "impulsive_couette"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "couette.vti"
-    fvm.write_vti(str(output_path), mesh,
-                  {"pressure": pressure}, {"velocity": velocity})
-    print(f"Wrote {output_path}")
 
 
 if __name__ == "__main__":

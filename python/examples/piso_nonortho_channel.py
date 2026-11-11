@@ -10,16 +10,10 @@ Run:  python python/examples/piso_nonortho_channel.py [--correctors N] [--no-cor
 """
 
 import argparse
-import os
-import sys
-import tempfile
-from pathlib import Path
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import _path  # noqa: F401,E402
 
 import numpy as np
-import pyfvm as fvm
+
+from _common import (fvm, read_su2_text, write_results)
 
 # Bilinear map of the unit square onto the trapezoid: the top edge is
 # narrowed to [0.3, 0.7], so the side walls (and with them the x-faces)
@@ -71,11 +65,7 @@ def main():
     parser.add_argument("--no-corrections", action="store_true")
     args = parser.parse_args()
 
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "trapezoid.su2")
-        with open(path, "w", encoding="ascii") as fh:
-            fh.write(su2_text())
-        mesh = fvm.read_su2(path)
+    mesh = read_su2_text(su2_text(), name="trapezoid.su2")
 
     # Patch order follows the marker order: 0 south, 1 east, 2 north, 3 west.
     velocity = fvm.VectorField(mesh, "velocity")
@@ -126,12 +116,8 @@ def main():
     print(f"continuity = {result.history[-1].continuity:.3e}")
 
     suffix = "off" if args.no_corrections else "on"
-    output_dir = Path(__file__).resolve().parent / "output" / "nonortho_channel"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"nonortho_channel_nc{cfg.n_correctors}_{suffix}.vtu"
-    fvm.write_vtu(str(output_path), mesh,
-                  {"pressure": pressure}, {"velocity": velocity})
-    print(f"Wrote {output_path}")
+    write_results(mesh, velocity, pressure, "nonortho_channel",
+                  f"nonortho_channel_nc{cfg.n_correctors}_{suffix}.vtu")
 
 
 if __name__ == "__main__":

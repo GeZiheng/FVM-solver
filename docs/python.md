@@ -8,7 +8,7 @@
 python/
   pyfvm.cpp              — 全部绑定（单文件；Python 侧命名 snake_case）
   _path.py               — sys.path 引导：按当前解释器标签扫描 build/*/python 定位 pyfvm 扩展
-  examples/              — 算例脚本（见下）
+  examples/              — 算例脚本 + 共享 helper _common.py（见下）
   tests/test_pyfvm.py    — 绑定契约测试（unittest；ctest 条目 pyfvm_tests）
   overlay-ports/python3/ — 空 vcpkg overlay 端口（机制见下）
 ```
@@ -24,7 +24,7 @@ python/
 - **vcpkg feature**：`pybind11` 声明在 `vcpkg.json` 的 `"python"` feature 里；`-DFVM_BUILD_PYTHON=ON` 会在 `project()` 之前自动设置 `VCPKG_MANIFEST_FEATURES=python`，默认构建不拉取 pybind11。
 - **空 overlay 端口**：pybind11 端口声明依赖 vcpkg 的 `python3` 端口（会源码构建 CPython 3.12，但我们用不上）。`python/overlay-ports/python3` 是一个空端口，满足依赖图但不装任何东西；扩展模块始终对着**系统 Python** 编译。
 - **解释器选择**：扩展模块与 Python 版本绑定（cp314 的 `.pyd` 不能在 3.12 上 import）。configure 优先用 `-DPython_EXECUTABLE=...`，否则取 PATH 上第一个 `python3.14`/`python3`/`python`。pybind11 ≥ 3.0 才支持 Python 3.14（当前 vcpkg 端口 3.0.1）。
-- **产物**：`build/<dir>/python/pyfvm*.pyd`（Linux 为 `.so`）；`_path.py` 优先采用环境变量 `FVM_PYFVM_DIR`，该目录必须已含当前解释器标签的扩展，否则抛 `RuntimeError`；未设置时扫描 `build/*/python`，只接受当前解释器标签（Windows `cp3XX`、Linux `cpython-3XX`）的扩展，并在多个匹配目录间取其中文件 mtime 最新者。自动定位失败时抛 `RuntimeError`，错误信息列出解释器版本、标签模式和已扫描目录。示例和测试直接 `import _path` 后即可 `import pyfvm`。多构建树并存时手工复跑测试须钉定该环境变量，见 `docs/tests.md` 已知坑。
+- **产物**：`build/<dir>/python/pyfvm*.pyd`（Linux 为 `.so`）；`_path.py` 优先采用环境变量 `FVM_PYFVM_DIR`，该目录必须已含当前解释器标签的扩展，否则抛 `RuntimeError`；未设置时扫描 `build/*/python`，只接受当前平台的原生扩展后缀（Windows `.pyd`、Linux `.so`，另一平台产物永不参选——否则共享 build 树时 WSL 的 `.so` 会在 Windows 上遮蔽 `.pyd`）且匹配当前解释器标签（Windows `cp3XX`、Linux `cpython-3XX`）的扩展，并在多个匹配目录间取其中文件 mtime 最新者。自动定位失败时抛 `RuntimeError`，错误信息列出解释器版本、标签模式和已扫描目录。绑定测试直接 `import _path` 后即可 `import pyfvm`；算例脚本经 `examples/_common.py` 引导，由它内部完成 `import _path`。多构建树并存时手工复跑测试须钉定该环境变量，见 `docs/tests.md` 已知坑。
 
 ## API 一览
 
@@ -73,17 +73,17 @@ io：
 
 - `cavity.py` 支持 `--re {100,400,1000,3200}`，用 Ghia et al. (1982) 中心线数据做 L∞/L2 对照，`--test` 启用精度断言。`--re 3200`（Phase 5.3-1）为 256×256 大算例：外容差放宽至 2e-5、迭代上限 3000、本机冷态约 80 min，Ghia 3200 u 表的 y=0.4531 文献伪值按勘误先例修正并从度量剔除（见 `docs/numerical.md`）。`--backend/--method` 与 `--p-backend/--p-method` 分别指定动量/压力线性求解器（AMGCL 性能 showcase 用，对照数据记录在 `docs/numerical.md`）。
 - `poiseuille.py` 检验平面 Poiseuille 的充分发展抛物线剖面与压降斜率。
-- `stokes_oscillating.py` 检验 Stokes 第二问题的周期稳态解。
-- `mesh_su2.py` 是 Phase B 算例共享的纯 Python SU2 文本生成 helper，提供 `l_shaped_bfs_grid(n)`、`cylinder_rectangle_grid(...)`（O-4 多块：极坐标核心 + 8 个张量块，块间共享坐标池逐点共形）与 `sheared_channel(n, shear)`；生成文本由算例临时落盘后交给 `read_su2`。
+- `stokes_oscillating.py` 检验 Stokes 第二问题的周期稳态解；非测试模式全程每 50 步写一帧（`--frames-every K`，0 关闭），序列覆盖起振到周期稳态。
+- `mesh_su2.py` 是 Phase B 算例共享的纯 Python SU2 文本生成 helper，提供 `l_shaped_bfs_grid(n)`、`cylinder_rectangle_grid(...)`（O-4 多块：极坐标核心 + 8 个张量块，块间共享坐标池逐点共形）与 `sheared_channel(n, shear)`；生成文本经 `examples/_common.py` 的 `read_su2_text` 临时落盘后交给 `read_su2`。
 - `backward_facing_step.py` 求解扩张比 2、入口段 10h 的后向台阶：Re=50/100（均匀入口，Upwind，历史校准）与 5.3-3 的 Re=389（逐面抛物线入口 `u=6s(1−s)`、Central；**Armaly 1983 约定** `Re=U_bulk·2h/ν` 即 `μ=2/389`，实测 x_r/h=8.10 与 2D 文献簇 8.2–8.6 / 实验 7.9 对齐），断言再附长度的文献量级带与 Re 趋势，网格研究数据记录在脚本注释中。
 - `cylinder.py`（5.3-2 矩形域版）求解 `[-10,25]×[-10,10]` 圆柱绕流（Re=20/40，稳态 SIMPLE + Central，O-4 多块网格，`--grid {coarse,medium,fine}` 三档；fine 只加密外围——Re=20 下核心加密有稳定性边界，见 `docs/numerical.md` 圆柱节），逐面积分 Cd、测量尾迹长度并断言文献阈值带；`Cl` 仅作对称性诊断打印（校准值 ~±2e-4），不断言。
 - `skewed_poiseuille.py` 是 5.1 逐面 Dirichlet 的定量示例（Phase 5.3 #4 提前完成）：等截面斜切平行四边形通道（端面倾角 atan(0.3)），两端逐面抛物线速度 `u=4y(1-y)`，压力全 Neumann 解析值 + 参考单元定规（刻意避开斜面 Dirichlet-p 的 `Cb` 无补全偏移，见 `docs/numerical.md`），`nNonOrthogonalCorrectors=1`。断言：入口通量与离散解析和精确相等、下游剖面 vs 抛物线 O(h) 带（n=16 校准 1.412e-2，带 3e-2；n=32 实测 6.784e-3，比值 2.1）。
-- `taylor_green.py`（5.3-5）是精确边界瞬态算例：`[0,π]²` 衰减单模 TG，四边逐面 Dirichlet 精确 u/v/p（t^{n+1} 时刻），逐步 PISO + CN；固定小 dt（0.00125）的 64²→128² 空间收敛研究断言二阶（实测比值 4.96），`--full` 附加 256² 点（128→256 停滞、只报告不断言）；时间方向非单调（dt²/h 类混合项），证据矩阵见 `docs/numerical.md` Taylor–Green 节。
-- `vortex_shedding.py`（5.3-6）是 Re=100 卡门涡街：复用 cylinder.py 网格/BC/力系数，确定性反对称种子，后 60% 时段窗口测 St/Cd_mean/Cl 振幅；CI 缩短版（coarse、dt=0.01、T=250，约 11 min）断言三带，medium 完整研究由脚本参数承担。
+- `taylor_green.py`（5.3-5）是精确边界瞬态算例：`[0,π]²` 衰减单模 TG，四边逐面 Dirichlet 精确 u/v/p（t^{n+1} 时刻），逐步 PISO + CN；固定小 dt（0.00125）的 64²→128² 空间收敛研究断言二阶（实测比值 4.96），`--full` 附加 256² 点（128→256 停滞、只报告不断言）；时间方向非单调（dt²/h 类混合项），证据矩阵见 `docs/numerical.md` Taylor–Green 节。非测试模式仅在 64² 档输出帧序列（`--frames-every`，默认 50）。
+- `vortex_shedding.py`（5.3-6）是 Re=100 卡门涡街：复用 cylinder.py 网格/BC/力系数，确定性反对称种子，后 60% 时段窗口测 St/Cd_mean/Cl 振幅；CI 缩短版（coarse、dt=0.01、T=250，约 11 min）断言三带，medium 完整研究由脚本参数承担；非测试模式输出帧序列（`--frames-every`，默认 50，长算例间隔自动拉伸、总量 ≤~50 帧）。
 
 `python/examples/piso_nonortho_channel.py` 是 4.3c 斜交算例：由 bilinear 映射生成 $16\times16$ 梯形收缩通道 SU2 网格（顶边收窄到 $[0.3,0.7]$），运行单步压力驱动 PISO，打印 $p(0,0)$、入口单位长度通量与连续性误差。默认开启修正并使用两个 PISO corrector；`--no-corrections` 关闭三项修正，`--correctors N` 覆盖 corrector 数。该脚本用于复现 `docs/numerical.md` “斜交网格对照（未决）”中的算例设置。
 
-时间相关但空间均匀的壁面值，标准用法是在每个时间步先更新 `BoundaryField.set(...)`，再把 `PisoConfig.n_steps` 置为 1 并调用 `solve_piso`（Stokes 振荡平板示例）。逐步调用与一次长调用语义等价：Couette 100 步两种调用方式的终态最大差为 `7.7e-12`（判据 `1e-9`）。
+时间相关但空间均匀的壁面值，标准用法是在每个时间步先更新 `BoundaryField.set(...)`，再把 `PisoConfig.n_steps` 置为 1 并调用 `solve_piso`（Stokes 振荡平板示例）。逐步调用与一次长调用语义等价：Couette 100 步两种调用方式的终态最大差为 `7.7e-12`（判据 `1e-9`）。`impulsive_couette.py` 即采用逐步调用模式，并按 `frame_interval(100)`=50 输出 3 帧序列（t=0/0.25/0.5）。
 
 ## 测试分工
 
@@ -92,6 +92,7 @@ io：
 新算例按以下约定加入：
 
 - **脚本模式**：`argparse` 参数化（如 `--re`、`--backend`），`--test` 开关启用精度断言；不带 `--test` 时只打印结果供人工检查。精度阈值锁定在脚本内。
+- **共享胶水**：sys.path/`_path` 引导、VTK 输出（`write_results`）、SU2 临时落盘（`read_su2_text`）、SIMPLE 收敛状态行（`print_simple_status`）与 `--test` PASS/FAIL 尾部（`report_test`）一律用 `examples/_common.py`，不在脚本内重写。瞬态多帧输出用 `write_frame`（写 `stem_{index:04d}.<ext>`，ParaView 按文件序列识别）+ `frame_interval`（默认每 50 步一帧；步数已知的算例间隔自动拉伸、序列总量 ≤~50 帧），序列含 t=0 初值帧与终态帧（末步去重），`--frames-every K` 控制（0 关闭），`--test` 模式不写帧。
 - **阈值校准**：余量一般不小于 2×（现有例外与各条目的校准值见下文）；网格研究数据记录在脚本注释或 `docs/numerical.md`。
 - **注册**：在根 `CMakeLists.txt` 用 `fvm_add_application_test(name script --test)` 添加，label/TIMEOUT 机制见 `docs/tests.md`；是否进 `application_default` 按"每物理家族/代码路径一条"取舍。
 - **网格**：非结构算例复用 `examples/mesh_su2.py` 的 SU2 文本生成 helper，不自建重复生成逻辑。
