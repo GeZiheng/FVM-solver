@@ -17,6 +17,9 @@ __pycache__/
 *.vti
 *.vtu
 
+# ROM snapshot datasets written by the *_rom.py drivers
+*.npz
+
 # agent notes and plans
 .agents/notes/
 .agents/plans/

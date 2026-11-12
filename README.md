@@ -57,6 +57,8 @@ python/                  — pyfvm bindings (optional, -DFVM_BUILD_PYTHON=ON): p
                            cavity.py, impulsive_couette.py, mesh_su2.py,
                            backward_facing_step.py, cylinder.py),
                            tests/test_pyfvm.py (binding-contract tests = ctest entry pyfvm_tests),
+                           rom/ (offline ROM pipeline: snapshot npz contract v1, POD, exact DMD;
+                           numpy-only core, no pyfvm import),
                            overlay-ports/python3 (empty vcpkg port: link against system Python)
 ports/                   — vcpkg overlay port for amgcl (header-only, locked 1.5.0 +
                            SHA512, depends only on eigen3; linked when FVM_BUILD_AMGCL=ON)
@@ -166,6 +168,16 @@ Phase 1–3 为路线图之前的基础：Phase 1 项目骨架（`Mesh`/`Field` 
 
 Deferred/rejected：`examples/` per-case 可执行文件、JSON case 配置、按模块拆分 CMakeLists/tests/docs（条件同前）。meshgen MCP server 仍是条件触发候选（`mesh_su2` 成长为小型网格库且出现跨会话需求时再做薄封装）。修正限制器与边界显式补全按 [`docs/numerical.md`](docs/numerical.md) 登记的触发条件执行。
 
+### Phase 6（2026-11-12 商定）：ROM
+
+按 6.1 → 6.2 → 6.3 顺序执行（6.4 可选）。执行状态见 [`AGENTS.md`](AGENTS.md) Next Phase：
+
+- ✅ **6.1 ROM 快照导出 + POD/DMD 离线管线** — `python/rom/` 包（`SnapshotCollector`/版本化 npz 快照契约 v1、均值中心化 POD、exact DMD、可选绘图；核心仅 numpy，不 import pyfvm）+ `test_rom.py` 7 用例（自动进 `pyfvm_tests`，TG 冒烟端到端）+ 探索驱动脚本 `taylor_green_rom.py`/`vortex_shedding_rom.py`（不注册 application 层）；C++ 内核与 CMake 零改动。DMD St 只诊断不断言；契约与算法细节见 [`docs/rom.md`](docs/rom.md)，脚本用法见 [`docs/python.md`](docs/python.md)。
+- **6.2 pyfvm 绑定 A/b → 侵入式 Galerkin 离线投影**（矩阵以 COO + shape 返回，避免 scipy 硬依赖）。
+- **6.3 在线 ROM 积分（RK4）与对照 FOM 轨迹验证**。
+- **6.4（可选/暂缓）**：压力重构、Re 参数化 ROM。
+- **条件触发候选**（Phase 6 后续工作，出现稳定跨会话需求时再立项）：**meshgen MCP**（`mesh_su2` 薄封装，条件同上文 Phase 5 登记项）；**ROM 分析 MCP**（`python/rom/` 的 POD/DMD/快照分析工具封装；含长运行的 `generate_snapshots` 类工具须按 `run_case` 的后台运行/审批语义设计；6.2 开工时一并评估）。
+
 ## Agent 开发环境（harness）
 
 本仓库的 agent harness 由三个项目级 MCP server 组成：`build-and-test`、`build-and-test-wsl` 与 `openfoam`。三者都运行在 agent 沙箱之外，这是 WSL 与 vcpkg 操作无需逐次提权就能工作的原因。`build-and-test-wsl` 用 WSL 的 `python3` 启动**同一份** `build_and_test_server.py`（`wsl.exe -e bash -lc "exec python3 .agents/mcp/build_and_test_server.py"`），用于在本地复现 Linux 构建路径（如 CI 才会暴露的 `-fPIC` 链接问题）。使用时机、工具参数与比较纪律见 [`AGENTS.md`](AGENTS.md) 的 MCP Servers 小节。
@@ -247,4 +259,5 @@ build-and-test 的分层与异步路径（`run=unit` 同步、`run=application` 
 - [`docs/numerical.md`](docs/numerical.md) — numerical 模块：算子、SIMPLE/PISO 设计与 OpenFOAM cross-check 结论。
 - [`docs/python.md`](docs/python.md) — `pyfvm` bindings：机制、API、约定与测试分工。
 - [`docs/tests.md`](docs/tests.md) — 测试层：ctest 三层架构、注册点、分层验证粒度与已知坑。
+- [`docs/rom.md`](docs/rom.md) — ROM：快照契约 v1、POD/exact DMD 算法、已验证结论与 Phase 6 后续批次。
 - 代码约定与 agent 工作流见 [`AGENTS.md`](AGENTS.md)。

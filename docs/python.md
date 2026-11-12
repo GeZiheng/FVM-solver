@@ -9,7 +9,11 @@ python/
   pyfvm.cpp              — 全部绑定（单文件；Python 侧命名 snake_case）
   _path.py               — sys.path 引导：按当前解释器标签扫描 build/*/python 定位 pyfvm 扩展
   examples/              — 算例脚本 + 共享 helper _common.py（见下）
+  rom/                   — ROM 离线管线（SnapshotCollector/npz 契约 v1、POD、exact DMD、
+                           可选绘图 rom/plot.py；核心仅 numpy，不 import pyfvm；
+                           契约细节与算法见 docs/rom.md）
   tests/test_pyfvm.py    — 绑定契约测试（unittest；ctest 条目 pyfvm_tests）
+  tests/test_rom.py      — ROM 管线测试（unittest；随 pyfvm_tests 的 discover 自动收编）
   overlay-ports/python3/ — 空 vcpkg overlay 端口（机制见下）
 ```
 
@@ -81,6 +85,9 @@ io：
 - `taylor_green.py`（5.3-5）是精确边界瞬态算例：`[0,π]²` 衰减单模 TG，四边逐面 Dirichlet 精确 u/v/p（t^{n+1} 时刻），逐步 PISO + CN；固定小 dt（0.00125）的 64²→128² 空间收敛研究断言二阶（实测比值 4.96），`--full` 附加 256² 点（128→256 停滞、只报告不断言）；时间方向非单调（dt²/h 类混合项），证据矩阵见 `docs/numerical.md` Taylor–Green 节。非测试模式仅在 64² 档输出帧序列（`--frames-every`，默认 50）。
 - `vortex_shedding.py`（5.3-6）是 Re=100 卡门涡街：复用 cylinder.py 网格/BC/力系数，确定性反对称种子，后 60% 时段窗口测 St/Cd_mean/Cl 振幅；CI 缩短版（coarse、dt=0.01、T=250，约 11 min）断言三带，medium 完整研究由脚本参数承担；非测试模式输出帧序列（`--frames-every`，默认 50，长算例间隔自动拉伸、总量 ≤~50 帧）。
 
+- `taylor_green_rom.py`（Phase 6.1）是 TG 算例的 ROM 探索驱动：复用 `taylor_green.py` 的构造逐步采集快照（`--nx/--dt/--end-time/--snap-every`，默认 64²、dt=0.0025、T=2.0），落盘版本化 npz 到 `output/taylor_green_rom/`（契约 v1：`format_version/case/params/t/u/v/p/cx/cy`，行=快照，见 `python/rom/snapshots.py`），打印 POD 能量谱与 err(r) 表（`--ranks`）；`--modes N` 另写前 N 阶 POD 模态 + 均值场 `.vti`；`--test` 只跑机器级断言（契约成立、全秩重构误差≈0），不写 VTK/npz。
+- `vortex_shedding_rom.py`（Phase 6.1）是涡街算例的 ROM 探索驱动：复用 `vortex_shedding.py` 的网格/BC/种子构造采集快照，瞬态丢弃窗口 `--window-frac`（默认 0.6，与 St 测量窗一致；1.0 表示全时段）后做窗口 POD 谱 + exact DMD，打印 DMD 主导频率换算的 St vs 文献带 0.164–0.167——**只诊断不断言**（DMD 主导模态启发式不入 CI）；npz 落盘 `output/vortex_shedding_rom/`；`--test` 仅断言机器级不变量（契约 key、全秩 POD 重构误差≈0、DMD 谱有限）。两 ROM 脚本均**不注册** application 层（先例：`impulsive_couette`）。
+
 `python/examples/piso_nonortho_channel.py` 是 4.3c 斜交算例：由 bilinear 映射生成 $16\times16$ 梯形收缩通道 SU2 网格（顶边收窄到 $[0.3,0.7]$），运行单步压力驱动 PISO，打印 $p(0,0)$、入口单位长度通量与连续性误差。默认开启修正并使用两个 PISO corrector；`--no-corrections` 关闭三项修正，`--correctors N` 覆盖 corrector 数。该脚本用于复现 `docs/numerical.md` “斜交网格对照（未决）”中的算例设置。
 
 时间相关但空间均匀的壁面值，标准用法是在每个时间步先更新 `BoundaryField.set(...)`，再把 `PisoConfig.n_steps` 置为 1 并调用 `solve_piso`（Stokes 振荡平板示例）。逐步调用与一次长调用语义等价：Couette 100 步两种调用方式的终态最大差为 `7.7e-12`（判据 `1e-9`）。`impulsive_couette.py` 即采用逐步调用模式，并按 `frame_interval(100)`=50 输出 3 帧序列（t=0/0.25/0.5）。
@@ -101,5 +108,7 @@ io：
 ### 现有条目
 
 `python/tests/test_pyfvm.py` 是**绑定契约测试**：numpy 零拷贝与索引顺序、网格几何、BC 默认值与非法参数、纯扩散线性精确解（`solve_transport` 全通路）、SIMPLE/PISO 粗网格冒烟、`write_vti` 冒烟。
+
+`python/tests/test_rom.py` 是 **ROM 管线测试**（Phase 6.1，7 个用例，分三层语义）：纯代数单元（低秩矩阵 POD 精确重构/中心化、双正弦 DMD 频率恢复）、契约式（npz 保存/加载往返 + 非法快照栈/未知 `format_version` 拒绝）、TG 32² 端到端冒烟（快照契约成立、全秩 POD 重构误差、能量集中阈值）。`rom` 包不 import pyfvm，代数/契约测试无需扩展构建；pyfvm 缺失时仅 TG 冒烟 `skipIf` 跳过，其余照跑。两文件同被 `python -m unittest discover -s python/tests` 收编进 `pyfvm_tests`。
 
 application 层由 13 个带 `application` 标签的 ctest 条目组成：阶段 A 的 `pyfvm_app_cavity_re100` / `_re400` / `_re1000` / `pyfvm_app_poiseuille` / `pyfvm_app_stokes_oscillating`，阶段 B 的 `pyfvm_app_backward_step` / `pyfvm_app_cylinder_re40` / `pyfvm_app_cylinder_re20`，Phase 5.3 的 `pyfvm_app_skewed_poiseuille`、`pyfvm_app_backward_step_re389`、`pyfvm_app_taylor_green`、`pyfvm_app_vortex_shedding`，以及 5.3-1 的 `pyfvm_app_cavity_re3200`（256×256，约 80 min，`TIMEOUT 10800`，**不在默认子集**；用 `ctest -L application` 运行），负责整算例精度回归；精度阈值锁定在示例脚本中。阈值校准余量一般不小于 2×，Stokes 为 1.4×。阶段 B 中，BFS 的 Re=50/100 再附长度带分别为 `[2,4]` / `[3,7]`，另要求 `x_r(100) >= 1.5*x_r(50)`；n=8/16/24 校准值为 3.841/4.374/4.569（Re=100，表观阶约 2.5、外推约 4.7），对应 20% 自洽护栏的实测余量约 4.5×；5.3-3 的 Re=389（抛物线入口，Armaly 约定 `μ=2/389`）断言 `x_r/h∈[7.2,9.0]`（n=16/24 实测 8.103/8.095，漂移 0.09%）。Taylor–Green（5.3-5）断言 64²→128² 空间阶 ∈[1.7,2.5] 与 64² 绝对 L2(u) ≤4e-4（实测阶 2.31）。涡街（5.3-6）断言 `St∈[0.145,0.185]`、`Cd_mean∈[1.20,1.55]`、`Cl_amp∈[0.25,0.45]`（coarse 实测 0.159/1.369/0.351）。圆柱（5.3-2 矩形域重校准）Re=40 断言 `Cd∈[1.45,1.72]`、`L_w/D∈[1.80,2.65]`，Re=20 断言 `Cd∈[1.95,2.30]`；medium 档实测 Cd(40)=1.606、Cd(20)=2.164（coarse→medium 漂移 0.6%/0.4%，fine 外围加密对 Cd 影响 <2e-4），完整网格研究与文献锚偏移讨论见 `docs/numerical.md` 圆柱节；单条约 65 s（TIMEOUT 600）。application 层串行全跑约 3.5–4 小时（`cavity_re3200` 约 80 min、`vortex_shedding` 约 11 min、`backward_step_re389` 约 19 min、`taylor_green` 约 2.5 min，其余更快）；持续满载后各条目可能变慢 2–15×，个别 TIMEOUT 余量薄。默认子集为 `application_default` 标签的 5 条（`cavity_re100`、`stokes_oscillating`、`backward_step`、`cylinder_re40`、`cylinder_re20`，成员在 `CMakeLists.txt` 注册处维护）：CI（GitHub Actions `CMake Build and Test` 的 linux 腿，带 `FVM_BUILD_PYTHON` 构建）每个 PR 跑单元 + 绑定 + 该子集，`workflow_dispatch` 的 `run_full` 输入改为全部 13 条；本地 MCP `build_and_test(run=application)` 同样默认该子集，`full=true` 跑整层。该层不改变 `fvm_unit_tests` 与 `pyfvm_tests` 的语义。
