@@ -2,8 +2,10 @@
 //
 // Exposes just what a Python case script needs: mesh + field classes with
 // zero-copy numpy views, boundary conditions, the SIMPLE/PISO drivers, a
-// high-level scalar-transport solver (SparseMatrix/EquationSystem stay in
-// C++), the flux helpers, and VTK output. Python names are snake_case.
+// high-level scalar-transport solver (the SparseMatrix/EquationSystem types
+// themselves stay in C++; assembled momentum systems are exported as COO
+// triplets via assemble_momentum), the flux helpers, and VTK output. Python
+// names are snake_case.
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -21,6 +23,7 @@
 #include "FluxField.h"
 #include "LinearSolver.h"
 #include "CartesianMesh.h"
+#include "Momentum.h"
 #include "Piso.h"
 #include "Simple.h"
 #include "Su2Reader.h"
@@ -57,6 +60,7 @@ using fvm::numerical::SimpleConfig;
 using fvm::numerical::SimpleResiduals;
 using fvm::numerical::SimpleResult;
 using fvm::numerical::TimeScheme;
+using fvm::numerical::TimeTerm;
 
 } // namespace fvm::python
 
@@ -267,6 +271,99 @@ PisoResult runPiso(const Mesh& mesh,
     py::gil_scoped_release release;
     return numerical::solvePiso(
         mesh, rho, mu, bcU, bcV, bcP, config, velocity, pressure, flux);
+}
+
+/// Assembled momentum system exported as COO triplets plus the RHS and
+/// the Rhie-Chow data (Phase 6.2: operator access for POD-Galerkin ROM).
+/// `rows`/`cols`/`vals` describe the finalized matrix A, `n` is its order
+/// (the cell count); `diag` is the (relaxed) a_P diagonal and
+/// `rhs_no_pressure` the RHS without the pressure-gradient source.
+struct MomentumSystem
+{
+    py::array_t<py::ssize_t> rows;
+    py::array_t<py::ssize_t> cols;
+    py::array_t<Scalar> vals;
+    py::ssize_t n = 0;
+    py::array_t<Scalar> b;
+    py::array_t<Scalar> diag;
+    py::array_t<Scalar> rhsNoPressure;
+};
+
+MomentumSystem assembleMomentum(const Mesh& mesh,
+    const FaceFluxField& flux,
+    const VectorField& velocity,
+    Scalar mu,
+    ConvectionScheme scheme,
+    const BoundaryField& bc,
+    int component,
+    const ScalarField& pressure,
+    const BoundaryField& bcP,
+    Scalar relaxation,
+    Scalar rho,
+    Scalar dt,
+    TimeScheme timeScheme,
+    const CorrectionOptions& corrections)
+{
+    requireSameMesh(mesh, velocity, "velocity");
+    requireSameMesh(mesh, pressure, "pressure");
+    requireSameMesh(mesh, flux, "flux");
+    requireSameMesh(mesh, bc, "bc");
+    requireSameMesh(mesh, bcP, "bc_p");
+    if (component != 0 && component != 1)
+    {
+        throw std::invalid_argument(
+            "component must be 0 (u) or 1 (v), got " + std::to_string(component));
+    }
+
+    TimeTerm time;
+    time.rho = rho;
+    time.dt = dt;
+    time.scheme = timeScheme;
+
+    std::vector<py::ssize_t> rowIdx;
+    std::vector<py::ssize_t> colIdx;
+    std::vector<Scalar> values;
+    Vector rhs;
+    Vector diag;
+    Vector rhsNoPressure;
+    {
+        py::gil_scoped_release release;
+        numerical::MomentumAssembly assembled = numerical::assembleMomentum(
+            mesh, flux, velocity, mu, scheme, bc, component, pressure, bcP,
+            relaxation, time, corrections);
+        assembled.system.A.finalize();
+        const auto& mat = assembled.system.A.native();
+        const auto nnz = static_cast<std::size_t>(mat.nonZeros());
+        rowIdx.reserve(nnz);
+        colIdx.reserve(nnz);
+        values.reserve(nnz);
+        for (int k = 0; k < mat.outerSize(); ++k)
+        {
+            for (Eigen::SparseMatrix<Scalar>::InnerIterator it(mat, k); it;
+                 ++it)
+            {
+                rowIdx.push_back(it.row());
+                colIdx.push_back(it.col());
+                values.push_back(it.value());
+            }
+        }
+        rhs = assembled.system.b;
+        diag = assembled.diag;
+        rhsNoPressure = assembled.rhsNoPressure;
+    }
+
+    MomentumSystem result;
+    result.rows = py::array_t<py::ssize_t>(
+        { static_cast<py::ssize_t>(rowIdx.size()) }, rowIdx.data());
+    result.cols = py::array_t<py::ssize_t>(
+        { static_cast<py::ssize_t>(colIdx.size()) }, colIdx.data());
+    result.vals = py::array_t<Scalar>(
+        { static_cast<py::ssize_t>(values.size()) }, values.data());
+    result.n = static_cast<py::ssize_t>(mesh.cellCount());
+    result.b = vectorCopy(rhs);
+    result.diag = vectorCopy(diag);
+    result.rhsNoPressure = vectorCopy(rhsNoPressure);
+    return result;
 }
 
 FaceFluxField interpolateCellVelocityFlux(const Mesh& mesh,
@@ -727,6 +824,34 @@ void bindNumerical(py::module_& m)
         py::arg("flux"), py::arg("rel_tol") = 1e-10);
     m.def("has_dirichlet_pressure", &numerical::hasDirichletPressure,
         py::arg("bc_p"));
+
+    // -- Momentum assembly export (Phase 6.2) ----------------------------
+    py::class_<MomentumSystem>(m, "MomentumSystem",
+        "Assembled momentum system for one component: the finalized matrix "
+        "A as COO triplets (rows/cols/vals, order n = cell count) plus the "
+        "RHS b, the (relaxed) diagonal and the pressure-free RHS.")
+        .def_readonly("rows", &MomentumSystem::rows)
+        .def_readonly("cols", &MomentumSystem::cols)
+        .def_readonly("vals", &MomentumSystem::vals)
+        .def_readonly("n", &MomentumSystem::n)
+        .def_readonly("b", &MomentumSystem::b)
+        .def_readonly("diag", &MomentumSystem::diag)
+        .def_readonly("rhs_no_pressure", &MomentumSystem::rhsNoPressure);
+
+    m.def("assemble_momentum", &assembleMomentum,
+        py::arg("mesh"), py::arg("flux"), py::arg("velocity"),
+        py::arg("mu"), py::arg("scheme"), py::arg("bc"),
+        py::arg("component"), py::arg("pressure"), py::arg("bc_p"),
+        py::arg("relaxation") = 1.0, py::arg("rho") = 1.0,
+        py::arg("dt") = 0.0,
+        py::arg("time_scheme") = TimeScheme::Euler,
+        py::arg("corrections") = CorrectionOptions{},
+        "Assemble one momentum component (0 = u, 1 = v) for the given "
+        "state without solving: returns the finalized matrix as COO "
+        "triplets (rows/cols/vals, order n = cell count), the RHS b, the "
+        "(relaxed) diagonal and the pressure-free RHS. dt = 0 assembles "
+        "the steady operator; dt > 0 assembles one implicit theta step "
+        "(requires relaxation = 1).");
 
     // -- Scalar transport (high level) ---------------------------------------
     m.def("solve_transport", &solveTransport,

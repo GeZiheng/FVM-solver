@@ -89,8 +89,8 @@ dmd(data.u[2000:], 0.05)         # 窗口 DMD → dominant_frequency() → St
 
 ## 后续批次与已知问题
 
-- **6.2** pyfvm 绑定装配矩阵 A/b（COO 数组 + shape，避免 scipy 硬依赖）；未决：暴露哪些装配态（稳态/含 ddt 分离）、finalize 语义、装配状态所有权；
-- **6.3** Galerkin 投影 ΦᵀAΦ + RK4 在线积分，对照 FOM 轨迹与 TG 精确解验证；
+- ✅ **6.2 pyfvm 装配矩阵绑定（2026-11-13 完成）**——`fvm.assemble_momentum`（用法与契约见 `docs/python.md` §API 一览）。原未决问题全部落地：暴露**稳态单次装配**（`dt=0` 给 `A_sp`/`b_sp`，质量阵 `M = ρ·diag(V)` 无需装配）；finalize 语义 = 返回 finalized COO（压缩后无重复项）；装配状态无所有权耦合（每次调用按传入状态独立装配，干净但每次重算——降阶步粒度下开销可忽略）。分离恒等式 `A_tr = θ·A_sp + diag(ρV/dt)`、`b_tr = b_sp + (ρV/dt)uⁿ − (1−θ)(A_sp·uⁿ)` 由 `test_pyfvm.py::TestAssembleMomentum` 契约锁定；压力项语义：`b = rhs_no_pressure − ∇p·V`，velocity-only ROM 传零压场 + Neumann-p 即剥离压力源。
+- **6.3** Galerkin 投影 ΦᵀAΦ + RK4 在线积分，对照 FOM 轨迹与 TG 精确解验证；每降阶步流程：`a → u → compute_mass_flux → assemble_momentum(dt=0) → M ȧ = −ΦᵀA_spΦa + Φᵀb_sp`。压力泄漏（collocated 非散度自由）在 TG 上量化，必要时加逐降阶步压力投影（复用 `correctPressure`）。
 - **6.4（可选）** 压力重构、Re 参数化；
 - 条件触发候选：ROM 分析 MCP（README §路线图 Phase 6 登记）；
 - 已知问题：collocated 模态非散度自由（见 POD 节）；Galerkin ROM 继承 FOM 离散误差，TG 的 dt²/h 混合项意味着粗 dt 下 FOM 轨迹有精度地板（`docs/numerical.md` Taylor–Green 节）。

@@ -9,6 +9,7 @@ Run:  python -m unittest discover -s python/tests -v
 (also registered as the ctest entry `pyfvm_tests` when FVM_BUILD_PYTHON=ON)
 """
 
+import math
 import os
 import sys
 import tempfile
@@ -298,6 +299,111 @@ class TestTransportBinding(unittest.TestCase):
                                         solver_cfg,
                                         corrections=fvm.CorrectionOptions())
         np.testing.assert_allclose(base, corrected, atol=1e-12)
+
+
+class TestAssembleMomentum(unittest.TestCase):
+    """Contract tests for assemble_momentum (Phase 6.2): COO export
+    fidelity, the theta-scheme operator-split identity, and error paths."""
+
+    @staticmethod
+    def _dense(system):
+        a = np.zeros((system.n, system.n))
+        a[system.rows, system.cols] = system.vals
+        return a
+
+    def test_pure_diffusion_exact_and_symmetric(self):
+        # Zero flux, uniform mu, u_w = 1, u_e = 0: the numpy dense solve of
+        # the exported system must reproduce the exact linear profile
+        # 1 - x (diffusion is LSQ-exact on linear fields), and A must be
+        # symmetric with zero convection. Exercises the COO export path
+        # end to end without a C++ solve.
+        n = 16
+        mesh = fvm.CartesianMesh(n, n, 0.0, 0.0, 1.0, 1.0)
+        velocity = fvm.VectorField(mesh, "velocity")  # stays zero
+        pressure = fvm.ScalarField(mesh, "pressure")  # stays zero
+        flux = fvm.interpolate_cell_velocity_flux(mesh, velocity, 1.0)
+        bc = fvm.BoundaryField(mesh)
+        bc.set(fvm.BoundaryField.West, fvm.BCType.Dirichlet, 1.0)
+        bc.set(fvm.BoundaryField.East, fvm.BCType.Dirichlet, 0.0)
+        bc_p = fvm.BoundaryField(mesh)  # default Neumann: zero pressure source
+
+        system = fvm.assemble_momentum(mesh, flux, velocity, 1.0,
+                                       fvm.ConvectionScheme.Central, bc, 0,
+                                       pressure, bc_p)
+
+        self.assertEqual(system.n, mesh.cell_count())
+        self.assertEqual(system.rows.shape, system.vals.shape)
+        self.assertEqual(system.cols.shape, system.vals.shape)
+        # zero pressure: the pressure-free RHS equals the plain RHS
+        np.testing.assert_allclose(system.rhs_no_pressure, system.b,
+                                   atol=1e-15)
+
+        a = self._dense(system)
+        np.testing.assert_allclose(a, a.T, atol=0.0)
+
+        x = (np.arange(n) + 0.5) * mesh.dx()
+        solution = np.linalg.solve(a, system.b)
+        np.testing.assert_allclose(solution.reshape(n, n),
+                                   np.tile(1.0 - x, (n, 1)), atol=1e-10)
+
+    def test_theta_split_identity(self):
+        # Momentum.cpp assembles the transient system as
+        #   A_tr = theta * A_sp + diag(rho V / dt),
+        #   b_tr = b_sp + (rho V / dt) u^n - (1 - theta) * (A_sp u^n);
+        # the ROM (docs/rom.md) extracts M and A_sp from this identity.
+        n = 8
+        mesh = fvm.CartesianMesh(n, n, 0.0, 0.0, math.pi, math.pi)
+        velocity = fvm.VectorField(mesh, "velocity")
+        pressure = fvm.ScalarField(mesh, "pressure")
+        flux = fvm.FaceFluxField(mesh, "phi")
+        rng = np.random.default_rng(5)
+        velocity.u.to_numpy()[:] = rng.standard_normal(mesh.cell_count())
+        bc = fvm.BoundaryField(mesh)
+
+        rho, mu, dt = 2.0, 0.1, 0.05
+        steady = fvm.assemble_momentum(mesh, flux, velocity, mu,
+                                       fvm.ConvectionScheme.Central, bc, 0,
+                                       pressure, bc, rho=rho)
+        for scheme, theta in ((fvm.TimeScheme.Euler, 1.0),
+                              (fvm.TimeScheme.CrankNicolson, 0.5)):
+            transient = fvm.assemble_momentum(
+                mesh, flux, velocity, mu, fvm.ConvectionScheme.Central, bc,
+                0, pressure, bc, rho=rho, dt=dt, time_scheme=scheme)
+            ddt_diag = rho * mesh.dx() * mesh.dy() / dt
+            a_sp = self._dense(steady)
+            a_tr = self._dense(transient)
+            # A_tr = theta * A_sp + diag(rho V / dt), entry by entry.
+            expected = theta * a_sp + np.diag(
+                np.full(mesh.cell_count(), ddt_diag))
+            np.testing.assert_allclose(a_tr, expected, atol=1e-10)
+            expected_rhs = (steady.b + ddt_diag * velocity.u.to_numpy()
+                            - (1.0 - theta) * (a_sp @ velocity.u.to_numpy()))
+            np.testing.assert_allclose(transient.b, expected_rhs,
+                                       atol=1e-9)
+
+    def test_component_and_relaxation_validation(self):
+        n = 4
+        mesh = fvm.CartesianMesh(n, n, 0.0, 0.0, 1.0, 1.0)
+        velocity = fvm.VectorField(mesh, "velocity")
+        pressure = fvm.ScalarField(mesh, "pressure")
+        flux = fvm.FaceFluxField(mesh, "phi")
+        bc = fvm.BoundaryField(mesh)
+        kwargs = dict(mu=0.1, scheme=fvm.ConvectionScheme.Central, bc=bc,
+                      pressure=pressure, bc_p=bc)
+
+        u_system = fvm.assemble_momentum(mesh, flux, velocity, component=0,
+                                         **kwargs)
+        v_system = fvm.assemble_momentum(mesh, flux, velocity, component=1,
+                                         **kwargs)
+        self.assertEqual(u_system.n, v_system.n)
+        self.assertEqual(u_system.vals.shape, v_system.vals.shape)
+
+        with self.assertRaises(ValueError):
+            fvm.assemble_momentum(mesh, flux, velocity, component=2,
+                                  **kwargs)
+        with self.assertRaises(ValueError):
+            fvm.assemble_momentum(mesh, flux, velocity, component=0,
+                                  relaxation=0.7, dt=0.1, **kwargs)
 
 
 class TestBoundaryFaceValues(unittest.TestCase):

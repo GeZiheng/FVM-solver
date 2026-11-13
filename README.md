@@ -173,7 +173,7 @@ Deferred/rejected：`examples/` per-case 可执行文件、JSON case 配置、�
 按 6.1 → 6.2 → 6.3 顺序执行（6.4 可选）。执行状态见 [`AGENTS.md`](AGENTS.md) Next Phase：
 
 - ✅ **6.1 ROM 快照导出 + POD/DMD 离线管线** — `python/rom/` 包（`SnapshotCollector`/版本化 npz 快照契约 v1、均值中心化 POD、exact DMD、可选绘图；核心仅 numpy，不 import pyfvm）+ `test_rom.py` 7 用例（自动进 `pyfvm_tests`，TG 冒烟端到端）+ 探索驱动脚本 `taylor_green_rom.py`/`vortex_shedding_rom.py`（不注册 application 层）；C++ 内核与 CMake 零改动。DMD St 只诊断不断言；契约与算法细节见 [`docs/rom.md`](docs/rom.md)，脚本用法见 [`docs/python.md`](docs/python.md)。
-- **6.2 pyfvm 绑定 A/b → 侵入式 Galerkin 离线投影**（矩阵以 COO + shape 返回，避免 scipy 硬依赖）。
+- ✅ **6.2 pyfvm 绑定 A/b → 侵入式 Galerkin 离线投影** — `pyfvm.assemble_momentum`（稳态/瞬态装配以 COO 三元组返回，避免 scipy 硬依赖；C++ 内核零改动）；theta 分离恒等式 `A_tr = θ·A_sp + diag(ρV/dt)` 由契约测试锁定，设计与证据见 [`docs/rom.md`](docs/rom.md)（2026-11-13 完成）。
 - **6.3 在线 ROM 积分（RK4）与对照 FOM 轨迹验证**。
 - **6.4（可选/暂缓）**：压力重构、Re 参数化 ROM。
 - **条件触发候选**（Phase 6 后续工作，出现稳定跨会话需求时再立项）：**meshgen MCP**（`mesh_su2` 薄封装，条件同上文 Phase 5 登记项）；**ROM 分析 MCP**（`python/rom/` 的 POD/DMD/快照分析工具封装；含长运行的 `generate_snapshots` 类工具须按 `run_case` 的后台运行/审批语义设计；6.2 开工时一并评估）。
