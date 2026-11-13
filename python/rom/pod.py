@@ -79,6 +79,20 @@ class PodResult:
                 f"got {X.shape}")
         return (X - self.mean) @ self.modes.T
 
+    def truncated(self, r: int) -> "PodResult":
+        """Copy of this result keeping only the first ``r`` modes.
+
+        ``r`` is capped at the full rank; the spectral attributes
+        (singular values / energies) are sliced along, so
+        ``reconstruction_error`` still reflects the FULL spectrum of the
+        decomposition the result came from.
+        """
+        r = min(operator.index(r), self.modes.shape[0])
+        return PodResult(mean=self.mean, modes=self.modes[:r],
+                         singular_values=self.singular_values[:r],
+                         energy=self.energy[:r],
+                         cumulative_energy=self.cumulative_energy[:r])
+
     def reconstruct(self, A) -> np.ndarray:
         """Reconstruct snapshots from temporal coefficients.
 

@@ -174,8 +174,8 @@ Deferred/rejected：`examples/` per-case 可执行文件、JSON case 配置、�
 
 - ✅ **6.1 ROM 快照导出 + POD/DMD 离线管线** — `python/rom/` 包（`SnapshotCollector`/版本化 npz 快照契约 v1、均值中心化 POD、exact DMD、可选绘图；核心仅 numpy，不 import pyfvm）+ `test_rom.py` 7 用例（自动进 `pyfvm_tests`，TG 冒烟端到端）+ 探索驱动脚本 `taylor_green_rom.py`/`vortex_shedding_rom.py`（不注册 application 层）；C++ 内核与 CMake 零改动。DMD St 只诊断不断言；契约与算法细节见 [`docs/rom.md`](docs/rom.md)，脚本用法见 [`docs/python.md`](docs/python.md)。
 - ✅ **6.2 pyfvm 绑定 A/b → 侵入式 Galerkin 离线投影** — `pyfvm.assemble_momentum`（稳态/瞬态装配以 COO 三元组返回，避免 scipy 硬依赖；C++ 内核零改动）；theta 分离恒等式 `A_tr = θ·A_sp + diag(ρV/dt)` 由契约测试锁定，设计与证据见 [`docs/rom.md`](docs/rom.md)（2026-11-13 完成）。
-- **6.3 在线 ROM 积分（RK4）与对照 FOM 轨迹验证**。
-- **6.4（可选/暂缓）**：压力重构、Re 参数化 ROM。
+- ✅ **6.3 在线 ROM 积分（RK4）与对照 FOM 轨迹验证** — `python/rom/galerkin.py`（`GalerkinRom`：u/v 独立 POD 基、稠密 SPD `M_r = Φ diag(ρV) Φᵀ`、显式 RK4、oracle pressure 注入口）+ 双变体驱动 `taylor_green_galerkin.py`（零压 vs oracle 精确压力）+ 诊断驱动 `vortex_shedding_galerkin.py`（只诊断不断言）+ `test_rom.py` 4 用例；C++ 内核零改动。核心结论：TG 16² 单步一致性 0.0067，oracle 变体稳定在 FOM 离散地板（0.0091，oracle|FOM=0.0065），零压变体误差线性漂移（T=0.3→0.182、T=1.0→43%，对 dt_rom/4 与 32² 网格不变）——确认为结构性压力泄漏，预测性压力投影留作候选；实测与设计见 [`docs/rom.md`](docs/rom.md)（2026-11-13 完成）。
+- **6.4（可选/暂缓）**：压力重构、Re 参数化 ROM；压力投影候选（逐降阶步 `correctPressure`）的量化依据已齐（见 [`docs/rom.md`](docs/rom.md)）。
 - **条件触发候选**（Phase 6 后续工作，出现稳定跨会话需求时再立项）：**meshgen MCP**（`mesh_su2` 薄封装，条件同上文 Phase 5 登记项）；**ROM 分析 MCP**（`python/rom/` 的 POD/DMD/快照分析工具封装；含长运行的 `generate_snapshots` 类工具须按 `run_case` 的后台运行/审批语义设计；6.2 开工时一并评估）。
 
 ## Agent 开发环境（harness）

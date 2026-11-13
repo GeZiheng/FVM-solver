@@ -330,5 +330,196 @@ class TestTaylorGreenSnapshotSmoke(unittest.TestCase):
             self.ENERGY_THRESHOLD)
 
 
+@unittest.skipIf(not HAVE_PYFVM, "pyfvm extension not built")
+class TestGalerkinRomTaylorGreen(unittest.TestCase):
+    """Velocity-only Galerkin ROM contract tests on Taylor-Green
+    (16^2, rho = 1, nu = 0.1, exact per-face Dirichlet BCs refreshed at
+    the stage/end-step times).  rom.galerkin imports pyfvm lazily, so
+    this class relies on the module-level pyfvm import above.  All
+    thresholds are calibrated on 2026-11-13 parent-session
+    measurements (plan phase 6.3 change log)."""
+
+    NX = 16
+    DT = 0.01
+    RHO = 1.0
+    NU = 0.1
+    # Calibration 2026-11-13 (16^2, dt = 0.01, full-rank basis):
+    #   single-step ROM RK4 vs FOM PISO relative difference 0.006 ->
+    #     threshold 0.02 (~3x margin, different integrators);
+    #   zero-pressure T = 0.2 error 0.124 -> band [0.05, 0.25] (>= 2x
+    #     margin both sides; the band quantifies the structural
+    #     pressure leakage, an exact match would mean the pressure
+    #     term vanished).
+    SINGLE_STEP_MAX = 0.02
+    ZERO_PRESSURE_BAND = (0.05, 0.25)
+    ZERO_PRESSURE_STEPS = 20  # T = 0.2
+
+    def _exact_fields(self, mesh, t):
+        """Cell-centred exact (u, v, p) at time ``t``."""
+        count = mesh.cell_count()
+        u = np.empty(count)
+        v = np.empty(count)
+        p = np.empty(count)
+        decay_u = math.exp(-2.0 * self.NU * t)
+        decay_p = math.exp(-4.0 * self.NU * t)
+        for cell in range(count):
+            x, y = mesh.cell_centroid(cell)
+            u[cell] = -decay_u * math.cos(x) * math.sin(y)
+            v[cell] = decay_u * math.sin(x) * math.cos(y)
+            p[cell] = -0.25 * decay_p * (math.cos(2.0 * x)
+                                         + math.cos(2.0 * y))
+        return u, v, p
+
+    def _refresh_boundary_conditions(self, mesh, bc_u, bc_v, bc_p, t):
+        """Exact per-face Dirichlet values at time ``t``."""
+        for patch in range(mesh.patch_count()):
+            u_faces, v_faces, p_faces = [], [], []
+            for face in mesh.patch_faces(patch):
+                x, y = mesh.face_centroid(face)
+                decay_u = math.exp(-2.0 * self.NU * t)
+                decay_p = math.exp(-4.0 * self.NU * t)
+                u_faces.append(-decay_u * math.cos(x) * math.sin(y))
+                v_faces.append(decay_u * math.sin(x) * math.cos(y))
+                p_faces.append(-0.25 * decay_p
+                               * (math.cos(2.0 * x) + math.cos(2.0 * y)))
+            bc_u.set_values(patch, pyfvm.BCType.Dirichlet,
+                            np.array(u_faces))
+            bc_v.set_values(patch, pyfvm.BCType.Dirichlet,
+                            np.array(v_faces))
+            bc_p.set_values(patch, pyfvm.BCType.Dirichlet,
+                            np.array(p_faces))
+
+    def _build_case(self, steps):
+        """Integrate Taylor-Green for ``steps`` PISO steps collecting
+        one snapshot per step; returns (mesh, collector, bc triplet)."""
+        mesh = pyfvm.CartesianMesh(self.NX, self.NX, 0.0, 0.0,
+                                   math.pi, math.pi)
+        velocity = pyfvm.VectorField(mesh, "velocity")
+        pressure = pyfvm.ScalarField(mesh, "pressure")
+        flux = pyfvm.FaceFluxField(mesh, "phi")
+
+        u0, v0, p0 = self._exact_fields(mesh, 0.0)
+        velocity.u.to_numpy()[:] = u0
+        velocity.v.to_numpy()[:] = v0
+        pressure.to_numpy()[:] = p0
+
+        bc_u = pyfvm.BoundaryField(mesh)
+        bc_v = pyfvm.BoundaryField(mesh)
+        bc_p = pyfvm.BoundaryField(mesh)
+
+        cfg = pyfvm.PisoConfig()
+        cfg.dt = self.DT
+        cfg.n_steps = 1
+        cfg.n_correctors = 2
+        cfg.time_scheme = pyfvm.TimeScheme.CrankNicolson
+        cfg.scheme = pyfvm.ConvectionScheme.Central
+        cfg.solver_config.tolerance = 1e-10
+        cfg.solver_config.max_iterations = 20000
+        cfg.pressure_solver_config.tolerance = 1e-10
+        cfg.pressure_solver_config.max_iterations = 20000
+
+        collector = SnapshotCollector()
+        collector.append(0.0, velocity.u.to_numpy(),
+                         velocity.v.to_numpy(), pressure.to_numpy())
+        for step in range(steps):
+            self._refresh_boundary_conditions(
+                mesh, bc_u, bc_v, bc_p, (step + 1) * self.DT)
+            pyfvm.solve_piso(mesh, self.RHO, self.NU, bc_u, bc_v, bc_p,
+                             cfg, velocity, pressure, flux)
+            collector.append((step + 1) * self.DT,
+                             velocity.u.to_numpy(),
+                             velocity.v.to_numpy(),
+                             pressure.to_numpy())
+        return mesh, collector, (bc_u, bc_v, bc_p)
+
+    def _build_rom(self, mesh, collector, bcs):
+        from rom.galerkin import GalerkinRom
+        pod_u = pod_decompose(collector.u)
+        pod_v = pod_decompose(collector.v)
+        bc_u, bc_v, _ = bcs
+        return GalerkinRom(mesh, self.NU, self.RHO, pod_u, pod_v,
+                           bc_u, bc_v, pyfvm.ConvectionScheme.Central)
+
+    def _velocity_error(self, u, v, u_ref, v_ref):
+        diff2 = (float(np.mean((u - u_ref) ** 2))
+                 + float(np.mean((v - v_ref) ** 2)))
+        ref2 = (float(np.mean(u_ref ** 2)) + float(np.mean(v_ref ** 2)))
+        return math.sqrt(diff2 / ref2)
+
+    def _set_initial(self, mesh, rom):
+        initial = pyfvm.VectorField(mesh, "initial")
+        u0, v0, _ = self._exact_fields(mesh, 0.0)
+        initial.u.to_numpy()[:] = u0
+        initial.v.to_numpy()[:] = v0
+        rom.set_state_from_fields(initial)
+
+    def test_state_roundtrip_full_rank(self):
+        mesh, collector, bcs = self._build_case(steps=10)
+        rom = self._build_rom(mesh, collector, bcs)
+
+        self._set_initial(mesh, rom)
+        u, v = rom.reconstruct_arrays()
+        u0, v0, _ = self._exact_fields(mesh, 0.0)
+        # full-rank row-orthonormal basis: the least-squares projection
+        # is exact (atol 1e-12 is machine-level for 256 cells).
+        np.testing.assert_allclose(u, u0, atol=1e-12)
+        np.testing.assert_allclose(v, v0, atol=1e-12)
+
+    def test_reduced_mass_matrix_spd(self):
+        mesh, collector, bcs = self._build_case(steps=5)
+        rom = self._build_rom(mesh, collector, bcs)
+
+        for mass in (rom._mass_u, rom._mass_v):
+            np.testing.assert_allclose(mass, mass.T, atol=1e-12)
+            self.assertGreater(float(np.linalg.eigvalsh(mass).min()),
+                               0.0)
+
+    def test_single_step_consistency(self):
+        mesh, collector, bcs = self._build_case(steps=1)
+        rom = self._build_rom(mesh, collector, bcs)
+        bc_u, bc_v, bc_p = bcs
+
+        # one FOM PISO step from t = 0 (final snapshot of the run).
+        u_fom = collector.u[-1].copy()
+        v_fom = collector.v[-1].copy()
+
+        # one ROM RK4 step with the exact BCs refreshed at stage times.
+        self._set_initial(mesh, rom)
+
+        def bc_refresh(t):
+            self._refresh_boundary_conditions(mesh, bc_u, bc_v, bc_p, t)
+
+        rom.advance(0.0, self.DT, 1, bc_refresh=bc_refresh)
+        u_rom, v_rom = rom.reconstruct_arrays()
+
+        error = self._velocity_error(u_rom, v_rom, u_fom, v_fom)
+        # calibrated 0.006, threshold 0.02 (different integrators).
+        self.assertLess(error, self.SINGLE_STEP_MAX)
+        self.assertGreater(error, 0.0)
+
+    def test_zero_pressure_leakage_short_horizon(self):
+        mesh, collector, bcs = self._build_case(
+            steps=self.ZERO_PRESSURE_STEPS)
+        rom = self._build_rom(mesh, collector, bcs)
+        bc_u, bc_v, bc_p = bcs
+
+        self._set_initial(mesh, rom)
+
+        def bc_refresh(t):
+            self._refresh_boundary_conditions(mesh, bc_u, bc_v, bc_p, t)
+
+        rom.advance(0.0, self.DT, self.ZERO_PRESSURE_STEPS,
+                    bc_refresh=bc_refresh)
+        u_rom, v_rom = rom.reconstruct_arrays()
+        u_ex, v_ex, _ = self._exact_fields(
+            mesh, self.ZERO_PRESSURE_STEPS * self.DT)
+
+        error = self._velocity_error(u_rom, v_rom, u_ex, v_ex)
+        # calibrated 0.124; the band quantifies the structural pressure
+        # leakage of the velocity-only ROM (both bounds >= 2x margin).
+        self.assertGreaterEqual(error, self.ZERO_PRESSURE_BAND[0])
+        self.assertLessEqual(error, self.ZERO_PRESSURE_BAND[1])
+
+
 if __name__ == "__main__":
     unittest.main()

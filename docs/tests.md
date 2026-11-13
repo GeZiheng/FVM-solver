@@ -23,7 +23,7 @@
 ## pyfvm_tests
 
 - 条目在根 `CMakeLists.txt` 的 `FVM_BUILD_PYTHON=ON` 分支内：命令为系统解释器 `python -m unittest discover -s python/tests`，并已用 `ENVIRONMENT FVM_PYFVM_DIR=${CMAKE_BINARY_DIR}/python` 钉定扩展目录——**ctest 证据不受多构建树影响**（见下文已知坑）。
-- 测试文件两个：`test_pyfvm.py`（绑定契约，34 用例）与 `test_rom.py`（Phase 6.1 ROM 管线，7 用例，自动被 discover 收编）：POD 代数 ×2、DMD 双正弦合成信号 ×1、npz 契约往返 + 错误路径 ×3、Taylor–Green 32² 端到端冒烟 ×1（整文件实测约 +0.6 s）。`rom` 包不依赖 pyfvm——pyfvm 缺失时仅 TG 冒烟跳过，代数/契约用例照跑；内容范围详见 `docs/python.md` §测试分工。
+- 测试文件两个：`test_pyfvm.py`（绑定契约，37 用例，含 6.2 的 `TestAssembleMomentum`）与 `test_rom.py`（Phase 6.1 ROM 管线 + 6.3 Galerkin，11 用例，自动被 discover 收编）：POD 代数 ×2、DMD 双正弦合成信号 ×1、npz 契约往返 + 错误路径 ×3、Taylor–Green 32² 端到端冒烟 ×1（以上 6.1，实测约 +0.6 s）、`TestGalerkinRomTaylorGreen` ×4（16² 短程：全秩状态往返、`M_r` SPD、单步 ROM RK4 vs FOM PISO 一致性、零压短程误差带——整文件约 1 s 量级）。`rom` 包核心不依赖 pyfvm（`rom.galerkin` 惰性 import）——pyfvm 缺失时仅 TG 冒烟与 Galerkin 用例跳过，代数/契约用例照跑；内容范围详见 `docs/python.md` §测试分工。
 - AMGCL 子集的构建模式门控见 `docs/python.md` §测试分工。
 
 ## application 层
