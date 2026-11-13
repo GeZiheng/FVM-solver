@@ -30,7 +30,7 @@ import math
 
 import numpy as np
 
-from _common import fvm, report_test
+from _common import fvm, report_test, write_results
 
 from rom import SnapshotCollector, pod_decompose
 from rom.galerkin import GalerkinRom
@@ -42,6 +42,7 @@ from vortex_shedding import DIAMETER, RE, make_mesh, periodic_metrics
 # U_inf = 1 (inflow Dirichlet u = 1, force_coefficients default u_in).
 U_INF = 1.0
 LITERATURE_ST = (0.164, 0.167)
+CASE_DIR = "vortex_shedding_galerkin"
 
 
 def make_piso_config(dt):
@@ -137,6 +138,10 @@ def main():
     parser.add_argument("--rank", type=int, default=16)
     parser.add_argument("--dt-rom", type=float, default=None,
                         help="ROM RK4 step (default: the FOM dt)")
+    parser.add_argument("--frames", type=int, default=0,
+                        help="write the first N ROM reconstruction frames "
+                             "plus the FOM snapshots at the same times as "
+                             ".vtu (0 disables; ignored with --test)")
     parser.add_argument("--test", action="store_true",
                         help="run the short machine-level configuration "
                              "(coarse, dt=0.01, T=20, rank 8); "
@@ -205,6 +210,28 @@ def main():
     print(f"coefficient envelope max|a_u| = {span[0]:.3e}, "
           f"max|a_v| = {span[1]:.3e} (limit-cycle preservation is NOT "
           f"guaranteed for a velocity-only ROM)")
+
+    if args.frames > 0 and not args.test:
+        # ROM reconstructions at recorded rows plus the matching FOM
+        # snapshots (same times) for side-by-side comparison.
+        snap_dt = args.dt * args.snap_every
+        stride = max(1, len(rec_times) // args.frames)
+        frame_velocity = fvm.VectorField(mesh, "rom_frame")
+        fom_velocity = fvm.VectorField(mesh, "fom_frame")
+        for row in list(range(0, len(rec_times), stride))[:args.frames]:
+            rom.a_u = a_u_hist[row].copy()
+            rom.a_v = a_v_hist[row].copy()
+            rom.write_state(frame_velocity)
+            write_results(mesh, frame_velocity, None, CASE_DIR,
+                          f"rom_recon_{row:04d}.vtu", scalars={},
+                          vectors={"velocity": frame_velocity})
+            idx = min(first + round((rec_times[row] - t0) / snap_dt),
+                      len(collector) - 1)
+            fom_velocity.u.to_numpy()[:] = collector.u[idx]
+            fom_velocity.v.to_numpy()[:] = collector.v[idx]
+            write_results(mesh, fom_velocity, None, CASE_DIR,
+                          f"fom_snap_{row:04d}.vtu", scalars={},
+                          vectors={"velocity": fom_velocity})
 
     if args.test:
         # Machine-level assertions only: the advance completed, all
