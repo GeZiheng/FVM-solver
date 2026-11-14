@@ -25,6 +25,7 @@
 #include "CartesianMesh.h"
 #include "Momentum.h"
 #include "Piso.h"
+#include "Pressure.h"
 #include "Simple.h"
 #include "Su2Reader.h"
 #include "TimeScheme.h"
@@ -271,6 +272,137 @@ PisoResult runPiso(const Mesh& mesh,
     py::gil_scoped_release release;
     return numerical::solvePiso(
         mesh, rho, mu, bcU, bcV, bcP, config, velocity, pressure, flux);
+}
+
+/// Outcome of one pressure projection (Phase 6.4): the pressure corrector's
+/// diagnostics (CorrectorResult) as a plain POD for Python.
+struct ProjectionResult
+{
+    Scalar maxImbalance = 0.0; ///< Max |mass imbalance| the projection removed.
+    Scalar duMax = 0.0;        ///< Max |u_new - u_old| after the correction.
+    Scalar dvMax = 0.0;        ///< Max |v_new - v_old| after the correction.
+    Scalar dpMax = 0.0;        ///< Max |p_new - p_old| of the stored pressure.
+};
+
+/// One steady (dt = 0) or transient-diagonal (dt > 0) pressure projection
+/// on a frozen state: assemble both momentum components (relaxation = 1),
+/// rebuild the Rhie-Chow data and run a single correctPressure step. This
+/// is exactly the pressure half-step of one PISO corrector - the momentum
+/// system is never solved, so the projected pressure is consistent with
+/// the operator the ROM residual uses (plan D1). The pressure field passed
+/// to the assembly is irrelevant: the projection only consumes diag (the
+/// raw a_P at relaxation = 1) and rhsNoPressure, neither of which sees the
+/// pressure-gradient source. With dt > 0 the assembly carries the transient
+/// diagonal a_P + rho V/dt and its ddt source, with the frozen state as the
+/// old velocity: uHat = u_stage + r_s/(a_P + rho V/dt) - a damped residual
+/// step that keeps the diagonal positive where the steady Central operator
+/// is indefinite (cell Peclet >> 2).
+ProjectionResult runPressureProjection(const Mesh& mesh,
+    Scalar rho,
+    Scalar mu,
+    ConvectionScheme scheme,
+    const BoundaryField& bcU,
+    const BoundaryField& bcV,
+    const BoundaryField& bcP,
+    VectorField& velocity,
+    ScalarField& pressure,
+    FaceFluxField& flux,
+    const SolverConfig& solverConfig,
+    Scalar relaxationP,
+    Scalar dt,
+    TimeScheme timeScheme,
+    const CorrectionOptions& corrections)
+{
+    requireSameMesh(mesh, velocity, "velocity");
+    requireSameMesh(mesh, pressure, "pressure");
+    requireSameMesh(mesh, flux, "flux");
+    requireSameMesh(mesh, bcU, "bc_u");
+    requireSameMesh(mesh, bcV, "bc_v");
+    requireSameMesh(mesh, bcP, "bc_p");
+    if (relaxationP <= 0.0 || relaxationP > 1.0)
+    {
+        throw std::invalid_argument("relaxation_p must lie in (0, 1], got "
+            + std::to_string(relaxationP));
+    }
+    if (dt < 0.0)
+    {
+        throw std::invalid_argument("dt must be >= 0 (0 = steady "
+            "operator), got " + std::to_string(dt));
+    }
+
+    py::gil_scoped_release release;
+
+    // dt = 0 keeps the steady operator (TimeTerm inactive, behaviour
+    // unchanged); dt > 0 adds the transient diagonal rho*V/dt with the
+    // frozen state as u_old.
+    TimeTerm time;
+    time.rho = rho;
+    time.dt = dt;
+    time.scheme = timeScheme;
+
+    // EquationSystem has no default constructor, so the prediction is
+    // aggregate-initialized exactly like predictMomentum (Momentum.cpp).
+    numerical::MomentumPrediction pred{
+        numerical::assembleMomentum(mesh,
+            flux,
+            velocity,
+            mu,
+            scheme,
+            bcU,
+            0,
+            pressure,
+            bcP,
+            1.0,
+            time,
+            corrections),
+        numerical::assembleMomentum(mesh,
+            flux,
+            velocity,
+            mu,
+            scheme,
+            bcV,
+            1,
+            pressure,
+            bcP,
+            1.0,
+            time,
+            corrections),
+        Vector(),
+        Vector(),
+        Vector(),
+        Vector(),
+        Vector(),
+        Vector() };
+
+    pred.momU.system.A.finalize();
+    pred.momV.system.A.finalize();
+    numerical::refreshUHat(pred, velocity);
+    const Index nCells = mesh.cellCount();
+    pred.dU.resize(nCells);
+    pred.dV.resize(nCells);
+    for (Index P = 0; P < nCells; ++P)
+    {
+        pred.dU(P) = mesh.cellVolume(P) / pred.momU.diag(P);
+        pred.dV(P) = mesh.cellVolume(P) / pred.momV.diag(P);
+    }
+
+    auto solver = fvm::math::makeLinearSolver(solverConfig);
+    // No defensive copy: velocity is the corrector's velocity out-slot and is
+    // corrected in place (u = uHat - d grad(p)); callers that need the
+    // pre-projection state pass their own throwaway copy.
+    const numerical::CorrectorResult r = numerical::correctPressure(mesh,
+        rho,
+        pred,
+        bcU,
+        bcV,
+        bcP,
+        *solver,
+        relaxationP,
+        velocity,
+        pressure,
+        flux,
+        corrections);
+    return ProjectionResult{ r.maxImbalance, r.duMax, r.dvMax, r.dpMax };
 }
 
 /// Assembled momentum system exported as COO triplets plus the RHS and
@@ -852,6 +984,32 @@ void bindNumerical(py::module_& m)
         "(relaxed) diagonal and the pressure-free RHS. dt = 0 assembles "
         "the steady operator; dt > 0 assembles one implicit theta step "
         "(requires relaxation = 1).");
+
+    // -- Pressure projection (Phase 6.4) ----------------------------------
+    py::class_<ProjectionResult>(m, "ProjectionResult",
+        "Diagnostics of one pressure_projection call.")
+        .def_readonly("max_imbalance", &ProjectionResult::maxImbalance)
+        .def_readonly("du_max", &ProjectionResult::duMax)
+        .def_readonly("dv_max", &ProjectionResult::dvMax)
+        .def_readonly("dp_max", &ProjectionResult::dpMax);
+
+    m.def("pressure_projection", &runPressureProjection,
+        py::arg("mesh"), py::arg("rho"), py::arg("mu"), py::arg("scheme"),
+        py::arg("bc_u"), py::arg("bc_v"), py::arg("bc_p"),
+        py::arg("velocity"), py::arg("pressure"), py::arg("flux"),
+        py::arg("solver_config") = SolverConfig{},
+        py::arg("relaxation_p") = 1.0,
+        py::arg("dt") = 0.0,
+        py::arg("time_scheme") = TimeScheme::Euler,
+        py::arg("corrections") = CorrectionOptions{},
+        "One steady (dt = 0) pressure projection = the pressure half-step "
+        "of a single PISO corrector on the frozen state: velocity is "
+        "corrected in place to uHat - d*grad(p), and pressure and flux are "
+        "updated in place. dt > 0 gives the transient diagonal "
+        "(a_P + rho V/dt) with the frozen state as the old velocity: "
+        "uHat = u_stage + r_s/(a_P + rho V/dt) - use it where the steady "
+        "operator diagonal is indefinite (cell Peclet >> 2). Pass a "
+        "throwaway velocity copy to discard the corrected velocity.");
 
     // -- Scalar transport (high level) ---------------------------------------
     m.def("solve_transport", &solveTransport,

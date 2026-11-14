@@ -406,6 +406,180 @@ class TestAssembleMomentum(unittest.TestCase):
                                   relaxation=0.7, dt=0.1, **kwargs)
 
 
+class TestPressureProjection(unittest.TestCase):
+    """Contract tests for pressure_projection (Phase 6.4): one steady
+    (dt = 0) pressure correction on a frozen state - the pressure half-step
+    of a single PISO corrector."""
+
+    RHO = 1.0
+    MU = 0.01
+    N = 16
+
+    def _poiseuille_case(self):
+        """Laminar channel on the unit square: u = 4 y (1 - y), v = 0, with
+        matching per-face Dirichlet velocity BCs (profile at west/east,
+        no-slip at north/south) and the default all-Neumann pressure BC."""
+        n = self.N
+        mesh = fvm.CartesianMesh(n, n, 0.0, 0.0, 1.0, 1.0)
+        velocity = fvm.VectorField(mesh, "velocity")
+        for cell in range(mesh.cell_count()):
+            y = mesh.cell_centroid(cell)[1]
+            velocity.u.to_numpy()[cell] = 4.0 * y * (1.0 - y)
+        pressure = fvm.ScalarField(mesh, "pressure")  # stays zero
+        flux = fvm.FaceFluxField(mesh, "phi")
+
+        bc_u = fvm.BoundaryField(mesh)
+        for side in (fvm.BoundaryField.West, fvm.BoundaryField.East):
+            profile = np.array(
+                [4.0 * mesh.face_centroid(face)[1]
+                 * (1.0 - mesh.face_centroid(face)[1])
+                 for face in mesh.patch_faces(side)])
+            bc_u.set_values(side, fvm.BCType.Dirichlet, profile)
+        for side in (fvm.BoundaryField.North, fvm.BoundaryField.South):
+            bc_u.set(side, fvm.BCType.Dirichlet, 0.0)
+        bc_v = fvm.BoundaryField(mesh)
+        for side in (fvm.BoundaryField.West, fvm.BoundaryField.East,
+                     fvm.BoundaryField.North, fvm.BoundaryField.South):
+            bc_v.set(side, fvm.BCType.Dirichlet, 0.0)
+        bc_p = fvm.BoundaryField(mesh)  # all-Neumann: p up to a constant
+
+        fvm.compute_mass_flux(mesh, velocity, self.RHO, bc_u, bc_v, flux)
+        return mesh, velocity, pressure, flux, bc_u, bc_v, bc_p
+
+    def _source_field_case(self):
+        """Divergent source field u = (c x, c y) (discrete divergence 2c)
+        on the unit square, with velocity Dirichlet BCs at the matching
+        field values except the east u component (zero-gradient Neumann
+        outlet: the pressure balance has an adjustable face) and the
+        default all-Neumann pressure BC."""
+        n = self.N
+        c = 1.0
+        mesh = fvm.CartesianMesh(n, n, 0.0, 0.0, 1.0, 1.0)
+        velocity = fvm.VectorField(mesh, "velocity")
+        for cell in range(mesh.cell_count()):
+            x, y = mesh.cell_centroid(cell)
+            velocity.u.to_numpy()[cell] = c * x
+            velocity.v.to_numpy()[cell] = c * y
+        pressure = fvm.ScalarField(mesh, "pressure")  # stays zero
+        flux = fvm.FaceFluxField(mesh, "phi")
+
+        bc_u = fvm.BoundaryField(mesh)
+        bc_u.set(fvm.BoundaryField.West, fvm.BCType.Dirichlet, c * 0.0)
+        bc_u.set(fvm.BoundaryField.East, fvm.BCType.Neumann, 0.0)
+        for side in (fvm.BoundaryField.North, fvm.BoundaryField.South):
+            x_face = np.array([mesh.face_centroid(face)[0]
+                               for face in mesh.patch_faces(side)])
+            bc_u.set_values(side, fvm.BCType.Dirichlet, c * x_face)
+        bc_v = fvm.BoundaryField(mesh)
+        bc_v.set(fvm.BoundaryField.South, fvm.BCType.Dirichlet, c * 0.0)
+        bc_v.set(fvm.BoundaryField.North, fvm.BCType.Dirichlet, c * 1.0)
+        for side in (fvm.BoundaryField.West, fvm.BoundaryField.East):
+            y_face = np.array([mesh.face_centroid(face)[1]
+                               for face in mesh.patch_faces(side)])
+            bc_v.set_values(side, fvm.BCType.Dirichlet, c * y_face)
+        bc_p = fvm.BoundaryField(mesh)  # all-Neumann
+
+        fvm.compute_mass_flux(mesh, velocity, self.RHO, bc_u, bc_v, flux)
+        return mesh, velocity, pressure, flux, bc_u, bc_v, bc_p
+
+    def test_poiseuille_exactness(self):
+        # A parabolic channel is *nearly* a fixed point of one steady
+        # projection: the discrete diffusion of the quadratic u is exact in
+        # the interior, Central convection contributes zero source for this
+        # field, and the recovered pressure is y-independent and linear to
+        # ~2.6%.  It is not exact because of two boundary treatments: the
+        # wall Dirichlet diffusion uses a half-cell one-sided difference
+        # (inexact for the quadratic profile, so uHat carries an O(mu dy)
+        # defect in the wall rows), and the Green-Gauss velocity
+        # reconstruction treats Neumann-p faces as zero normal gradient
+        # (inexact for the linear p at the inlet/outlet columns, where
+        # dp/dx = -8 mu != 0).  The measured floor is therefore
+        # boundary-column dominated, not solver noise (solver tolerance
+        # 1e-12).  Calibrated 2026-11-14 (16^2, mu = 0.01): du_max = 2.71e-3,
+        # dv_max = 5.27e-4, dp/dx = -0.077873 vs exact -0.08 (first/last
+        # column means over the centroid span).
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = \
+            self._poiseuille_case()
+        solver_cfg = fvm.SolverConfig()
+        solver_cfg.tolerance = 1e-12
+
+        res = fvm.pressure_projection(mesh, self.RHO, self.MU,
+                                      fvm.ConvectionScheme.Central,
+                                      bc_u, bc_v, bc_p,
+                                      velocity, pressure, flux,
+                                      solver_config=solver_cfg)
+
+        self.assertTrue(np.isfinite(res.max_imbalance))
+        self.assertLess(res.du_max, 5e-3)
+        self.assertLess(res.dv_max, 2e-3)
+
+        n = self.N
+        p = pressure.to_numpy().reshape(n, n)  # row j, column i
+        x_first = mesh.cell_center(mesh.cell_index(0, 0))[0]
+        x_last = mesh.cell_center(mesh.cell_index(n - 1, 0))[0]
+        dp_dx = (p[:, -1].mean() - p[:, 0].mean()) / (x_last - x_first)
+        self.assertAlmostEqual(dp_dx, -8.0 * self.MU, delta=3e-3)
+
+    def test_divergence_repair(self):
+        # u = (c x, c y) carries a nonzero discrete divergence, so the
+        # projection has real work: it must register the imbalance
+        # (max_imbalance > 0), move the velocity (du_max > 0), produce a
+        # finite pressure, and leave a flux field that passes the
+        # flux-compatibility gate. Root cause of the original all-Dirichlet
+        # failure: with every velocity side Dirichlet the net outflow is
+        # BC-pinned to 2 c rho and the compatibility assertion is
+        # unsatisfiable (see .agents/notes/phase6-4-g1.md) - hence the
+        # Neumann outlet above and the corrected-flux-field assertion here.
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = \
+            self._source_field_case()
+        solver_cfg = fvm.SolverConfig()
+        solver_cfg.tolerance = 1e-12
+
+        res = fvm.pressure_projection(mesh, self.RHO, self.MU,
+                                      fvm.ConvectionScheme.Central,
+                                      bc_u, bc_v, bc_p,
+                                      velocity, pressure, flux,
+                                      solver_config=solver_cfg)
+
+        self.assertGreater(res.max_imbalance, 0.0)
+        self.assertGreater(res.du_max, 0.0)
+        self.assertTrue(np.isfinite(pressure.to_numpy()).all())
+        # The flux field written by correctPressure itself (no recompute).
+        fvm.check_flux_compatibility(flux)
+
+    def test_in_place_semantics(self):
+        # The projection writes through the caller's fields: the velocity
+        # and flux numpy views change content (and only the caller decides
+        # which field is the throwaway scratch).
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = \
+            self._source_field_case()
+        u_before = velocity.u.to_numpy().copy()
+        v_before = velocity.v.to_numpy().copy()
+        flux_before = flux.to_numpy().copy()
+
+        fvm.pressure_projection(mesh, self.RHO, self.MU,
+                                fvm.ConvectionScheme.Central,
+                                bc_u, bc_v, bc_p,
+                                velocity, pressure, flux)
+
+        self.assertTrue(np.any(velocity.u.to_numpy() != u_before))
+        self.assertTrue(np.any(velocity.v.to_numpy() != v_before))
+        self.assertTrue(np.any(flux.to_numpy() != flux_before))
+
+    def test_relaxation_p_validation(self):
+        # relaxation_p must lie in (0, 1]; std::invalid_argument maps to
+        # ValueError (same mapping as the assemble_momentum checks).
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = \
+            self._poiseuille_case()
+        kwargs = dict(scheme=fvm.ConvectionScheme.Central,
+                      bc_u=bc_u, bc_v=bc_v, bc_p=bc_p,
+                      velocity=velocity, pressure=pressure, flux=flux)
+        for bad in (0.0, 1.5):
+            with self.assertRaises(ValueError):
+                fvm.pressure_projection(mesh, self.RHO, self.MU,
+                                        relaxation_p=bad, **kwargs)
+
+
 class TestBoundaryFaceValues(unittest.TestCase):
     """Contract tests for BoundaryField's per-face value API."""
 

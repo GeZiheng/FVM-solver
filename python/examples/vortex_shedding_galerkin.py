@@ -15,14 +15,19 @@ of the mean-removed a_2 record (a_2 has no DC offset issues on the
 window; method noted because peak-counting would work equally well)
 and converted into a Strouhal number St = f * D / U_inf (D = 1, U = 1),
 printed against the FOM St from the force-coefficient history and the
-literature band 0.164-0.167.  --test runs a short machine-level
-configuration (advance completes, coefficients finite, projection
-round-trip) and asserts nothing physical.
+literature band 0.164-0.167.  --projection additionally integrates a
+second ROM on the same windowed basis with a per-stage predictive FOM
+pressure projection (Phase 6.4) and prints the zero-pressure vs
+projective comparison (St, coefficient std, relative error vs the FOM
+snapshots) -- still diagnostics only, NO physical assertions.  --test
+runs a short machine-level configuration (advance completes,
+coefficients finite, projection round-trip) and asserts nothing
+physical.
 
 Run:  python python/examples/vortex_shedding_galerkin.py
       [--grid {coarse,medium,fine}] [--dt DT] [--end-time T] [--re RE]
       [--snap-every K] [--window-frac F] [--rank R] [--dt-rom DT]
-      [--test]
+      [--projection] [--test]
 """
 
 import argparse
@@ -102,7 +107,15 @@ def run(re, grid, dt, end_time, snap_every, sample):
         if (step + 1) % 500 == 0:
             print(f"t = {(step + 1) * dt:7.2f}  ({step + 1}/{steps})",
                   flush=True)
-    return mesh, collector, history, (bc_u, bc_v)
+    return mesh, collector, history, (bc_u, bc_v, bc_p)
+
+
+def relative_velocity_error(u, v, u_ref, v_ref):
+    """Relative L2 velocity error over both components."""
+    diff2 = (float(np.mean((u - u_ref) ** 2))
+             + float(np.mean((v - v_ref) ** 2)))
+    ref2 = (float(np.mean(u_ref ** 2)) + float(np.mean(v_ref ** 2)))
+    return math.sqrt(diff2 / ref2)
 
 
 def coefficient_strouhal(times, a_record):
@@ -138,6 +151,11 @@ def main():
     parser.add_argument("--rank", type=int, default=16)
     parser.add_argument("--dt-rom", type=float, default=None,
                         help="ROM RK4 step (default: the FOM dt)")
+    parser.add_argument("--projection", action="store_true",
+                        help="also integrate a per-stage FOM pressure "
+                             "projection ROM (Phase 6.4) on the same "
+                             "windowed basis and print the comparison "
+                             "(diagnostics only)")
     parser.add_argument("--frames", type=int, default=0,
                         help="write the first N ROM reconstruction frames "
                              "plus the FOM snapshots at the same times as "
@@ -154,7 +172,7 @@ def main():
     rank = 8 if args.test else args.rank
     dt_rom = args.dt if args.dt_rom is None else args.dt_rom
 
-    mesh, collector, history, (bc_u, bc_v) = run(
+    mesh, collector, history, (bc_u, bc_v, bc_p) = run(
         args.re, args.grid, args.dt, end_time, args.snap_every,
         sample=10)
     print(f"collected {len(collector)} snapshots of "
@@ -183,11 +201,36 @@ def main():
     initial.v.to_numpy()[:] = collector.v[first]
     rom.set_state_from_fields(initial)
 
+    # Optional projective twin (Phase 6.4, revised D1): same windowed
+    # basis and initial state, but every RK4 stage first runs one FOM
+    # pressure projection (case pressure BCs and the FOM pressure solver
+    # precision; the pressure outflow patch is Dirichlet, so the
+    # pressure equation takes its well-posed path).  The projection uses
+    # the transient diagonal (projection_dt = the ROM stage dt): the
+    # steady Central operator is indefinite on this mesh at Re = 100
+    # (Pe >> 2; 60/4224 cells with a_P <= 0, min -0.0303, d min -671,
+    # CG/BiCGSTAB both fail to converge) while the FOM is immune through
+    # its transient rho*V/dt diagonal (min +0.1997) - see
+    # .agents/notes/phase6-4-g3.md for the measurements.
+    rom_projective = None
+    if args.projection:
+        rom_projective = GalerkinRom(
+            mesh, 1.0 / args.re, 1.0, pod_u, pod_v, bc_u, bc_v,
+            fvm.ConvectionScheme.Central, pressure_projection=True,
+            pressure_solver_config=make_piso_config(
+                args.dt).pressure_solver_config,
+            bc_p=bc_p, projection_dt=dt_rom)
+        rom_projective.set_state_from_fields(initial)
+
     t0 = times[first]
     duration = times[-1] - t0
     n_steps = round(duration / dt_rom)
     hist = rom.advance(t0, dt_rom, n_steps, record_every=1)
     rec_times, a_u_hist, a_v_hist = hist
+    a_up_hist = a_vp_hist = None
+    if rom_projective is not None:
+        _, a_up_hist, a_vp_hist = rom_projective.advance(
+            t0, dt_rom, n_steps, record_every=1)
     print(f"ROM advanced {n_steps} RK4 steps of dt = {dt_rom} "
           f"(t in [{t0:.2f}, {rec_times[-1]:.2f}])")
 
@@ -210,6 +253,43 @@ def main():
     print(f"coefficient envelope max|a_u| = {span[0]:.3e}, "
           f"max|a_v| = {span[1]:.3e} (limit-cycle preservation is NOT "
           f"guaranteed for a velocity-only ROM)")
+
+    if rom_projective is not None:
+        # Zero-pressure vs projective comparison (diagnostics only; the
+        # std rows are the persistent-amplitude metric behind the
+        # documented limit-cycle collapse, err|FOM is the mean relative
+        # L2 velocity error against the nearest FOM snapshot over the
+        # last 20% of the record).
+        st_p_a1 = coefficient_strouhal(rec_times, a_up_hist[:, 0])
+        st_p_a2 = coefficient_strouhal(rec_times, a_vp_hist[:, 0])
+        snap_dt = args.dt * args.snap_every
+        tail0 = int(0.8 * rec_times.size)
+        err_zero, err_proj = [], []
+        for row in range(tail0, rec_times.size):
+            idx = min(first + round((rec_times[row] - t0) / snap_dt),
+                      len(collector) - 1)
+            err_zero.append(relative_velocity_error(
+                pod_u.mean + a_u_hist[row] @ pod_u.modes,
+                pod_v.mean + a_v_hist[row] @ pod_v.modes,
+                collector.u[idx], collector.v[idx]))
+            err_proj.append(relative_velocity_error(
+                pod_u.mean + a_up_hist[row] @ pod_u.modes,
+                pod_v.mean + a_vp_hist[row] @ pod_v.modes,
+                collector.u[idx], collector.v[idx]))
+        print("zero-pressure vs projective comparison (no physical "
+              "assertions):")
+        print(f"{'':>14} {'zero':>12} {'projective':>12}")
+        print(f"{'St(a1 FFT)':>14} {st_a1:12.4f} {st_p_a1:12.4f}")
+        print(f"{'St(a2 FFT)':>14} {st_a2:12.4f} {st_p_a2:12.4f}")
+        print(f"{'std(a1)':>14} {np.std(a_u_hist[:, 0]):12.3e} "
+              f"{np.std(a_up_hist[:, 0]):12.3e}")
+        print(f"{'std(a2)':>14} {np.std(a_v_hist[:, 0]):12.3e} "
+              f"{np.std(a_vp_hist[:, 0]):12.3e}")
+        print(f"{'err|FOM(1)':>14} {np.mean(err_zero):12.4f} "
+              f"{np.mean(err_proj):12.4f}   (mean over the last 20% of "
+              f"the record, vs nearest FOM snapshot)")
+        print(f"projective last-stage projection (imb, du, dv, dp): "
+              f"{rom_projective.last_projection}")
 
     if args.frames > 0 and not args.test:
         # ROM reconstructions at recorded rows plus the matching FOM
@@ -246,6 +326,11 @@ def main():
         checks["coefficients_finite"] = bool(
             np.isfinite(a_u_hist).all() and np.isfinite(a_v_hist).all())
         detail.append(f"steps={rec_times.size}, max|a_u|={span[0]:.3e}")
+        if rom_projective is not None:
+            # machine-level only: the projection-mode twin completed its
+            # advance with finite coefficients (same record schedule).
+            checks["projective_finite"] = bool(
+                np.isfinite(a_up_hist).all() and np.isfinite(a_vp_hist).all())
         rom.write_state(initial)
         rom.set_state_from_fields(initial)
         np.testing.assert_allclose(rom.a_u, a_u_hist[-1], atol=1e-12)

@@ -45,7 +45,7 @@ FOM: pyfvm PISO (n_steps=1 逐步循环)
 
 `PodResult.truncated(r)` 返回仅保留前 r 阶模态的拷贝（r 封顶于满秩；谱属性沿切片保留，`reconstruction_error` 仍反映分解的完整谱）——Galerkin ROM 按秩截断基的标准入口。
 
-**已知 caveat**：collocated Rhie–Chow 排布下 POD 速度模态**非逐点散度自由**，侵入式路径的重构场缺 $\nabla p$ 约束——6.3 已在 TG 上定量（见 Galerkin 节），预测性压力投影留作候选。
+**已知 caveat**：collocated Rhie–Chow 排布下 POD 速度模态**非逐点散度自由**，侵入式路径的重构场缺 $\nabla p$ 约束——6.3 已在 TG 上定量（见 Galerkin 节），6.4 以预测性压力投影补上缺失约束（TG 上泄漏降 ~8×，见压力投影节）。
 
 ## DMD（`rom.dmd`，exact DMD，Tu et al. 2014）
 
@@ -71,7 +71,7 @@ $$M_r\,\dot{a} = \Phi\,(b - A u)^{\top}, \qquad M_r = \Phi\,\mathrm{diag}(\rho V
 
 **每 RK4 阶段的残差评估**：重构 u/v 写入内部 VectorField → `bc_refresh(t)`（时间相关 BC 在阶段时刻刷新；静态 BC 传 None）→ `compute_mass_flux` → `assemble_momentum(dt=0)` 两个分量 → $\dot{a} = M_r^{-1}\,\Phi\,(b - A\,u)^{\top}$。ROM 的 dt 独立于 FOM dt（显式积分器继承投影算子刚性）。重构场不精确满足 BC（子空间不含边界修正），边界效应经装配 RHS 进入——Galerkin-ROM 标准行为。
 
-**pressure 注入口**：构造器接受可选 `pressure` ScalarField，被每次残差评估**活读**（`bc_refresh` 可在阶段时刻更新它）。零压 = 纯速度 ROM，承受结构性压力泄漏；供入精确压力 = oracle 隔离实验，把泄漏从机构误差中分离。预测性压力投影（`correctPressure` 逐降阶步）是后续候选，注入口即其落点。
+**pressure 注入口**：构造器接受可选 `pressure` ScalarField，被每次残差评估**活读**（`bc_refresh` 可在阶段时刻更新它）。零压 = 纯速度 ROM，承受结构性压力泄漏；供入精确压力 = oracle 隔离实验，把泄漏从机构误差中分离。预测性压力投影（6.4）即经注入口逐 stage 写入投影压力（见压力投影节）。
 
 **Taylor–Green 实测**（16² 全秩，2026-11-13）：
 
@@ -91,7 +91,28 @@ $$M_r\,\dot{a} = \Phi\,(b - A u)^{\top}, \qquad M_r = \Phi\,\mathrm{diag}(\rho V
 
 结论：纯速度 ROM 在涡街上抓住了振荡频率与有界性，但持续幅值塌缩 ~8×、时均场偏移——这些结构性偏差与 TG 上的压力泄漏同源，是 6.4 压力投影的最强动机。
 
+## 压力投影（Phase 6.4）
 
+6.3 量化的结构性压力泄漏的修复：**预测性压力投影**——逐 RK4 stage 在冻结重构场上用 FOM 的 `correctPressure` 机器求解一次离散压力方程（= PISO 单 corrector 的压力半步，不动动量解），结果写入 `GalerkinRom` 既有的 pressure 注入口。落点 = `pyfvm.pressure_projection` 绑定（签名与语义见 [`docs/python.md`](python.md) §API 一览）+ `GalerkinRom(pressure_projection=True)`；C++ numerical 模块零改动（延续 6.1–6.3 惯例）。
+
+**投影链**（绑定内一次完成）：稳态装配两分量（`assembleMomentum`，relaxation=1、`TimeTerm{}`，与 ROM 残差同算子）→ `finalize` → `refreshUHat` → `d = V/a_P` → `correctPressure(relaxationP=1)`（线性求解器由 `solver_config` 内部创建，不暴露 LinearSolver 类）。传给装配的 pressure 内容无关紧要（投影只消费 `diag` 与 `rhsNoPressure`）；`relaxationP=1` ⇒ 存储 pressure = p_solved。`velocity` 按契约被**原位**写为修正速度 uHat − d∇p（丢弃与否由调用方自备 scratch 决定）；`flux` 被覆写为修正通量（phiHbyA − C∇p）。
+
+**galerkin.py 侧时序**（逐 stage，镜像 oracle 时刻语义）：`compute_mass_flux` 之后、装配之前——scratch ← 复制重构场 → 投影（修正速度写入 scratch 后丢弃，ROM 状态必须保持系数 a）→ 重算 `compute_mass_flux` 把 flux 恢复为重构场质量通量。**与 oracle 通路的唯一差异 = pressure 场内容**（干净 A/B 对照）。纯 Neumann-p（TG）走 correctPressure 既有参考单元消元 + 闭域平衡路径。每 stage 成本 = 2 次装配 + 1 次压力求解（`last_projection` 存最近一次诊断四元组）。
+
+**稳态系数的理由**：ROM 残差算子就是稳态装配（dt=0），投影出的 ∇p 与被投影算子一致；TG（μ=0.1，Pe O(1–2)）上验证成立。
+
+**瞬态对角变体**（涡街裁决）：稳态投影在涡街 coarse 网格不可用——Central、Re=100、Pe≫2 下稳态算子对角不定（60/4224 单元 a_P ≤ 0，min −0.0303 ⇒ d min −671 ⇒ 压力系统非 SPD，CG/BiCGSTAB 均不收敛）；FOM 因瞬态 ρV/dt 对角（min +0.1997）从不触发，零压 ROM 双胞胎也不受影响（只做矩阵-向量乘、从不求逆对角）。`dt>0` ⇒ 装配带 `TimeTerm{rho, dt, Euler}`，ddt 源以冻结状态为 u_old ⇒ uHat = u_stage + r_s/(a_P+ρV/dt)（阻尼残差步，a_P^tr > 0）；dt=0 保持稳态算子 bit-identical。TG 默认稳态（μ=0.1、Pe O(1–2) 不受影响），涡街 `--projection` 传瞬态 dt。
+
+**实测证据**（2026-11-14，TG 16² 全秩 / 涡街 coarse rank 8）：
+
+| 场景 | 变体 | 结果 | 对照 |
+| --- | --- | --- | --- |
+| TG，T=0.2（20 步） | 稳态投影 err 0.0203 | 泄漏降 ~8× | 零压 0.124、oracle 地板 0.0091 |
+| TG，T=0.3 | 稳态投影 err 0.0229 | 同上；驱动 `--test`/`test_rom` 锁定 ≤0.05 | 零压 0.182、oracle 0.0091 |
+| TG，T=0.2 / T=0.3 | 瞬态投影（dt=0.01）err 0.0101 / 0.0110 | 优于稳态，距 oracle 地板 ~10–20% | `test_projection_transient_horizon` 锁定 ≤0.05 |
+| 涡街，T=20 短窗 `--test --projection` | 瞬态投影 | err\|FOM 尾段均值 ~1e-4（零压 0.1709）、std(a1) 3.907→1.333 | 跑通且诊断有限；全视界运行留作用户后续 |
+
+涡街 St(a1/a2) 在 T=20 短窗内与零压基线同值（0.0833）——窗口内极限环尚未建立（FOM 同因），只诊断不断言。契约测试：`TestPressureProjection`（Poiseuille 精确性、散度修复、原位语义、`relaxation_p` 校验）+ `TestGalerkinRomProjection`（单步一致性、泄漏视界、瞬态视界、投影/注入口互斥），见 `docs/python.md` §测试分工。
 
 ## 已验证结论
 
@@ -121,12 +142,12 @@ pod_decompose(data.u)            # 能量谱 / err(r)
 dmd(data.u[2000:], 0.05)         # 窗口 DMD → dominant_frequency() → St
 ```
 
-测试：`python/tests/test_rom.py` 11 用例（POD 代数 ×2、DMD 双正弦合成信号 ×1、npz 契约往返+错误路径 ×3、TG 32² 端到端冒烟 ×1、Galerkin TG ×4），随 `pyfvm_tests` 自动收编；`rom` 包核心不 import pyfvm（`rom.galerkin` 惰性 import），代数/契约用例无需扩展构建（pyfvm 缺失时仅 TG 冒烟与 Galerkin 用例 skip）。
+测试：`python/tests/test_rom.py` 15 用例（POD 代数 ×2、DMD 双正弦合成信号 ×1、npz 契约往返+错误路径 ×3、TG 32² 端到端冒烟 ×1、Galerkin TG ×4、Galerkin 投影 ×4），随 `pyfvm_tests` 自动收编；`rom` 包核心不 import pyfvm（`rom.galerkin` 惰性 import），代数/契约用例无需扩展构建（pyfvm 缺失时仅 TG 冒烟与 Galerkin/投影用例 skip）。
 
 ## 后续批次与已知问题
 
 - ✅ **6.2 pyfvm 装配矩阵绑定（2026-11-13 完成）**——`fvm.assemble_momentum`（用法与契约见 `docs/python.md` §API 一览）。原未决问题全部落地：暴露**稳态单次装配**（`dt=0` 给 `A_sp`/`b_sp`，质量阵 `M = ρ·diag(V)` 无需装配）；finalize 语义 = 返回 finalized COO（压缩后无重复项）；装配状态无所有权耦合（每次调用按传入状态独立装配，干净但每次重算——降阶步粒度下开销可忽略）。分离恒等式 $A_{\mathrm{tr}} = \theta\,A_{\mathrm{sp}} + \mathrm{diag}(\rho V/\mathrm{dt})$、$b_{\mathrm{tr}} = b_{\mathrm{sp}} + (\rho V/\mathrm{dt})\,u^{n} - (1-\theta)\,(A_{\mathrm{sp}}\,u^{n})$ 由 `test_pyfvm.py::TestAssembleMomentum` 契约锁定；压力项语义：逐单元 $b_P = b^{\mathrm{np}}_P - (\nabla p)_P\,V_P$（`rhs_no_pressure` 即 $b^{\mathrm{np}}$），velocity-only ROM 传零压场 + Neumann-p 即剥离压力源。
 - ✅ **6.3 纯速度 POD-Galerkin ROM（2026-11-13 完成）**——`rom/galerkin.py`（`GalerkinRom`、稠密 SPD `M_r`、RK4、pressure 注入口）+ `taylor_green_galerkin.py`（双变体：零压 vs oracle）+ `vortex_shedding_galerkin.py`（诊断）+ `test_rom.py` 4 用例。证据一句话：TG 16² 上单步一致性 0.0067、oracle 变体稳定在 FOM 离散地板（0.0091 vs oracle|FOM=0.0065），零压变体线性漂移（T=0.3→0.182、T=1.0→43%，对 dt_rom/4 与 32² 不变）确认为结构性压力泄漏——机构正确，漂移全归因压力项（实测表见 Galerkin 节）。
-- **6.4（可选）** 压力重构、Re 参数化；压力投影候选的依据已齐：泄漏已定量（上条），预测性方案 = 逐降阶步 `correctPressure`，落点即 `GalerkinRom` 的 pressure 注入口（oracle 钩子证明了该通路的隔离价值）；
+- ✅ **6.4 预测性压力投影（2026-11-14 完成）**——`pyfvm.pressure_projection` 绑定 + `GalerkinRom` 投影模式：逐 stage 稳态压力修正（PISO 单 corrector 压力半步），瞬态对角变体（`projection_dt`）覆盖 Pe≫2 场合。TG 16² 泄漏降 ~8×（零压 0.182 → 投影 0.0229，oracle 地板 0.0091），瞬态变体 0.0110 更优；涡街 `--projection` 瞬态模式跑通（err|FOM 尾段均值 ~1e-4、std(a1) 3.907→1.333，T=20 短窗诊断）。**Re 参数化 ROM 仍为 6.4 未实施项**（无量化依据，Phase 6 后续候选）；设计、机制与证据见压力投影节，绑定面见 `docs/python.md` §API 一览；
 - 条件触发候选：ROM 分析 MCP（README §路线图 Phase 6 登记）；
-- 已知问题：collocated 模态非散度自由（见 POD 节）——其后果已从预测变为**已定量**：纯速度 Galerkin ROM 在 TG 上呈线性误差漂移（T=1.0 达 43%），oracle 压力注入把误差压回 FOM 离散地板（见 Galerkin 节实测表）；Galerkin ROM 继承 FOM 离散误差，TG 的 $\mathrm{dt}^2/h$ 混合项意味着粗 dt 下 FOM 轨迹有精度地板（`docs/numerical.md` Taylor–Green 节）。
+- 已知问题：collocated 模态非散度自由（见 POD 节）——其后果已从预测变为**已定量**：纯速度 Galerkin ROM 在 TG 上呈线性误差漂移（T=1.0 达 43%），oracle 压力注入把误差压回 FOM 离散地板（见 Galerkin 节实测表）；该泄漏已量化并可由 6.4 投影模式消除（TG 上 ~8× 泄漏削减，见压力投影节）。Galerkin ROM 继承 FOM 离散误差，TG 的 $\mathrm{dt}^2/h$ 混合项意味着粗 dt 下 FOM 轨迹有精度地板（`docs/numerical.md` Taylor–Green 节）。

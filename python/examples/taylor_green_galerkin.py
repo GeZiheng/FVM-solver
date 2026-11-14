@@ -2,7 +2,7 @@
 
 Collects PISO snapshots exactly like taylor_green_rom.py (exact per-face
 Dirichlet BCs refreshed at t^{n+1}, one snapshot per step), builds
-centered POD bases for u and v, then integrates TWO Galerkin ROM
+centered POD bases for u and v, then integrates THREE Galerkin ROM
 variants from t = 0 with rom.galerkin.GalerkinRom (explicit RK4):
 
 - zero-pressure: the plain velocity-only ROM; its error growth
@@ -12,9 +12,13 @@ variants from t = 0 with rom.galerkin.GalerkinRom (explicit RK4):
   every RK4 stage time (through the GalerkinRom pressure hook and a
   bc_refresh that also refreshes the exact BCs); it isolates the
   machinery error from the leakage (oracle error settles at the FOM
-  discretization level).
+  discretization level);
+- projective (Phase 6.4): every RK4 stage first runs one predictive FOM
+  pressure projection on the frozen reconstruction (the pressure
+  half-step of a single PISO corrector) and the residual reads the
+  projected pressure -- the quantified candidate against the leakage.
 
-Output is an err(t) table (both variants vs the exact solution and vs
+Output is an err(t) table (all variants vs the exact solution and vs
 the collected FOM trajectory) plus a single-step consistency check
 (one ROM RK4 step vs one FOM PISO step at the same dt -- different
 integrators, so "small, not equal").  --frames optionally writes the
@@ -51,9 +55,14 @@ TABLE_ROWS = 20
 #   oracle T = 0.3 error 0.0091 (combined u+v relative L2, at the FOM
 #     discretization floor: oracle|FOM = 0.0065) -> threshold 0.02
 #     (~2.2x margin over both the measured value and the floor).
+# Projective (Phase 6.4): hard ceiling 0.05 per plan D4 (below half the
+# zero-pressure leakage; a measured value above it is a stop-and-report).
+# Measured T = 0.3 error 0.0229 (between the oracle floor 0.0091 and the
+# zero-pressure leakage 0.182).
 TEST_SINGLE_STEP_MAX = 0.02
 TEST_ZERO_PRESSURE_BAND = (0.09, 0.35)
 TEST_ORACLE_MAX = 0.02
+TEST_PROJECTIVE_MAX = 0.05
 
 
 def make_piso_config(dt):
@@ -115,9 +124,14 @@ def make_bc_refresh(mesh, bc_u, bc_v, bc_p, pressure=None):
     return bc_refresh
 
 
-def build_rom(mesh, pod_u, pod_v, bc_u, bc_v, pressure=None):
+def build_rom(mesh, pod_u, pod_v, bc_u, bc_v, pressure=None,
+              pressure_projection=False, pressure_solver_config=None,
+              projection_dt=None):
     return GalerkinRom(mesh, NU, RHO, pod_u, pod_v, bc_u, bc_v,
-                       fvm.ConvectionScheme.Central, pressure=pressure)
+                       fvm.ConvectionScheme.Central, pressure=pressure,
+                       pressure_projection=pressure_projection,
+                       pressure_solver_config=pressure_solver_config,
+                       projection_dt=projection_dt)
 
 
 def relative_error(computed, reference):
@@ -172,6 +186,12 @@ def main():
                              "the full rank)")
     parser.add_argument("--dt-rom", type=float, default=None,
                         help="ROM RK4 step (default: the FOM dt)")
+    parser.add_argument("--projection-dt", type=float, default=None,
+                        help="transient-diagonal projection (Phase 6.4 "
+                             "revised D1): assemble the per-stage pressure "
+                             "projection with a_P + rho V/dt (damped "
+                             "residual step) instead of the steady "
+                             "operator; None keeps the steady operator")
     parser.add_argument("--frames", type=int, default=0,
                         help="write the first N reconstructed velocity "
                              "frames of both variants as .vti (0 "
@@ -207,17 +227,25 @@ def main():
     print(f"single-step consistency (1 ROM RK4 vs 1 FOM PISO, dt={dt}): "
           f"relative difference {single_step:.4f}")
 
-    # Two variants: zero pressure (leakage) and oracle (exact pressure
-    # injected at every RK4 stage time).
+    # Three variants: zero pressure (leakage), oracle (exact pressure
+    # injected at every RK4 stage time) and projective (Phase 6.4: one
+    # FOM pressure projection per stage; the pressure solver mirrors the
+    # FOM pressure precision).
     oracle_pressure = fvm.ScalarField(mesh, "oracle_pressure")
+    fom_pressure_cfg = make_piso_config(dt).pressure_solver_config
     rom_zero = build_rom(mesh, pod_u, pod_v, bc_u, bc_v)
     rom_oracle = build_rom(mesh, pod_u, pod_v, bc_u, bc_v,
                            pressure=oracle_pressure)
+    rom_projective = build_rom(mesh, pod_u, pod_v, bc_u, bc_v,
+                               pressure_projection=True,
+                               pressure_solver_config=fom_pressure_cfg,
+                               projection_dt=args.projection_dt)
     initial = fvm.VectorField(mesh, "initial")
     initial.u.to_numpy()[:] = collector.u[0]
     initial.v.to_numpy()[:] = collector.v[0]
     rom_zero.set_state_from_fields(initial)
     rom_oracle.set_state_from_fields(initial)
+    rom_projective.set_state_from_fields(initial)
 
     n_steps = round(end_time / dt_rom)
     refresh_plain = make_bc_refresh(mesh, bc_u, bc_v, bc_p)
@@ -229,12 +257,18 @@ def main():
     hist_oracle = rom_oracle.advance(0.0, dt_rom, n_steps,
                                      bc_refresh=refresh_oracle,
                                      record_every=1)
+    hist_projective = rom_projective.advance(0.0, dt_rom, n_steps,
+                                             bc_refresh=refresh_plain,
+                                             record_every=1)
+    print(f"projective last-stage projection (imb, du, dv, dp): "
+          f"{rom_projective.last_projection}")
 
-    # err(t) table: both variants against the exact solution and the
+    # err(t) table: all variants against the exact solution and the
     # FOM trajectory (FOM index = round(t / dt); exact matches because
     # dt_rom defaults to dt and record_every = 1).
     print(f"{'t':>7} {'zero|exact':>12} {'oracle|exact':>13} "
-          f"{'zero|FOM':>12} {'oracle|FOM':>12}")
+          f"{'proj|exact':>12} {'zero|FOM':>12} {'oracle|FOM':>12} "
+          f"{'proj|FOM':>12}")
     times = hist_zero[0]
     stride = max(1, len(times) // TABLE_ROWS)
     rows = list(range(0, len(times), stride))
@@ -249,16 +283,22 @@ def main():
         a_u, a_v = hist_oracle[1][row], hist_oracle[2][row]
         u_orc = pod_u.mean + a_u @ pod_u.modes
         v_orc = pod_v.mean + a_v @ pod_v.modes
+        a_u, a_v = hist_projective[1][row], hist_projective[2][row]
+        u_prj = pod_u.mean + a_u @ pod_u.modes
+        v_prj = pod_v.mean + a_v @ pod_v.modes
         u_ex, v_ex, _ = exact_fields(mesh, t)
         idx = min(round(t / dt), len(collector.u) - 1)
         u_fom, v_fom = collector.u[idx], collector.v[idx]
         errs = (velocity_error(u_zero, v_zero, u_ex, v_ex),
                 velocity_error(u_orc, v_orc, u_ex, v_ex),
+                velocity_error(u_prj, v_prj, u_ex, v_ex),
                 velocity_error(u_zero, v_zero, u_fom, v_fom),
-                velocity_error(u_orc, v_orc, u_fom, v_fom))
+                velocity_error(u_orc, v_orc, u_fom, v_fom),
+                velocity_error(u_prj, v_prj, u_fom, v_fom))
         finals[t] = errs
         print(f"{t:7.3f} {errs[0]:12.5f} {errs[1]:13.5f} "
-              f"{errs[2]:12.5f} {errs[3]:12.5f}")
+              f"{errs[2]:12.5f} {errs[3]:12.5f} {errs[4]:12.5f} "
+              f"{errs[5]:12.5f}")
 
     if args.frames > 0 and not args.test:
         stride = max(1, len(times) // args.frames)
@@ -292,6 +332,10 @@ def main():
         checks["oracle"] = oracle_err <= TEST_ORACLE_MAX
         detail.append(f"oracle_T={t_end:.2f}_err={oracle_err:.4f} <= "
                       f"{TEST_ORACLE_MAX}")
+        projective_err = finals[t_end][2]
+        checks["projective"] = projective_err <= TEST_PROJECTIVE_MAX
+        detail.append(f"projective_T={t_end:.2f}_err={projective_err:.4f} "
+                      f"<= {TEST_PROJECTIVE_MAX}")
         ok = all(checks.values())
         report_test(ok, f"({', '.join(detail)}, checks={checks})")
         return

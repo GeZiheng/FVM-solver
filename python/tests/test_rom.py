@@ -330,29 +330,15 @@ class TestTaylorGreenSnapshotSmoke(unittest.TestCase):
             self.ENERGY_THRESHOLD)
 
 
-@unittest.skipIf(not HAVE_PYFVM, "pyfvm extension not built")
-class TestGalerkinRomTaylorGreen(unittest.TestCase):
-    """Velocity-only Galerkin ROM contract tests on Taylor-Green
-    (16^2, rho = 1, nu = 0.1, exact per-face Dirichlet BCs refreshed at
-    the stage/end-step times).  rom.galerkin imports pyfvm lazily, so
-    this class relies on the module-level pyfvm import above.  All
-    thresholds are calibrated on 2026-11-13 parent-session
-    measurements (plan phase 6.3 change log)."""
+class _TaylorGreenRomFixture:
+    """Shared Taylor-Green fixture for the Galerkin ROM test classes:
+    16^2, rho = 1, nu = 0.1, exact per-face Dirichlet BCs.  A plain
+    mixin (not a TestCase), so unittest never collects it directly."""
 
     NX = 16
     DT = 0.01
     RHO = 1.0
     NU = 0.1
-    # Calibration 2026-11-13 (16^2, dt = 0.01, full-rank basis):
-    #   single-step ROM RK4 vs FOM PISO relative difference 0.006 ->
-    #     threshold 0.02 (~3x margin, different integrators);
-    #   zero-pressure T = 0.2 error 0.124 -> band [0.05, 0.25] (>= 2x
-    #     margin both sides; the band quantifies the structural
-    #     pressure leakage, an exact match would mean the pressure
-    #     term vanished).
-    SINGLE_STEP_MAX = 0.02
-    ZERO_PRESSURE_BAND = (0.05, 0.25)
-    ZERO_PRESSURE_STEPS = 20  # T = 0.2
 
     def _exact_fields(self, mesh, t):
         """Cell-centred exact (u, v, p) at time ``t``."""
@@ -432,13 +418,14 @@ class TestGalerkinRomTaylorGreen(unittest.TestCase):
                              pressure.to_numpy())
         return mesh, collector, (bc_u, bc_v, bc_p)
 
-    def _build_rom(self, mesh, collector, bcs):
+    def _build_rom(self, mesh, collector, bcs, **rom_kwargs):
         from rom.galerkin import GalerkinRom
         pod_u = pod_decompose(collector.u)
         pod_v = pod_decompose(collector.v)
         bc_u, bc_v, _ = bcs
         return GalerkinRom(mesh, self.NU, self.RHO, pod_u, pod_v,
-                           bc_u, bc_v, pyfvm.ConvectionScheme.Central)
+                           bc_u, bc_v, pyfvm.ConvectionScheme.Central,
+                           **rom_kwargs)
 
     def _velocity_error(self, u, v, u_ref, v_ref):
         diff2 = (float(np.mean((u - u_ref) ** 2))
@@ -452,6 +439,27 @@ class TestGalerkinRomTaylorGreen(unittest.TestCase):
         initial.u.to_numpy()[:] = u0
         initial.v.to_numpy()[:] = v0
         rom.set_state_from_fields(initial)
+
+
+@unittest.skipIf(not HAVE_PYFVM, "pyfvm extension not built")
+class TestGalerkinRomTaylorGreen(_TaylorGreenRomFixture, unittest.TestCase):
+    """Velocity-only Galerkin ROM contract tests on Taylor-Green
+    (16^2, rho = 1, nu = 0.1, exact per-face Dirichlet BCs refreshed at
+    the stage/end-step times).  rom.galerkin imports pyfvm lazily, so
+    this class relies on the module-level pyfvm import above.  All
+    thresholds are calibrated on 2026-11-13 parent-session
+    measurements (plan phase 6.3 change log)."""
+
+    # Calibration 2026-11-13 (16^2, dt = 0.01, full-rank basis):
+    #   single-step ROM RK4 vs FOM PISO relative difference 0.006 ->
+    #     threshold 0.02 (~3x margin, different integrators);
+    #   zero-pressure T = 0.2 error 0.124 -> band [0.05, 0.25] (>= 2x
+    #     margin both sides; the band quantifies the structural
+    #     pressure leakage, an exact match would mean the pressure
+    #     term vanished).
+    SINGLE_STEP_MAX = 0.02
+    ZERO_PRESSURE_BAND = (0.05, 0.25)
+    ZERO_PRESSURE_STEPS = 20  # T = 0.2
 
     def test_state_roundtrip_full_rank(self):
         mesh, collector, bcs = self._build_case(steps=10)
@@ -519,6 +527,118 @@ class TestGalerkinRomTaylorGreen(unittest.TestCase):
         # leakage of the velocity-only ROM (both bounds >= 2x margin).
         self.assertGreaterEqual(error, self.ZERO_PRESSURE_BAND[0])
         self.assertLessEqual(error, self.ZERO_PRESSURE_BAND[1])
+
+
+@unittest.skipIf(not HAVE_PYFVM, "pyfvm extension not built")
+class TestGalerkinRomProjection(_TaylorGreenRomFixture, unittest.TestCase):
+    """Pressure-projection mode contract tests (Phase 6.4): every RK4
+    stage runs one predictive FOM pressure projection on the frozen
+    reconstruction and the residual reads the projected pressure.  Same
+    Taylor-Green base as TestGalerkinRomTaylorGreen; thresholds follow
+    plan phase 6.4 D4."""
+
+    # Aligned with TestGalerkinRomTaylorGreen.SINGLE_STEP_MAX (one RK4
+    # step, different metric reference: exact solution here).
+    SINGLE_STEP_MAX = 0.02
+    ZERO_PRESSURE_STEPS = 20  # T = 0.2
+    # Plan D4: the projection variant must land below half the zero-
+    # pressure leakage calibration (0.124); a first measurement above
+    # this ceiling is a stop-and-report result.
+    PROJECTION_LEAKAGE_MAX = 0.05
+
+    def test_projection_single_step_consistency(self):
+        # Mirrors test_single_step_consistency with projection on (no
+        # injected pressure): one RK4 step with the exact BCs refreshed
+        # at stage times, relative L2 vs the exact solution at T = dt.
+        mesh, collector, bcs = self._build_case(steps=1)
+        rom = self._build_rom(mesh, collector, bcs,
+                              pressure_projection=True)
+        bc_u, bc_v, bc_p = bcs
+
+        self._set_initial(mesh, rom)
+
+        def bc_refresh(t):
+            self._refresh_boundary_conditions(mesh, bc_u, bc_v, bc_p, t)
+
+        rom.advance(0.0, self.DT, 1, bc_refresh=bc_refresh)
+        u_rom, v_rom = rom.reconstruct_arrays()
+        u_ex, v_ex, _ = self._exact_fields(mesh, self.DT)
+
+        error = self._velocity_error(u_rom, v_rom, u_ex, v_ex)
+        # calibrated 2026-11-14: measured 0.0018 (threshold aligned with
+        # the single-step consistency test).
+        self.assertLess(error, self.SINGLE_STEP_MAX)
+        self.assertGreater(error, 0.0)
+        # the per-stage projection ran and published its diagnostics
+        self.assertIsNotNone(rom.last_projection)
+        for value in rom.last_projection:
+            self.assertTrue(np.isfinite(value))
+            self.assertGreaterEqual(value, 0.0)
+
+    def test_projection_leakage_horizon(self):
+        # 20 steps (T = 0.2): the per-stage projected pressure must keep
+        # the error clearly below the zero-pressure leakage calibration
+        # (0.124, structural drift of the velocity-only ROM).
+        mesh, collector, bcs = self._build_case(
+            steps=self.ZERO_PRESSURE_STEPS)
+        rom = self._build_rom(mesh, collector, bcs,
+                              pressure_projection=True)
+        bc_u, bc_v, bc_p = bcs
+
+        self._set_initial(mesh, rom)
+
+        def bc_refresh(t):
+            self._refresh_boundary_conditions(mesh, bc_u, bc_v, bc_p, t)
+
+        rom.advance(0.0, self.DT, self.ZERO_PRESSURE_STEPS,
+                    bc_refresh=bc_refresh)
+        u_rom, v_rom = rom.reconstruct_arrays()
+        u_ex, v_ex, _ = self._exact_fields(
+            mesh, self.ZERO_PRESSURE_STEPS * self.DT)
+
+        error = self._velocity_error(u_rom, v_rom, u_ex, v_ex)
+        # calibrated 2026-11-14: measured 0.0203 (vs the zero-pressure
+        # leakage 0.124 and the oracle floor 0.0091); ceiling = plan D4.
+        self.assertLess(error, self.PROJECTION_LEAKAGE_MAX)
+
+    def test_projection_transient_horizon(self):
+        # Same 20-step horizon with the transient-diagonal projection
+        # (projection_dt = the ROM dt, revised D1): uHat = u_stage +
+        # r_s/(a_P + rho V/dt) damps the residual step and lands closer
+        # to the oracle floor on this case.
+        mesh, collector, bcs = self._build_case(
+            steps=self.ZERO_PRESSURE_STEPS)
+        rom = self._build_rom(mesh, collector, bcs,
+                              pressure_projection=True,
+                              projection_dt=self.DT)
+        bc_u, bc_v, bc_p = bcs
+
+        self._set_initial(mesh, rom)
+
+        def bc_refresh(t):
+            self._refresh_boundary_conditions(mesh, bc_u, bc_v, bc_p, t)
+
+        rom.advance(0.0, self.DT, self.ZERO_PRESSURE_STEPS,
+                    bc_refresh=bc_refresh)
+        u_rom, v_rom = rom.reconstruct_arrays()
+        u_ex, v_ex, _ = self._exact_fields(
+            mesh, self.ZERO_PRESSURE_STEPS * self.DT)
+
+        error = self._velocity_error(u_rom, v_rom, u_ex, v_ex)
+        # calibrated 2026-11-14: measured 0.0101 (steady-operator
+        # projection 0.0203 on the same horizon, oracle floor 0.0091);
+        # ceiling = plan D4.
+        self.assertLess(error, self.PROJECTION_LEAKAGE_MAX)
+
+    def test_projection_oracle_mutual_exclusion(self):
+        # The projection computes the per-stage pressure itself; an
+        # injected oracle field would be overwritten, so the constructor
+        # rejects the combination.
+        mesh, collector, bcs = self._build_case(steps=1)
+        pressure = pyfvm.ScalarField(mesh, "oracle")
+        with self.assertRaises(ValueError):
+            self._build_rom(mesh, collector, bcs, pressure=pressure,
+                            pressure_projection=True)
 
 
 if __name__ == "__main__":
