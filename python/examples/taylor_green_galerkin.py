@@ -22,8 +22,8 @@ Output is an err(t) table (all variants vs the exact solution and vs
 the collected FOM trajectory) plus a single-step consistency check
 (one ROM RK4 step vs one FOM PISO step at the same dt -- different
 integrators, so "small, not equal").  --frames optionally writes the
-reconstructed ROM velocity as .vti frames.  --test runs a short
-asserted configuration and writes no files.
+reconstructed ROM velocity of all three variants as .vti frames.  --test
+runs a short asserted configuration and writes no files.
 
 Run:  python python/examples/taylor_green_galerkin.py
       [--nx N] [--dt DT] [--end-time T] [--rank R] [--dt-rom DT]
@@ -194,7 +194,7 @@ def main():
                              "operator; None keeps the steady operator")
     parser.add_argument("--frames", type=int, default=0,
                         help="write the first N reconstructed velocity "
-                             "frames of both variants as .vti (0 "
+                             "frames of all three variants as .vti (0 "
                              "disables; ignored with --test)")
     parser.add_argument("--test", action="store_true",
                         help="run the short asserted configuration "
@@ -304,7 +304,8 @@ def main():
         stride = max(1, len(times) // args.frames)
         frame_velocity = fvm.VectorField(mesh, "rom_velocity")
         variants = (("rom_zero", rom_zero, hist_zero),
-                    ("rom_oracle", rom_oracle, hist_oracle))
+                    ("rom_oracle", rom_oracle, hist_oracle),
+                    ("rom_projective", rom_projective, hist_projective))
         for row in list(range(0, len(times), stride))[:args.frames]:
             for name, rom, history in variants:
                 # the ROM holds its final state; restore the recorded

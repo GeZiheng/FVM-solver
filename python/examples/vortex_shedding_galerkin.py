@@ -158,8 +158,9 @@ def main():
                              "(diagnostics only)")
     parser.add_argument("--frames", type=int, default=0,
                         help="write the first N ROM reconstruction frames "
-                             "plus the FOM snapshots at the same times as "
-                             ".vtu (0 disables; ignored with --test)")
+                             "(both variants with --projection) plus the "
+                             "FOM snapshots at the same times as .vtu "
+                             "(0 disables; ignored with --test)")
     parser.add_argument("--test", action="store_true",
                         help="run the short machine-level configuration "
                              "(coarse, dt=0.01, T=20, rank 8); "
@@ -293,18 +294,26 @@ def main():
 
     if args.frames > 0 and not args.test:
         # ROM reconstructions at recorded rows plus the matching FOM
-        # snapshots (same times) for side-by-side comparison.
+        # snapshots (same times) for side-by-side comparison.  The FOM
+        # snapshot is shared between the variants; each ROM writes its
+        # own frame series (rom_recon = zero-pressure, rom_projective =
+        # the projection twin, --projection only).
         snap_dt = args.dt * args.snap_every
         stride = max(1, len(rec_times) // args.frames)
         frame_velocity = fvm.VectorField(mesh, "rom_frame")
         fom_velocity = fvm.VectorField(mesh, "fom_frame")
+        frame_roms = [("rom_recon", rom, a_u_hist, a_v_hist)]
+        if rom_projective is not None:
+            frame_roms.append(("rom_projective", rom_projective,
+                               a_up_hist, a_vp_hist))
         for row in list(range(0, len(rec_times), stride))[:args.frames]:
-            rom.a_u = a_u_hist[row].copy()
-            rom.a_v = a_v_hist[row].copy()
-            rom.write_state(frame_velocity)
-            write_results(mesh, frame_velocity, None, CASE_DIR,
-                          f"rom_recon_{row:04d}.vtu", scalars={},
-                          vectors={"velocity": frame_velocity})
+            for name, frame_rom, au_hist, av_hist in frame_roms:
+                frame_rom.a_u = au_hist[row].copy()
+                frame_rom.a_v = av_hist[row].copy()
+                frame_rom.write_state(frame_velocity)
+                write_results(mesh, frame_velocity, None, CASE_DIR,
+                              f"{name}_{row:04d}.vtu", scalars={},
+                              vectors={"velocity": frame_velocity})
             idx = min(first + round((rec_times[row] - t0) / snap_dt),
                       len(collector) - 1)
             fom_velocity.u.to_numpy()[:] = collector.u[idx]
