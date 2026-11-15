@@ -640,6 +640,108 @@ class TestGalerkinRomProjection(_TaylorGreenRomFixture, unittest.TestCase):
             self._build_rom(mesh, collector, bcs, pressure=pressure,
                             pressure_projection=True)
 
+    def test_projection_dedup_trajectory_identity(self):
+        # The Phase 6.5a dedup must not change the trajectory: the ROM's
+        # projection-mode rhs is bit-identical to the pre-dedup composition
+        # of public bindings (mass flux -> plain projection on a scratch
+        # copy -> flux restore recompute -> two steady assemble_momentum
+        # calls), both at isolated states and over a full RK4 advance.
+        mesh, collector, bcs = self._build_case(steps=4)
+        rom = self._build_rom(mesh, collector, bcs,
+                              pressure_projection=True)
+        bc_u, bc_v, bc_p = bcs
+        rho, nu = self.RHO, self.NU
+        scheme = pyfvm.ConvectionScheme.Central
+
+        velocity = pyfvm.VectorField(mesh, "ref_velocity")
+        pressure = pyfvm.ScalarField(mesh, "ref_pressure")
+        flux = pyfvm.FaceFluxField(mesh, "ref_phi")
+        scratch = pyfvm.VectorField(mesh, "ref_scratch")
+        # GalerkinRom's default bc_p is a fresh all-Neumann field (the
+        # fixture's Dirichlet bc_p is never passed to the ROM), so the
+        # reference must mirror that, not the fixture object.
+        ref_bc_p = pyfvm.BoundaryField(mesh)
+        volumes = np.array([mesh.cell_volume(cell)
+                            for cell in range(mesh.cell_count())])
+        mass_u = (rom.modes_u * (rho * volumes)) @ rom.modes_u.T
+        mass_v = (rom.modes_v * (rho * volumes)) @ rom.modes_v.T
+
+        def reference_rhs(t, a_u, a_v):
+            self._refresh_boundary_conditions(mesh, bc_u, bc_v, bc_p, t)
+            velocity.u.to_numpy()[:] = rom.mean_u + a_u @ rom.modes_u
+            velocity.v.to_numpy()[:] = rom.mean_v + a_v @ rom.modes_v
+            pyfvm.compute_mass_flux(mesh, velocity, rho, bc_u, bc_v, flux)
+            scratch.u.to_numpy()[:] = velocity.u.to_numpy()
+            scratch.v.to_numpy()[:] = velocity.v.to_numpy()
+            pyfvm.pressure_projection(mesh, rho, nu, scheme,
+                                      bc_u, bc_v, ref_bc_p, scratch,
+                                      pressure, flux)
+            # Restore the reconstruction's own mass flux (pre-dedup D1).
+            pyfvm.compute_mass_flux(mesh, velocity, rho, bc_u, bc_v, flux)
+            kwargs = dict(mu=nu, scheme=scheme, pressure=pressure,
+                          bc_p=ref_bc_p, rho=rho)
+            sys_u = pyfvm.assemble_momentum(
+                mesh, flux, velocity, component=0, bc=bc_u, **kwargs)
+            sys_v = pyfvm.assemble_momentum(
+                mesh, flux, velocity, component=1, bc=bc_v, **kwargs)
+            n = mesh.cell_count()
+
+            def reduced(system, field, modes):
+                residual = (system.b
+                            - np.bincount(system.rows,
+                                          weights=(system.vals
+                                                   * field[system.cols]),
+                                          minlength=n))
+                return modes @ residual
+
+            return (np.linalg.solve(
+                        mass_u, reduced(sys_u, velocity.u.to_numpy(),
+                                        rom.modes_u)),
+                    np.linalg.solve(
+                        mass_v, reduced(sys_v, velocity.v.to_numpy(),
+                                        rom.modes_v)))
+
+        # Isolated rhs evaluations at random states: the reference call
+        # also leaves the shared BCs refreshed at t, exactly what the
+        # ROM's bc_refresh would do for its own rhs at the same stage
+        # time.
+        rng = np.random.default_rng(6)
+        for _ in range(3):
+            a_u = rng.standard_normal(rom.a_u.size) * 0.1
+            a_v = rng.standard_normal(rom.a_v.size) * 0.1
+            f_u_ref, f_v_ref = reference_rhs(0.01, a_u, a_v)
+            f_u, f_v = rom.rhs(0.01, a_u, a_v)
+            np.testing.assert_array_equal(f_u, f_u_ref)
+            np.testing.assert_array_equal(f_v, f_v_ref)
+
+        # Full RK4 advance (mirrors GalerkinRom._rk4_step).
+        def bc_refresh(t):
+            self._refresh_boundary_conditions(mesh, bc_u, bc_v, bc_p, t)
+
+        self._set_initial(mesh, rom)
+        rom.advance(0.0, self.DT, 3, bc_refresh=bc_refresh)
+
+        u0, v0, _ = self._exact_fields(mesh, 0.0)
+        a_u = (u0 - rom.mean_u) @ rom.modes_u.T
+        a_v = (v0 - rom.mean_v) @ rom.modes_v.T
+        dt = self.DT
+        for step in range(3):
+            t = step * dt
+            k1u, k1v = reference_rhs(t, a_u, a_v)
+            k2u, k2v = reference_rhs(t + 0.5 * dt,
+                                     a_u + 0.5 * dt * k1u,
+                                     a_v + 0.5 * dt * k1v)
+            k3u, k3v = reference_rhs(t + 0.5 * dt,
+                                     a_u + 0.5 * dt * k2u,
+                                     a_v + 0.5 * dt * k2v)
+            k4u, k4v = reference_rhs(t + dt, a_u + dt * k3u,
+                                     a_v + dt * k3v)
+            a_u = a_u + dt / 6.0 * (k1u + 2.0 * k2u + 2.0 * k3u + k4u)
+            a_v = a_v + dt / 6.0 * (k1v + 2.0 * k2v + 2.0 * k3v + k4v)
+
+        np.testing.assert_array_equal(rom.a_u, a_u)
+        np.testing.assert_array_equal(rom.a_v, a_v)
+
 
 if __name__ == "__main__":
     unittest.main()

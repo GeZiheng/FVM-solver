@@ -27,11 +27,12 @@ runs a short asserted configuration and writes no files.
 
 Run:  python python/examples/taylor_green_galerkin.py
       [--nx N] [--dt DT] [--end-time T] [--rank R] [--dt-rom DT]
-      [--frames N] [--test]
+      [--projection-dt DT] [--frames N] [--timing] [--test]
 """
 
 import argparse
 import math
+import time
 
 import numpy as np
 
@@ -196,6 +197,10 @@ def main():
                         help="write the first N reconstructed velocity "
                              "frames of all three variants as .vti (0 "
                              "disables; ignored with --test)")
+    parser.add_argument("--timing", action="store_true",
+                        help="print per-step wall-clock costs of the FOM "
+                             "snapshot collection and of each ROM "
+                             "variant's advance")
     parser.add_argument("--test", action="store_true",
                         help="run the short asserted configuration "
                              "(16^2, dt=0.01, T=0.3, full rank); "
@@ -208,7 +213,13 @@ def main():
         nx, dt, end_time, rank = args.nx, args.dt, args.end_time, args.rank
 
     dt_rom = dt if (args.dt_rom is None or args.test) else args.dt_rom
+    fom_steps = round(end_time / dt)
+    tic = time.perf_counter() if args.timing else None
     mesh, collector, (bc_u, bc_v, bc_p) = run(nx, dt, end_time)
+    if args.timing:
+        print(f"timing FOM collection  : "
+              f"{(time.perf_counter() - tic) / fom_steps * 1000.0:7.1f} "
+              f"ms/step ({fom_steps} steps, mesh/BC setup included)")
     print(f"collected {len(collector)} snapshots of "
           f"{mesh.cell_count()} cells (one per step)")
 
@@ -251,15 +262,23 @@ def main():
     refresh_plain = make_bc_refresh(mesh, bc_u, bc_v, bc_p)
     refresh_oracle = make_bc_refresh(mesh, bc_u, bc_v, bc_p,
                                      pressure=oracle_pressure)
-    hist_zero = rom_zero.advance(0.0, dt_rom, n_steps,
-                                 bc_refresh=refresh_plain,
-                                 record_every=1)
-    hist_oracle = rom_oracle.advance(0.0, dt_rom, n_steps,
-                                     bc_refresh=refresh_oracle,
-                                     record_every=1)
-    hist_projective = rom_projective.advance(0.0, dt_rom, n_steps,
-                                             bc_refresh=refresh_plain,
-                                             record_every=1)
+
+    def timed_advance(label, rom, refresh):
+        if not args.timing:
+            return rom.advance(0.0, dt_rom, n_steps,
+                               bc_refresh=refresh, record_every=1)
+        tic = time.perf_counter()
+        hist = rom.advance(0.0, dt_rom, n_steps,
+                           bc_refresh=refresh, record_every=1)
+        print(f"timing ROM {label:<11}: "
+              f"{(time.perf_counter() - tic) / n_steps * 1000.0:7.1f} "
+              f"ms/step ({n_steps} steps)")
+        return hist
+
+    hist_zero = timed_advance("zero-pressure", rom_zero, refresh_plain)
+    hist_oracle = timed_advance("oracle", rom_oracle, refresh_oracle)
+    hist_projective = timed_advance("projective", rom_projective,
+                                    refresh_plain)
     print(f"projective last-stage projection (imb, du, dv, dp): "
           f"{rom_projective.last_projection}")
 

@@ -580,6 +580,145 @@ class TestPressureProjection(unittest.TestCase):
                                         relaxation_p=bad, **kwargs)
 
 
+class TestPressureProjectionSystems(unittest.TestCase):
+    """Contract tests for the fused pressure_projection export (Phase 6.5a
+    assembly dedup): return_systems = True assembles the steady momentum
+    operator once, shares it with the projection and returns it next to the
+    diagnostics."""
+
+    RHO = 1.0
+    MU = 0.01
+    N = 16
+
+    def _fresh_case(self):
+        """Fresh divergent-source case per call (the
+        TestPressureProjection fixture; this class repeats its constants)
+        - in-place mutations must never leak between compared runs."""
+        return TestPressureProjection._source_field_case(self)
+
+    def _reference_system(self, case, component, pressure=None):
+        """Separate assemble_momentum call on a pristine frozen state (the
+        pre-change consumer path)."""
+        mesh, velocity, p0, flux, bc_u, bc_v, bc_p = case
+        bc = bc_u if component == 0 else bc_v
+        p = p0 if pressure is None else pressure
+        return fvm.assemble_momentum(mesh, flux, velocity, self.MU,
+                                     fvm.ConvectionScheme.Central,
+                                     bc, component=component,
+                                     pressure=p, bc_p=bc_p,
+                                     rho=self.RHO)
+
+    def _assert_same_system(self, actual, reference):
+        # Pressure-independent fields only: the exported b carries the
+        # projected pressure source and is asserted separately against a
+        # reference assembled on that pressure.
+        for attr in ("rows", "cols", "vals", "diag", "rhs_no_pressure"):
+            self.assertTrue(np.array_equal(getattr(actual, attr),
+                                           getattr(reference, attr)), attr)
+        self.assertEqual(actual.n, reference.n)
+
+    def test_fused_systems_match_separate_assembly(self):
+        # dt = 0: the exported systems are the steady operator of the
+        # frozen state - bit-identical to separate assemble_momentum calls
+        # on the same state - and b carries the projected pressure source,
+        # i.e. exactly what a separate assembly on the projected pressure
+        # would produce. The caller's flux is left untouched.
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = \
+            self._fresh_case()
+        flux_before = flux.to_numpy().copy()
+
+        result, sys_u, sys_v = fvm.pressure_projection(
+            mesh, self.RHO, self.MU, fvm.ConvectionScheme.Central,
+            bc_u, bc_v, bc_p, velocity, pressure, flux,
+            return_systems=True)
+
+        self._assert_same_system(
+            sys_u, self._reference_system(self._fresh_case(), 0))
+        self._assert_same_system(
+            sys_v, self._reference_system(self._fresh_case(), 1))
+
+        case_p = self._fresh_case()
+        projected = fvm.ScalarField(case_p[0], "projected")
+        projected.to_numpy()[:] = pressure.to_numpy()
+        self.assertTrue(np.array_equal(
+            sys_u.b, self._reference_system(case_p, 0,
+                                            pressure=projected).b))
+        self.assertTrue(np.array_equal(
+            sys_v.b, self._reference_system(case_p, 1,
+                                            pressure=projected).b))
+
+        self.assertTrue(np.array_equal(flux.to_numpy(), flux_before))
+
+    def test_fused_projection_bit_identical_to_plain(self):
+        # The fused and plain entries produce bit-identical projections on
+        # twin inputs - for dt = 0 (shared steady assembly) and dt > 0
+        # (transient form derived by the theta = 1 identity). The exported
+        # systems stay the steady operator in both cases.
+        for dt in (0.0, 0.05):
+            with self.subTest(dt=dt):
+                mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = \
+                    self._fresh_case()
+                result, sys_u, sys_v = fvm.pressure_projection(
+                    mesh, self.RHO, self.MU, fvm.ConvectionScheme.Central,
+                    bc_u, bc_v, bc_p, velocity, pressure, flux,
+                    dt=dt, return_systems=True)
+
+                mesh2, velocity2, pressure2, flux2, bc_u2, bc_v2, bc_p2 = \
+                    self._fresh_case()
+                ref = fvm.pressure_projection(
+                    mesh2, self.RHO, self.MU, fvm.ConvectionScheme.Central,
+                    bc_u2, bc_v2, bc_p2, velocity2, pressure2, flux2,
+                    dt=dt)
+
+                self.assertTrue(np.array_equal(pressure.to_numpy(),
+                                               pressure2.to_numpy()))
+                self.assertEqual(result.max_imbalance, ref.max_imbalance)
+                self.assertEqual(result.du_max, ref.du_max)
+                self.assertEqual(result.dv_max, ref.dv_max)
+                self.assertEqual(result.dp_max, ref.dp_max)
+
+                self._assert_same_system(
+                    sys_u, self._reference_system(self._fresh_case(), 0))
+                self._assert_same_system(
+                    sys_v, self._reference_system(self._fresh_case(), 1))
+
+                # The exported b is recomputed on the (identical) projected
+                # pressure over the steady b^np - including the dt > 0
+                # case, where the projection itself ran on the derived
+                # transient form.
+                case_p = self._fresh_case()
+                projected = fvm.ScalarField(case_p[0], "projected")
+                projected.to_numpy()[:] = pressure2.to_numpy()
+                self.assertTrue(np.array_equal(
+                    sys_u.b, self._reference_system(case_p, 0,
+                                                    pressure=projected).b))
+                self.assertTrue(np.array_equal(
+                    sys_v.b, self._reference_system(case_p, 1,
+                                                    pressure=projected).b))
+
+    def test_return_systems_default_type(self):
+        # Without the flag the entry keeps the original contract: a bare
+        # ProjectionResult.
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = \
+            self._fresh_case()
+        result = fvm.pressure_projection(
+            mesh, self.RHO, self.MU, fvm.ConvectionScheme.Central,
+            bc_u, bc_v, bc_p, velocity, pressure, flux)
+        self.assertIsInstance(result, fvm.ProjectionResult)
+
+    def test_return_systems_rejects_cn_transient(self):
+        # The dt > 0 derivation is implemented for theta = 1 (Euler)
+        # only; Crank-Nicolson is rejected.
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = \
+            self._fresh_case()
+        with self.assertRaises(ValueError):
+            fvm.pressure_projection(
+                mesh, self.RHO, self.MU, fvm.ConvectionScheme.Central,
+                bc_u, bc_v, bc_p, velocity, pressure, flux,
+                dt=0.05, time_scheme=fvm.TimeScheme.CrankNicolson,
+                return_systems=True)
+
+
 class TestBoundaryFaceValues(unittest.TestCase):
     """Contract tests for BoundaryField's per-face value API."""
 

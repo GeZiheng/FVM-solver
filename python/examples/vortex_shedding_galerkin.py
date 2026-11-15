@@ -27,11 +27,12 @@ physical.
 Run:  python python/examples/vortex_shedding_galerkin.py
       [--grid {coarse,medium,fine}] [--dt DT] [--end-time T] [--re RE]
       [--snap-every K] [--window-frac F] [--rank R] [--dt-rom DT]
-      [--projection] [--test]
+      [--projection] [--timing] [--test]
 """
 
 import argparse
 import math
+import time
 
 import numpy as np
 
@@ -156,6 +157,10 @@ def main():
                              "projection ROM (Phase 6.4) on the same "
                              "windowed basis and print the comparison "
                              "(diagnostics only)")
+    parser.add_argument("--timing", action="store_true",
+                        help="print per-step wall-clock costs of the FOM "
+                             "snapshot collection and of each ROM "
+                             "variant's advance")
     parser.add_argument("--frames", type=int, default=0,
                         help="write the first N ROM reconstruction frames "
                              "(both variants with --projection) plus the "
@@ -173,9 +178,15 @@ def main():
     rank = 8 if args.test else args.rank
     dt_rom = args.dt if args.dt_rom is None else args.dt_rom
 
+    fom_steps = round(end_time / args.dt)
+    tic = time.perf_counter() if args.timing else None
     mesh, collector, history, (bc_u, bc_v, bc_p) = run(
         args.re, args.grid, args.dt, end_time, args.snap_every,
         sample=10)
+    if args.timing:
+        print(f"timing FOM collection  : "
+              f"{(time.perf_counter() - tic) / fom_steps * 1000.0:7.1f} "
+              f"ms/step ({fom_steps} steps, mesh/BC setup included)")
     print(f"collected {len(collector)} snapshots of "
           f"{mesh.cell_count()} cells (snap-every {args.snap_every})")
 
@@ -226,12 +237,23 @@ def main():
     t0 = times[first]
     duration = times[-1] - t0
     n_steps = round(duration / dt_rom)
-    hist = rom.advance(t0, dt_rom, n_steps, record_every=1)
+
+    def timed_advance(label, rom_obj):
+        if not args.timing:
+            return rom_obj.advance(t0, dt_rom, n_steps, record_every=1)
+        tic = time.perf_counter()
+        hist = rom_obj.advance(t0, dt_rom, n_steps, record_every=1)
+        print(f"timing ROM {label:<11}: "
+              f"{(time.perf_counter() - tic) / n_steps * 1000.0:7.1f} "
+              f"ms/step ({n_steps} steps)")
+        return hist
+
+    hist = timed_advance("zero-pressure", rom)
     rec_times, a_u_hist, a_v_hist = hist
     a_up_hist = a_vp_hist = None
     if rom_projective is not None:
-        _, a_up_hist, a_vp_hist = rom_projective.advance(
-            t0, dt_rom, n_steps, record_every=1)
+        _, a_up_hist, a_vp_hist = timed_advance("projection",
+                                                rom_projective)
     print(f"ROM advanced {n_steps} RK4 steps of dt = {dt_rom} "
           f"(t in [{t0:.2f}, {rec_times[-1]:.2f}])")
 

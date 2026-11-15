@@ -137,7 +137,10 @@ class GalerkinRom:
         # persistent flux.  With an injected pressure field the caller
         # owns it; the assembly still uses the configured bc_p.  In
         # projection mode the internal pressure field receives the
-        # per-stage projection instead.
+        # per-stage projection instead, and the velocity field doubles as
+        # the projection's in-place out-slot (rewritten from the
+        # coefficients at every stage, so the discarded correction never
+        # leaks into the state).
         self._velocity = fvm.VectorField(mesh, "rom_velocity")
         self._pressure = (pressure if pressure is not None
                           else fvm.ScalarField(mesh, "rom_pressure"))
@@ -146,7 +149,6 @@ class GalerkinRom:
         self._projection = bool(pressure_projection)
         self._pressure_solver_config = pressure_solver_config
         self._projection_dt = projection_dt
-        self._scratch = fvm.VectorField(mesh, "rom_projection_scratch")
         self.last_projection = None
 
         # Diagonal mass matrix and the reduced mass matrices (dense SPD).
@@ -207,21 +209,23 @@ class GalerkinRom:
         Reconstructs the field, refreshes time-dependent BCs, recomputes
         the mass flux and reassembles both steady momentum systems.
 
-        With ``pressure_projection=True`` the stage first runs one
-        predictive FOM pressure projection on the frozen reconstruction
-        (mirroring the oracle timing: after the mass flux, before the
-        assembly), so the assembly reads the projected pressure.  The
-        corrected velocity is written to a scratch field and discarded;
-        the flux is then restored to the reconstruction's own mass flux,
-        so the only difference vs the zero/oracle pathways is the
-        pressure field content.  With ``projection_dt`` set the
-        projection assembles the transient diagonal a_P + rho*V/dt
-        (frozen state as u_old, damped residual step) instead of the
-        steady operator - required where the steady diagonal is
-        indefinite (cell Peclet >> 2).  Each projection costs two
-        momentum assemblies plus one pressure solve per stage;
-        ``last_projection`` keeps the diagnostics of the most recent one
-        (the last stage of an RK4 step).
+        With ``pressure_projection=True`` the stage runs the fused FOM
+        projection entry (Phase 6.5a assembly dedup): the steady operator
+        of the frozen reconstruction is assembled once and shared between
+        the predictive pressure projection (mirroring the oracle timing:
+        after the mass flux, before the residual) and the exported
+        systems this residual consumes, so the residual reads the
+        projected pressure without a second assembly round.  The
+        projection corrects the velocity field in place; the corrected
+        values are discarded (the ROM state stays the coefficient vector,
+        and the field is rewritten at the next stage).  With
+        ``projection_dt`` set the projection runs on the transient
+        diagonal a_P + rho*V/dt (frozen state as u_old, damped residual
+        step) derived from the same steady assembly - required where the
+        steady diagonal is indefinite (cell Peclet >> 2).  Each stage
+        costs one mass-flux recompute, two momentum assemblies and one
+        pressure solve; ``last_projection`` keeps the diagnostics of the
+        most recent projection (the last stage of an RK4 step).
 
         Note: stores ``a_u``/``a_v`` on the object (the reconstruction is
         written from them); ``advance`` leaves the accepted end state in
@@ -237,10 +241,17 @@ class GalerkinRom:
                               self._bc_u, self._bc_v, self._flux,
                               self._corrections)
         if self._projection:
-            # scratch copy of the reconstruction; the corrected velocity is
-            # discarded (the ROM state must stay the coefficient vector).
-            self._scratch.u.to_numpy()[:] = self._velocity.u.to_numpy()
-            self._scratch.v.to_numpy()[:] = self._velocity.v.to_numpy()
+            # Frozen reconstruction snapshots: the fused entry corrects the
+            # velocity field in place (the correction is discarded - the ROM
+            # state stays the coefficient vector, and to_numpy() returns
+            # views of that field), so the residual's u/v are captured
+            # first.  The Phase 6.5a fused entry assembles the steady
+            # operator once, runs the projection on it and exports the
+            # systems for this residual; it leaves the flux untouched (the
+            # reconstruction's own mass flux), so no restore recompute is
+            # needed.
+            u = np.array(self._velocity.u.to_numpy())
+            v = np.array(self._velocity.v.to_numpy())
             # The binding takes SolverConfig by value, so a None config
             # must be resolved here (passing None would raise TypeError).
             solver_cfg = (self._pressure_solver_config
@@ -248,31 +259,27 @@ class GalerkinRom:
                           else fvm.SolverConfig())
             projection_dt = (0.0 if self._projection_dt is None
                              else self._projection_dt)
-            result = fvm.pressure_projection(
+            result, sys_u, sys_v = fvm.pressure_projection(
                 self._mesh, self._rho, self._mu, self._convection,
-                self._bc_u, self._bc_v, self._bc_p, self._scratch,
+                self._bc_u, self._bc_v, self._bc_p, self._velocity,
                 self._pressure, self._flux, solver_config=solver_cfg,
                 dt=projection_dt,
-                corrections=self._corrections)
+                corrections=self._corrections,
+                return_systems=True)
             self.last_projection = (result.max_imbalance, result.du_max,
                                     result.dv_max, result.dp_max)
-            # Restore the reconstruction's mass flux so the only difference
-            # vs the oracle pathway is the pressure field content (plan D1
-            # step 3).
-            fvm.compute_mass_flux(self._mesh, self._velocity, self._rho,
-                                  self._bc_u, self._bc_v, self._flux,
-                                  self._corrections)
-        u = self._velocity.u.to_numpy()
-        v = self._velocity.v.to_numpy()
-        kwargs = dict(mu=self._mu, scheme=self._convection,
-                      pressure=self._pressure, bc_p=self._bc_p,
-                      rho=self._rho, corrections=self._corrections)
-        sys_u = fvm.assemble_momentum(self._mesh, self._flux,
-                                      self._velocity, component=0,
-                                      bc=self._bc_u, **kwargs)
-        sys_v = fvm.assemble_momentum(self._mesh, self._flux,
-                                      self._velocity, component=1,
-                                      bc=self._bc_v, **kwargs)
+        else:
+            u = self._velocity.u.to_numpy()
+            v = self._velocity.v.to_numpy()
+            kwargs = dict(mu=self._mu, scheme=self._convection,
+                          pressure=self._pressure, bc_p=self._bc_p,
+                          rho=self._rho, corrections=self._corrections)
+            sys_u = fvm.assemble_momentum(self._mesh, self._flux,
+                                          self._velocity, component=0,
+                                          bc=self._bc_u, **kwargs)
+            sys_v = fvm.assemble_momentum(self._mesh, self._flux,
+                                          self._velocity, component=1,
+                                          bc=self._bc_v, **kwargs)
         f_u = np.linalg.solve(self._mass_u,
                               self._assemble_residual(sys_u, u, self.modes_u))
         f_v = np.linalg.solve(self._mass_v,

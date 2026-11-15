@@ -11,6 +11,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <memory>
 #include <string>
 #include <stdexcept>
 #include <utility>
@@ -21,6 +22,7 @@
 #include "CorrectionOptions.h"
 #include "Field.h"
 #include "FluxField.h"
+#include "GridOperators.h"
 #include "LinearSolver.h"
 #include "CartesianMesh.h"
 #include "Momentum.h"
@@ -284,6 +286,99 @@ struct ProjectionResult
     Scalar dpMax = 0.0;        ///< Max |p_new - p_old| of the stored pressure.
 };
 
+/// Assembled momentum system exported as COO triplets plus the RHS and
+/// the Rhie-Chow data (Phase 6.2: operator access for POD-Galerkin ROM).
+/// `rows`/`cols`/`vals` describe the finalized matrix A, `n` is its order
+/// (the cell count); `diag` is the (relaxed) a_P diagonal and
+/// `rhs_no_pressure` the RHS without the pressure-gradient source.
+struct MomentumSystem
+{
+    py::array_t<py::ssize_t> rows;
+    py::array_t<py::ssize_t> cols;
+    py::array_t<Scalar> vals;
+    py::ssize_t n = 0;
+    py::array_t<Scalar> b;
+    py::array_t<Scalar> diag;
+    py::array_t<Scalar> rhsNoPressure;
+};
+
+/// Build the Python-side MomentumSystem from exported COO vectors and the
+/// assembly outputs (shared by assembleMomentum and the fused projection
+/// entry).
+MomentumSystem makeMomentumSystem(const std::vector<py::ssize_t>& rows,
+    const std::vector<py::ssize_t>& cols,
+    const std::vector<Scalar>& vals,
+    Index n,
+    const Vector& b,
+    const Vector& diag,
+    const Vector& rhsNoPressure)
+{
+    MomentumSystem result;
+    result.rows = py::array_t<py::ssize_t>(
+        { static_cast<py::ssize_t>(rows.size()) }, rows.data());
+    result.cols = py::array_t<py::ssize_t>(
+        { static_cast<py::ssize_t>(cols.size()) }, cols.data());
+    result.vals = py::array_t<Scalar>(
+        { static_cast<py::ssize_t>(vals.size()) }, vals.data());
+    result.n = static_cast<py::ssize_t>(n);
+    result.b = vectorCopy(b);
+    result.diag = vectorCopy(diag);
+    result.rhsNoPressure = vectorCopy(rhsNoPressure);
+    return result;
+}
+
+/// Collect a finalized sparse matrix as COO triplets (shared by
+/// assembleMomentum and the fused projection entry; touches no Python
+/// objects, so it may run with the GIL released).
+void collectCoo(const fvm::math::SparseMatrix& matrix,
+    std::vector<py::ssize_t>& rows,
+    std::vector<py::ssize_t>& cols,
+    std::vector<Scalar>& vals)
+{
+    const auto& mat = matrix.native();
+    const auto nnz = static_cast<std::size_t>(mat.nonZeros());
+    rows.reserve(nnz);
+    cols.reserve(nnz);
+    vals.reserve(nnz);
+    for (int k = 0; k < mat.outerSize(); ++k)
+    {
+        for (Eigen::SparseMatrix<Scalar>::InnerIterator it(mat, k); it;
+             ++it)
+        {
+            rows.push_back(it.row());
+            cols.push_back(it.col());
+            vals.push_back(it.value());
+        }
+    }
+}
+
+/// Derive the transient (backward-Euler) momentum form from the steady
+/// assembly via the theta = 1 split identity: A(P,P) += rho V/dt,
+/// b^np += (rho V/dt) phi_old, diag += rho V/dt. This mirrors the
+/// time-active branch of numerical::assembleMomentum (scale(1.0) and the
+/// relaxation +0 term of the steady path are exact no-ops), so the
+/// derived operator is bit-identical to assembling with an active
+/// TimeTerm directly. Must run before finalize() - insert() works on the
+/// triplet stage only.
+void deriveTransientAssembly(numerical::MomentumAssembly& assembly,
+    const Mesh& mesh,
+    Scalar rho,
+    Scalar dt,
+    const VectorField& velocity,
+    int component)
+{
+    const ScalarField& phiOld =
+        (component == 0) ? velocity.u() : velocity.v();
+    const Index nCells = mesh.cellCount();
+    for (Index P = 0; P < nCells; ++P)
+    {
+        const Scalar ddtDiag = rho * mesh.cellVolume(P) / dt;
+        assembly.system.A.insert(P, P, ddtDiag);
+        assembly.rhsNoPressure(P) += ddtDiag * phiOld(P);
+        assembly.diag(P) += ddtDiag;
+    }
+}
+
 /// One steady (dt = 0) or transient-diagonal (dt > 0) pressure projection
 /// on a frozen state: assemble both momentum components (relaxation = 1),
 /// rebuild the Rhie-Chow data and run a single correctPressure step. This
@@ -297,7 +392,20 @@ struct ProjectionResult
 /// old velocity: uHat = u_stage + r_s/(a_P + rho V/dt) - a damped residual
 /// step that keeps the diagonal positive where the steady Central operator
 /// is indefinite (cell Peclet >> 2).
-ProjectionResult runPressureProjection(const Mesh& mesh,
+///
+/// With return_systems = True (Phase 6.5a) the entry additionally exports
+/// the steady momentum systems for ROM residual evaluation, assembled once
+/// and shared with the projection: the returned MomentumSystem pair carries
+/// (A, diag, rhs_no_pressure) of the steady operator (bit-identical to a
+/// separate assemble_momentum(dt = 0, relaxation = 1) call on the same
+/// frozen state) and b recomputed with the projected pressure
+/// (b = rhs_no_pressure - cellGradient(p) V, the same per-cell source the
+/// assembly applies). The projection itself runs on the same assembly
+/// (dt = 0) or on the transient form derived from it by the theta = 1
+/// identity (dt > 0, Euler only), and on an internal working copy of the
+/// flux, so the caller's flux is left untouched. The default flag keeps
+/// the original single-purpose contract.
+py::object runPressureProjection(const Mesh& mesh,
     Scalar rho,
     Scalar mu,
     ConvectionScheme scheme,
@@ -311,7 +419,8 @@ ProjectionResult runPressureProjection(const Mesh& mesh,
     Scalar relaxationP,
     Scalar dt,
     TimeScheme timeScheme,
-    const CorrectionOptions& corrections)
+    const CorrectionOptions& corrections,
+    bool returnSystems)
 {
     requireSameMesh(mesh, velocity, "velocity");
     requireSameMesh(mesh, pressure, "pressure");
@@ -329,97 +438,229 @@ ProjectionResult runPressureProjection(const Mesh& mesh,
         throw std::invalid_argument("dt must be >= 0 (0 = steady "
             "operator), got " + std::to_string(dt));
     }
-
-    py::gil_scoped_release release;
-
-    // dt = 0 keeps the steady operator (TimeTerm inactive, behaviour
-    // unchanged); dt > 0 adds the transient diagonal rho*V/dt with the
-    // frozen state as u_old.
-    TimeTerm time;
-    time.rho = rho;
-    time.dt = dt;
-    time.scheme = timeScheme;
-
-    // EquationSystem has no default constructor, so the prediction is
-    // aggregate-initialized exactly like predictMomentum (Momentum.cpp).
-    numerical::MomentumPrediction pred{
-        numerical::assembleMomentum(mesh,
-            flux,
-            velocity,
-            mu,
-            scheme,
-            bcU,
-            0,
-            pressure,
-            bcP,
-            1.0,
-            time,
-            corrections),
-        numerical::assembleMomentum(mesh,
-            flux,
-            velocity,
-            mu,
-            scheme,
-            bcV,
-            1,
-            pressure,
-            bcP,
-            1.0,
-            time,
-            corrections),
-        Vector(),
-        Vector(),
-        Vector(),
-        Vector(),
-        Vector(),
-        Vector() };
-
-    pred.momU.system.A.finalize();
-    pred.momV.system.A.finalize();
-    numerical::refreshUHat(pred, velocity);
-    const Index nCells = mesh.cellCount();
-    pred.dU.resize(nCells);
-    pred.dV.resize(nCells);
-    for (Index P = 0; P < nCells; ++P)
+    if (returnSystems && dt > 0.0 && timeScheme != TimeScheme::Euler)
     {
-        pred.dU(P) = mesh.cellVolume(P) / pred.momU.diag(P);
-        pred.dV(P) = mesh.cellVolume(P) / pred.momV.diag(P);
+        throw std::invalid_argument(
+            "return_systems with dt > 0 requires TimeScheme.Euler (the "
+            "transient form is derived by the theta = 1 split identity; "
+            "theta < 1 is not implemented)");
     }
 
-    auto solver = fvm::math::makeLinearSolver(solverConfig);
-    // No defensive copy: velocity is the corrector's velocity out-slot and is
-    // corrected in place (u = uHat - d grad(p)); callers that need the
-    // pre-projection state pass their own throwaway copy.
-    const numerical::CorrectorResult r = numerical::correctPressure(mesh,
-        rho,
-        pred,
-        bcU,
-        bcV,
-        bcP,
-        *solver,
-        relaxationP,
-        velocity,
-        pressure,
-        flux,
-        corrections);
-    return ProjectionResult{ r.maxImbalance, r.duMax, r.dvMax, r.dpMax };
-}
+    const Index nCells = mesh.cellCount();
 
-/// Assembled momentum system exported as COO triplets plus the RHS and
-/// the Rhie-Chow data (Phase 6.2: operator access for POD-Galerkin ROM).
-/// `rows`/`cols`/`vals` describe the finalized matrix A, `n` is its order
-/// (the cell count); `diag` is the (relaxed) a_P diagonal and
-/// `rhs_no_pressure` the RHS without the pressure-gradient source.
-struct MomentumSystem
-{
-    py::array_t<py::ssize_t> rows;
-    py::array_t<py::ssize_t> cols;
-    py::array_t<Scalar> vals;
-    py::ssize_t n = 0;
-    py::array_t<Scalar> b;
-    py::array_t<Scalar> diag;
-    py::array_t<Scalar> rhsNoPressure;
-};
+    if (!returnSystems)
+    {
+        // Original single-purpose path, kept verbatim; the result is a
+        // plain C++ aggregate assigned inside the release scope and cast
+        // only after the GIL is back (py::cast touches Python objects).
+        ProjectionResult out;
+        {
+            py::gil_scoped_release release;
+
+            // dt = 0 keeps the steady operator (TimeTerm inactive,
+            // behaviour unchanged); dt > 0 adds the transient diagonal
+            // rho*V/dt with the frozen state as u_old.
+            TimeTerm time;
+            time.rho = rho;
+            time.dt = dt;
+            time.scheme = timeScheme;
+
+            // EquationSystem has no default constructor, so the prediction
+            // is aggregate-initialized exactly like predictMomentum
+            // (Momentum.cpp).
+            numerical::MomentumPrediction pred{
+                numerical::assembleMomentum(mesh,
+                    flux,
+                    velocity,
+                    mu,
+                    scheme,
+                    bcU,
+                    0,
+                    pressure,
+                    bcP,
+                    1.0,
+                    time,
+                    corrections),
+                numerical::assembleMomentum(mesh,
+                    flux,
+                    velocity,
+                    mu,
+                    scheme,
+                    bcV,
+                    1,
+                    pressure,
+                    bcP,
+                    1.0,
+                    time,
+                    corrections),
+                Vector(),
+                Vector(),
+                Vector(),
+                Vector(),
+                Vector(),
+                Vector() };
+
+            pred.momU.system.A.finalize();
+            pred.momV.system.A.finalize();
+            numerical::refreshUHat(pred, velocity);
+            pred.dU.resize(nCells);
+            pred.dV.resize(nCells);
+            for (Index P = 0; P < nCells; ++P)
+            {
+                pred.dU(P) = mesh.cellVolume(P) / pred.momU.diag(P);
+                pred.dV(P) = mesh.cellVolume(P) / pred.momV.diag(P);
+            }
+
+            auto solver = fvm::math::makeLinearSolver(solverConfig);
+            // No defensive copy: velocity is the corrector's velocity
+            // out-slot and is corrected in place (u = uHat - d grad(p));
+            // callers that need the pre-projection state pass their own
+            // throwaway copy.
+            const numerical::CorrectorResult r =
+                numerical::correctPressure(mesh,
+                    rho,
+                    pred,
+                    bcU,
+                    bcV,
+                    bcP,
+                    *solver,
+                    relaxationP,
+                    velocity,
+                    pressure,
+                    flux,
+                    corrections);
+            out = ProjectionResult{ r.maxImbalance, r.duMax, r.dvMax,
+                                    r.dpMax };
+        }
+        return py::cast(std::move(out));
+    }
+
+    // Fused path (Phase 6.5a): one steady assembly feeds both the exported
+    // systems and the projection.
+    std::vector<py::ssize_t> rowsU;
+    std::vector<py::ssize_t> colsU;
+    std::vector<py::ssize_t> rowsV;
+    std::vector<py::ssize_t> colsV;
+    std::vector<Scalar> valsU;
+    std::vector<Scalar> valsV;
+    Vector steadyRhsNoPressureU;
+    Vector steadyRhsNoPressureV;
+    Vector steadyDiagU;
+    Vector steadyDiagV;
+    Vector bU;
+    Vector bV;
+    ProjectionResult result;
+    {
+        py::gil_scoped_release release;
+
+        // Steady assembly (relaxation = 1, TimeTerm inactive): the exported
+        // operator and - for dt = 0 - the projection's own.
+        TimeTerm steady;
+        numerical::MomentumAssembly asmU = numerical::assembleMomentum(
+            mesh, flux, velocity, mu, scheme, bcU, 0, pressure, bcP, 1.0,
+            steady, corrections);
+        numerical::MomentumAssembly asmV = numerical::assembleMomentum(
+            mesh, flux, velocity, mu, scheme, bcV, 1, pressure, bcP, 1.0,
+            steady, corrections);
+
+        // Steady export data (snapshots: dt > 0 derives the projection
+        // operator on copies, these stay steady).
+        steadyRhsNoPressureU = asmU.rhsNoPressure;
+        steadyRhsNoPressureV = asmV.rhsNoPressure;
+        steadyDiagU = asmU.diag;
+        steadyDiagV = asmV.diag;
+
+        std::unique_ptr<numerical::MomentumPrediction> pred;
+        if (dt > 0.0)
+        {
+            // Copies keep the steady assembly intact for the export; the
+            // derivation inserts, so it must precede finalize().
+            numerical::MomentumAssembly projU = asmU;
+            numerical::MomentumAssembly projV = asmV;
+            deriveTransientAssembly(projU, mesh, rho, dt, velocity, 0);
+            deriveTransientAssembly(projV, mesh, rho, dt, velocity, 1);
+            projU.system.A.finalize();
+            projV.system.A.finalize();
+            pred = std::make_unique<numerical::MomentumPrediction>(
+                numerical::MomentumPrediction{ std::move(projU),
+                    std::move(projV),
+                    Vector(),
+                    Vector(),
+                    Vector(),
+                    Vector(),
+                    Vector(),
+                    Vector() });
+        }
+        asmU.system.A.finalize();
+        asmV.system.A.finalize();
+        collectCoo(asmU.system.A, rowsU, colsU, valsU);
+        collectCoo(asmV.system.A, rowsV, colsV, valsV);
+        if (!pred)
+        {
+            pred = std::make_unique<numerical::MomentumPrediction>(
+                numerical::MomentumPrediction{ std::move(asmU),
+                    std::move(asmV),
+                    Vector(),
+                    Vector(),
+                    Vector(),
+                    Vector(),
+                    Vector(),
+                    Vector() });
+        }
+
+        numerical::refreshUHat(*pred, velocity);
+        pred->dU.resize(nCells);
+        pred->dV.resize(nCells);
+        for (Index P = 0; P < nCells; ++P)
+        {
+            pred->dU(P) = mesh.cellVolume(P) / pred->momU.diag(P);
+            pred->dV(P) = mesh.cellVolume(P) / pred->momV.diag(P);
+        }
+
+        auto solver = fvm::math::makeLinearSolver(solverConfig);
+        // Velocity stays the corrector's in-place out-slot; the projection
+        // runs on a working copy of the flux so the caller's flux keeps the
+        // frozen state's own mass flux (the ROM residual contract).
+        FaceFluxField fluxWork = flux;
+        const numerical::CorrectorResult r = numerical::correctPressure(
+            mesh,
+            rho,
+            *pred,
+            bcU,
+            bcV,
+            bcP,
+            *solver,
+            relaxationP,
+            velocity,
+            pressure,
+            fluxWork,
+            corrections);
+
+        // Recompute the exported RHS with the projected pressure - the same
+        // per-cell source numerical::assembleMomentum applies
+        // (b = b^np - cellGradient(p) * V), on the steady b^np.
+        bU.resize(nCells);
+        bV.resize(nCells);
+        for (Index P = 0; P < nCells; ++P)
+        {
+            bU(P) = steadyRhsNoPressureU(P)
+                - numerical::cellGradient(mesh, pressure, bcP, P, 0)
+                    * mesh.cellVolume(P);
+            bV(P) = steadyRhsNoPressureV(P)
+                - numerical::cellGradient(mesh, pressure, bcP, P, 1)
+                    * mesh.cellVolume(P);
+        }
+        result = ProjectionResult{ r.maxImbalance, r.duMax, r.dvMax,
+                                   r.dpMax };
+    }
+
+    return py::make_tuple(
+        py::cast(result),
+        py::cast(makeMomentumSystem(rowsU, colsU, valsU, nCells, bU,
+            steadyDiagU, steadyRhsNoPressureU)),
+        py::cast(makeMomentumSystem(rowsV, colsV, valsV, nCells, bV,
+            steadyDiagV, steadyRhsNoPressureV)));
+}
 
 MomentumSystem assembleMomentum(const Mesh& mesh,
     const FaceFluxField& flux,
@@ -464,38 +705,14 @@ MomentumSystem assembleMomentum(const Mesh& mesh,
             mesh, flux, velocity, mu, scheme, bc, component, pressure, bcP,
             relaxation, time, corrections);
         assembled.system.A.finalize();
-        const auto& mat = assembled.system.A.native();
-        const auto nnz = static_cast<std::size_t>(mat.nonZeros());
-        rowIdx.reserve(nnz);
-        colIdx.reserve(nnz);
-        values.reserve(nnz);
-        for (int k = 0; k < mat.outerSize(); ++k)
-        {
-            for (Eigen::SparseMatrix<Scalar>::InnerIterator it(mat, k); it;
-                 ++it)
-            {
-                rowIdx.push_back(it.row());
-                colIdx.push_back(it.col());
-                values.push_back(it.value());
-            }
-        }
+        collectCoo(assembled.system.A, rowIdx, colIdx, values);
         rhs = assembled.system.b;
         diag = assembled.diag;
         rhsNoPressure = assembled.rhsNoPressure;
     }
 
-    MomentumSystem result;
-    result.rows = py::array_t<py::ssize_t>(
-        { static_cast<py::ssize_t>(rowIdx.size()) }, rowIdx.data());
-    result.cols = py::array_t<py::ssize_t>(
-        { static_cast<py::ssize_t>(colIdx.size()) }, colIdx.data());
-    result.vals = py::array_t<Scalar>(
-        { static_cast<py::ssize_t>(values.size()) }, values.data());
-    result.n = static_cast<py::ssize_t>(mesh.cellCount());
-    result.b = vectorCopy(rhs);
-    result.diag = vectorCopy(diag);
-    result.rhsNoPressure = vectorCopy(rhsNoPressure);
-    return result;
+    return makeMomentumSystem(rowIdx, colIdx, values, mesh.cellCount(), rhs,
+        diag, rhsNoPressure);
 }
 
 FaceFluxField interpolateCellVelocityFlux(const Mesh& mesh,
@@ -1002,6 +1219,7 @@ void bindNumerical(py::module_& m)
         py::arg("dt") = 0.0,
         py::arg("time_scheme") = TimeScheme::Euler,
         py::arg("corrections") = CorrectionOptions{},
+        py::arg("return_systems") = false,
         "One steady (dt = 0) pressure projection = the pressure half-step "
         "of a single PISO corrector on the frozen state: velocity is "
         "corrected in place to uHat - d*grad(p), and pressure and flux are "
@@ -1009,7 +1227,14 @@ void bindNumerical(py::module_& m)
         "(a_P + rho V/dt) with the frozen state as the old velocity: "
         "uHat = u_stage + r_s/(a_P + rho V/dt) - use it where the steady "
         "operator diagonal is indefinite (cell Peclet >> 2). Pass a "
-        "throwaway velocity copy to discard the corrected velocity.");
+        "throwaway velocity copy to discard the corrected velocity. "
+        "return_systems = True fuses the projection with the steady "
+        "operator export (Phase 6.5a assembly dedup): returns "
+        "(ProjectionResult, MomentumSystem, MomentumSystem) where the "
+        "systems are the steady operator of the frozen state (identical "
+        "to a separate assemble_momentum(dt = 0, relaxation = 1) call) "
+        "with b recomputed on the projected pressure, and the caller's "
+        "flux is left untouched (dt > 0 requires the Euler scheme).");
 
     // -- Scalar transport (high level) ---------------------------------------
     m.def("solve_transport", &solveTransport,
