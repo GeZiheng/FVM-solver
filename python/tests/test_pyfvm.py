@@ -719,6 +719,98 @@ class TestPressureProjectionSystems(unittest.TestCase):
                 return_systems=True)
 
 
+class TestPressureProjectionFromFields(unittest.TestCase):
+    """Contract tests for pressure_projection_from_fields (Phase 6.5c
+    M1): the Rhie-Chow data (d, uHat) supplied as external cell fields
+    drives the same pressure equation pressure_projection assembles
+    internally."""
+
+    RHO = 1.0
+    MU = 0.01
+    N = 16
+
+    def _rhie_chow_fields(self, case):
+        """(d_u, d_v, uhat_u, uhat_v) cell fields derived from the public
+        assembly chain on a pristine case - exactly the offline path the
+        precomputed fitter uses."""
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = case
+        n = mesh.cell_count()
+        fvm.compute_mass_flux(mesh, velocity, self.RHO, bc_u, bc_v, flux)
+        volumes = np.array([mesh.cell_volume(c)
+                            for c in range(n)])
+        zero = fvm.ScalarField(mesh, "zero")
+        fields = []
+        for component, bc, fld in ((0, bc_u, velocity.u.to_numpy()),
+                                   (1, bc_v, velocity.v.to_numpy())):
+            s = fvm.assemble_momentum(mesh, flux, velocity, self.MU,
+                                      fvm.ConvectionScheme.Central, bc,
+                                      component=component, pressure=zero,
+                                      bc_p=bc_p)
+            au = np.bincount(s.rows, weights=s.vals * fld[s.cols],
+                             minlength=n)
+            mobility = volumes / s.diag
+            uhat = fld + (s.rhs_no_pressure - au) / s.diag
+            for values, name in ((mobility, "d"), (uhat, "uhat")):
+                field = fvm.ScalarField(mesh, f"{name}_{component}")
+                field.to_numpy()[:] = values
+                fields.append(field)
+        return fields
+
+    def test_reproduces_fused_projection(self):
+        # Same (d, uHat) -> same equation -> the same solved pressure as
+        # the fused pressure_projection entry, for the pure-Neumann
+        # (reference-cell + adjustPhi) and Dirichlet-p (definite) paths.
+        cfg = fvm.SolverConfig()
+        cfg.tolerance = 1e-12
+        cfg.max_iterations = 20000
+        for p_mode in ("neumann", "dirichlet"):
+            with self.subTest(p_mode=p_mode):
+                case = TestPressureProjection._source_field_case(self)
+                mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = case
+                if p_mode == "dirichlet":
+                    zeros = np.zeros(len(mesh.patch_faces(
+                        fvm.BoundaryField.East)))
+                    bc_p.set_values(fvm.BoundaryField.East,
+                                    fvm.BCType.Dirichlet, zeros)
+                fvm.pressure_projection(
+                    mesh, self.RHO, self.MU, fvm.ConvectionScheme.Central,
+                    bc_u, bc_v, bc_p, velocity, pressure, flux,
+                    solver_config=cfg, return_systems=True)
+                p_ref = pressure.to_numpy().copy()
+
+                case2 = TestPressureProjection._source_field_case(self)
+                mesh2, velocity2, pressure2, _, bc_u2, bc_v2, bc_p2 = case2
+                if p_mode == "dirichlet":
+                    zeros = np.zeros(len(mesh2.patch_faces(
+                        fvm.BoundaryField.East)))
+                    bc_p2.set_values(fvm.BoundaryField.East,
+                                     fvm.BCType.Dirichlet, zeros)
+                fields = self._rhie_chow_fields(case2)
+                # Helper order is per-component (d_u, uhat_u, d_v, uhat_v);
+                # the binding takes the mobilities first.
+                d_u, uhat_u, d_v, uhat_v = fields
+                result = fvm.pressure_projection_from_fields(
+                    mesh2, self.RHO, bc_u2, bc_v2, bc_p2,
+                    d_u, d_v, uhat_u, uhat_v,
+                    pressure2, solver_config=cfg)
+
+                rel = (np.linalg.norm(pressure2.to_numpy() - p_ref)
+                       / np.linalg.norm(p_ref))
+                self.assertLess(rel, 1e-10)
+                self.assertTrue(np.isfinite(result.max_imbalance))
+                self.assertGreaterEqual(result.dp_max, 0.0)
+
+    def test_rejects_foreign_fields(self):
+        case = TestPressureProjection._source_field_case(self)
+        mesh, velocity, pressure, _, bc_u, bc_v, bc_p = case
+        other = fvm.CartesianMesh(8, 8, 0.0, 0.0, 1.0, 1.0)
+        stranger = fvm.ScalarField(other, "stranger")
+        with self.assertRaises(ValueError):
+            fvm.pressure_projection_from_fields(
+                mesh, self.RHO, bc_u, bc_v, bc_p, stranger, stranger,
+                stranger, stranger, pressure)
+
+
 class TestBoundaryFaceValues(unittest.TestCase):
     """Contract tests for BoundaryField's per-face value API."""
 

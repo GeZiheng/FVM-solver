@@ -1,0 +1,806 @@
+"""Offline-precomputed reduced operators for fixed-BC POD-Galerkin ROMs
+(Phase 6.5b).
+
+Replaces the per-stage FOM work of :class:`rom.galerkin.GalerkinRom`
+(mass flux + momentum assemblies + pressure projection) with pure-numpy
+small algebra.  The reduced right-hand side is decomposed as
+
+    f(a) = f_np(a) + s_p(a)
+
+with the joint coefficient state ``a = [a_u, a_v]``:
+
+- ``f_np(a) = q + L a + Q[a, a]`` (per component) - the zero-pressure
+  reduced right-hand side.  For a Central convection scheme this is
+  *exactly* quadratic in ``a`` (the convection operator is linear in the
+  mass flux, the mass flux is linear in the reconstructed velocity, and
+  the fixed-BC boundary contributions are constants), so a least-squares
+  fit recovers it to machine precision; the fit is verified on held-out
+  states and raises if the quadratic assumption is broken.
+- ``s_p(a) = h0 + H a`` - the pressure-gradient source closure.  Pressure
+  is represented on its own POD basis ``p ~ pbar + Psi c`` (from the FOM
+  pressure snapshots); each mode's reduced source ``g_k`` is isolated
+  offline by the *b-difference trick* - the difference of two
+  ``GalerkinRom.rhs`` evaluations with the same state but different
+  pressure field content is exactly ``M_r^-1 Phi (-(grad psi_k) V)``
+  because ``b^np`` is pressure-independent - and the coefficients are
+  modelled by the affine map ``c(a) = K a + c0`` fitted to snapshot
+  pairs by least squares (``H = G K``, ``h0 = g0 + G c0``; ``g0`` is the
+  mean-pressure source).  This is a *data-driven closure*, not an
+  operator projection; its error is quantified (fit diagnostics + the
+  acceptance gates of the case drivers).
+
+Everything is sampled in f-space (the rhs values already carry the
+``M_r^-1`` factor), so the online model needs no mass matrix and no
+pyfvm import.  Scope: fixed boundary conditions only (time-dependent
+BCs would need the boundary term factored out - registered follow-up);
+non-Central convection makes ``f_np`` only piecewise quadratic (a
+warning is emitted).
+
+Two online consumers (Phase 6.5b/6.5c):
+
+- :class:`PrecomputedGalerkinRom` evaluates the quadratic part plus the
+  affine pressure closure - pure numpy, but the closure's constant
+  Jacobian extrapolates arbitrarily off the attractor and is documented
+  UNSTABLE on the shedding limit cycle (diverges near t ~ 2.3; use for
+  diagnostics/short horizons only).
+- :class:`ReducedPressureRom` (6.5c M1) replaces the closure with a
+  per-stage FULL pressure solve on exactly reconstructed Rhie-Chow
+  cell fields (affine diagonal + quadratic steady residual + transient
+  term), the solved pressure acting through ``g0 + G Psi^T (p - pbar)``
+  with ``Psi`` built from projection-solution pressures - state
+  dependent and stable.
+"""
+
+from __future__ import annotations
+
+import warnings
+from dataclasses import dataclass
+
+import numpy as np
+
+from .pod import pod_decompose
+
+
+@dataclass
+class QuadraticFit:
+    """``f(a) = q + L a + a^T Q a`` coefficients (per output component:
+    reduced f-space rows or cell-field rows).
+
+    ``a`` is the joint state ``[a_u, a_v]``; ``Q`` is symmetric in its
+    last two indices with off-diagonal pairs halved so ``a^T Q a`` counts
+    each cross term once.  Evaluation goes through the flattened
+    upper-triangle form (``quad`` over ``a_i a_j`` pairs) - a single
+    GEMM instead of a per-output einsum over the (n_out, n_a, n_a)
+    tensor, which is memory-bandwidth bound for cell-field fits.
+    """
+
+    q: np.ndarray  # (n_out,)
+    L: np.ndarray  # (n_out, n_a)
+    Q: np.ndarray  # (n_out, n_a, n_a)
+    triu_i: np.ndarray = None  # (n_pairs,) upper-triangle indices
+    triu_j: np.ndarray = None
+
+    def __post_init__(self):
+        if self.triu_i is None:
+            iu, ju = np.triu_indices(self.Q.shape[1])
+            self.triu_i, self.triu_j = iu, ju
+        # Flattened feature x_p = a_i a_j counted once per pair; the
+        # tensor contraction contributes Q[i,j] + Q[j,i] off the
+        # diagonal and Q[i,i] on it (the stored off-diagonal entries are
+        # pre-halved, the diagonal is not).
+        self._quad_rows = self.Q[:, self.triu_i, self.triu_j] \
+            + self.Q[:, self.triu_j, self.triu_i]
+        self._quad_rows[:, self.triu_i == self.triu_j] *= 0.5
+
+    def __call__(self, a: np.ndarray) -> np.ndarray:
+        feats = a[self.triu_i] * a[self.triu_j]
+        return self.q + self.L @ a + self._quad_rows @ feats
+
+
+@dataclass
+class ReducedOperatorFit:
+    """Complete offline fit consumed by :class:`PrecomputedGalerkinRom`."""
+
+    quad_u: QuadraticFit
+    quad_v: QuadraticFit
+    # Folded affine pressure closure per component: s_p(a) = h0 + H a.
+    h0_u: np.ndarray  # (r,)
+    h0_v: np.ndarray
+    H_u: np.ndarray   # (r, n_a)
+    H_v: np.ndarray
+    # Raw closure ingredients (diagnostics / reuse).
+    pressure_modes: np.ndarray        # Psi, (r_p, N)
+    pressure_mean: np.ndarray         # pbar, (N,)
+    source_modes_u: np.ndarray        # G, (r, r_p)
+    source_modes_v: np.ndarray
+    mean_source_u: np.ndarray         # g0 = source of pbar, (r,)
+    mean_source_v: np.ndarray
+    coefficient_map: np.ndarray       # K = [K | c0], (r_p, n_a + 1)
+    # Rebuild inputs (M_r, state projection) and diagnostics.
+    mass_diagonal: np.ndarray         # rho * V, (N,)
+    modes_u: np.ndarray
+    modes_v: np.ndarray
+    mean_u: np.ndarray
+    mean_v: np.ndarray
+    rank_pressure: int = 0
+    pressure_cumulative_energy: float = 0.0
+    holdout_residual: float = np.inf  # max relative quadratic-fit error
+    closure_train_residual: float = np.inf  # relative ||c_pred - c_snap||
+    convection_is_central: bool = True
+
+
+def _quadratic_design(samples: np.ndarray):
+    """Design matrix ``[1, a, a_j a_k (j <= k)]`` for rows of samples."""
+    n_s, n_a = samples.shape
+    iu, ju = np.triu_indices(n_a)
+    design = np.empty((n_s, 1 + n_a + iu.size), dtype=np.float64)
+    design[:, 0] = 1.0
+    design[:, 1:1 + n_a] = samples
+    design[:, 1 + n_a:] = samples[:, iu] * samples[:, ju]
+    return design, iu, ju
+
+
+def _fit_quadratic(samples: np.ndarray, values: np.ndarray) -> QuadraticFit:
+    """Least-squares quadratic fit with column normalization.
+
+    The normalization is folded into the returned coefficients, so
+    evaluation takes raw features.
+    """
+    design, iu, ju = _quadratic_design(samples)
+    scale = np.sqrt(np.mean(design * design, axis=0))
+    scale[scale == 0.0] = 1.0
+    coef, *_ = np.linalg.lstsq(design / scale, values, rcond=None)
+    coef = coef / scale[:, None]  # (n_features, r)
+
+    n_a = samples.shape[1]
+    r = values.shape[1]
+    q = coef[0]
+    L = coef[1:1 + n_a].T
+    Q = np.zeros((r, n_a, n_a), dtype=np.float64)
+    quad = coef[1 + n_a:].T  # (r, n_pairs)
+    Q[:, iu, ju] = quad
+    Q[:, ju, iu] = quad
+    off = iu != ju  # cross pairs appear twice in a^T Q a: halve them
+    Q[:, iu[off], ju[off]] *= 0.5
+    Q[:, ju[off], iu[off]] *= 0.5
+    return QuadraticFit(q=q, L=L, Q=Q)
+
+
+def make_fit_samples(a_u_snapshots, a_v_snapshots, n_samples=None,
+                     rng=None):
+    """Coefficient samples for the quadratic fit: snapshot rows plus
+    GRADED small perturbations (0.1/0.2/0.3 per-coordinate sigma).
+
+    The grading matters: the reduced rhs is exactly quadratic, but the
+    snapshot coefficients lie on a low-dimensional attractor, so the
+    joint quadratic design is underdetermined by on-manifold states
+    alone.  Full-sigma perturbed copies overshoot (they anchor the fit
+    far off the attractor and leave the near-manifold tube that the ROM
+    actually explores unconstrained); graded small perturbations pin the
+    quadratic form inside that tube (measured: machine-precision
+    holdout vs ~30% error with full-sigma top-ups on the shedding
+    window).
+
+    Args:
+        a_u_snapshots, a_v_snapshots: (S, r) coefficient matrices of the
+            POD window (the attractor region the ROM will explore).
+        n_samples: total number of samples; default ``2 * n_features``
+            of the joint quadratic design (>= that count is required by
+            :func:`fit_reduced_operators`).
+        rng: optional numpy Generator (deterministic callers pass one).
+    """
+    a_u = np.asarray(a_u_snapshots, dtype=np.float64)
+    a_v = np.asarray(a_v_snapshots, dtype=np.float64)
+    if a_u.ndim != 2 or a_v.shape != a_u.shape:
+        raise ValueError(
+            f"a_u/a_v snapshots must share shape (S, r), got "
+            f"{a_u.shape} vs {a_v.shape}")
+    rng = rng if rng is not None else np.random.default_rng()
+    r = a_u.shape[1]
+    n_a = 2 * r
+    if n_samples is None:
+        n_samples = 2 * (1 + n_a + n_a * (n_a + 1) // 2)
+    n_base = min(a_u.shape[0], max(1, n_samples // 2))
+    pick = rng.choice(a_u.shape[0], size=n_base, replace=False)
+    parts_u, parts_v = [a_u[pick]], [a_v[pick]]
+    noise_u = np.maximum(a_u.std(axis=0), 1e-3)
+    noise_v = np.maximum(a_v.std(axis=0), 1e-3)
+    scales = (0.1, 0.2, 0.3)
+    remaining = n_samples - n_base
+    batch = 0
+    while remaining > 0:
+        take = min(remaining, max(1, a_u.shape[0]))
+        more = rng.choice(a_u.shape[0], size=take, replace=False)
+        scale = scales[min(batch, len(scales) - 1)]
+        parts_u.append(a_u[more] + scale * noise_u
+                       * rng.standard_normal((take, r)))
+        parts_v.append(a_v[more] + scale * noise_v
+                       * rng.standard_normal((take, r)))
+        remaining -= take
+        batch += 1
+    out_u = np.vstack(parts_u)[:n_samples]
+    out_v = np.vstack(parts_v)[:n_samples]
+    return out_u, out_v
+
+
+def projected_pressure_snapshots(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
+                                 bc_p, convection, a_u_snapshots,
+                                 a_v_snapshots, dt_p, corrections=None,
+                                 solver_config=None):
+    """Per-state projection-solution pressures at snapshot coefficients
+    (Phase 6.5c D3): the pressure basis must span the solutions the
+    online ROM actually computes, and FOM (converged) pressure snapshots
+    measurably do not (single-corrector projection solutions live
+    partly outside their span).
+
+    For every coefficient row, reconstructs the velocity, runs one plain
+    ``pressure_projection(dt = dt_p)`` on scratch fields and records the
+    solved absolute pressure.  Feed the result through
+    :func:`rom.pod.pod_decompose` and pass ``(modes, mean)`` as
+    ``pressure_basis`` to :func:`fit_reduced_operators`.
+    """
+    import pyfvm as fvm  # lazy
+
+    a_u_snapshots = np.asarray(a_u_snapshots, dtype=np.float64)
+    a_v_snapshots = np.asarray(a_v_snapshots, dtype=np.float64)
+    if a_u_snapshots.ndim != 2 or a_v_snapshots.shape != a_u_snapshots.shape:
+        raise ValueError(
+            f"a_u/a_v snapshots must share shape (S, r), got "
+            f"{a_u_snapshots.shape} vs {a_v_snapshots.shape}")
+    modes_u = np.asarray(pod_u.modes, dtype=np.float64)
+    n_cells = modes_u.shape[1]
+    velocity = fvm.VectorField(mesh, "snap_velocity")
+    pressure = fvm.ScalarField(mesh, "snap_pressure")
+    flux = fvm.FaceFluxField(mesh, "snap_phi")
+    out = np.empty((a_u_snapshots.shape[0], n_cells), dtype=np.float64)
+    cfg = solver_config if solver_config is not None else fvm.SolverConfig()
+    opts = corrections if corrections is not None else fvm.CorrectionOptions()
+    for i, (a_u, a_v) in enumerate(zip(a_u_snapshots, a_v_snapshots)):
+        velocity.u.to_numpy()[:] = pod_u.mean + a_u @ modes_u
+        velocity.v.to_numpy()[:] = pod_v.mean + a_v @ np.asarray(
+            pod_v.modes, dtype=np.float64)
+        fvm.compute_mass_flux(mesh, velocity, rho, bc_u, bc_v, flux, opts)
+        pressure.to_numpy()[:] = 0.0
+        fvm.pressure_projection(mesh, rho, mu, convection, bc_u, bc_v,
+                                bc_p, velocity, pressure, flux,
+                                solver_config=cfg, dt=dt_p,
+                                corrections=opts)
+        out[i] = pressure.to_numpy()
+    return out
+
+
+def fit_reduced_operators(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
+                          convection, a_u_samples, a_v_samples,
+                          velocity_snapshots=None, pressure_snapshots=None,
+                          pressure_rank=None, pressure_energy=0.9999,
+                          pressure_basis=None, corrections=None,
+                          holdout_samples=24, holdout_tolerance=1e-10,
+                          rng=None):
+    """Fit the precomputed reduced operators on a fixed-BC case.
+
+    Args:
+        mesh..corrections: the GalerkinRom sampler configuration (a
+            zero-pressure :class:`rom.galerkin.GalerkinRom` with an
+            injectable pressure field is built internally; pyfvm is
+            imported lazily exactly like ``rom.galerkin``).
+        a_u_samples, a_v_samples: (S, r) coefficient samples covering
+            the attractor (see :func:`make_fit_samples`); at least
+            ``1 + n_a + n_a(n_a+1)/2`` rows with ``n_a = r_u + r_v``.
+        velocity_snapshots, pressure_snapshots: paired (S, N) u/v/p
+            snapshot matrices of the same window (the npz contract
+            stores them); both are required for the affine pressure
+            closure, None/None disables it (the fit then reproduces the
+            zero-pressure ROM exactly).
+        pressure_basis: optional ``(modes, mean)`` pair overriding the
+            internal POD of ``pressure_snapshots`` (Phase 6.5c: the
+            per-mode sources G are then built for THIS basis and the
+            affine closure map is skipped - the closure is unused by
+            :class:`ReducedPressureRom`, which needs only G/``Psi``).
+        pressure_rank: pressure POD rank r_p; None picks the smallest
+            rank reaching ``pressure_energy`` cumulative energy.
+        holdout_samples: extra random on-attractor states verifying the
+            quadratic exactness; the max relative error must stay below
+            ``holdout_tolerance`` or RuntimeError is raised.
+        rng: optional numpy Generator for the holdout draw.
+
+    Returns:
+        :class:`ReducedOperatorFit` with fit diagnostics attached.
+    """
+    import pyfvm as fvm  # lazy: rom.galerkin imports it the same way
+
+    from rom.galerkin import GalerkinRom
+
+    rng = rng if rng is not None else np.random.default_rng()
+
+    central = convection is fvm.ConvectionScheme.Central
+    if not central:
+        warnings.warn(
+            "precomputed reduced operators are exactly quadratic only "
+            "for Central convection; other schemes make the convection "
+            "coefficients piecewise linear in the mass flux and the fit "
+            "becomes an approximation",
+            stacklevel=2)
+
+    modes_u = np.asarray(pod_u.modes, dtype=np.float64)
+    modes_v = np.asarray(pod_v.modes, dtype=np.float64)
+    r_u, n_cells = modes_u.shape
+    r_v = modes_v.shape[0]
+    a_u_samples = np.asarray(a_u_samples, dtype=np.float64)
+    a_v_samples = np.asarray(a_v_samples, dtype=np.float64)
+    if a_u_samples.ndim != 2 or a_u_samples.shape[1] != r_u \
+            or a_v_samples.shape != a_u_samples.shape:
+        raise ValueError(
+            f"a_u/a_v samples must share shape (S, {r_u}), got "
+            f"{a_u_samples.shape} vs {a_v_samples.shape}")
+
+    n_a = r_u + r_v
+    n_features = 1 + n_a + n_a * (n_a + 1) // 2
+    if a_u_samples.shape[0] < n_features:
+        raise ValueError(
+            f"too few fit samples: {a_u_samples.shape[0]} < {n_features} "
+            "(the joint quadratic design needs at least that many)")
+
+    # Sampler: zero-pressure GalerkinRom with an injectable pressure
+    # field (the caller-owned pattern of the oracle hook).
+    pressure_field = fvm.ScalarField(mesh, "fit_pressure")
+    sampler = GalerkinRom(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
+                          convection, corrections=corrections,
+                          pressure=pressure_field)
+
+    def sample_all(u_samples, v_samples):
+        f_u = np.empty((u_samples.shape[0], r_u))
+        f_v = np.empty((v_samples.shape[0], r_v))
+        pressure_field.to_numpy()[:] = 0.0
+        for i, (a_u, a_v) in enumerate(zip(u_samples, v_samples)):
+            f_u[i], f_v[i] = sampler.rhs(0.0, a_u, a_v)
+        return f_u, f_v
+
+    # -- quadratic (zero-pressure) part ----------------------------------
+    joint_samples = np.hstack((a_u_samples, a_v_samples))
+    f_u, f_v = sample_all(a_u_samples, a_v_samples)
+    quad_u = _fit_quadratic(joint_samples, f_u)
+    quad_v = _fit_quadratic(joint_samples, f_v)
+
+    # Hold-out exactness check on perturbed on-attractor states.
+    h_base = min(a_u_samples.shape[0], holdout_samples)
+    pick = rng.choice(a_u_samples.shape[0], size=h_base, replace=False)
+    noise_u = np.maximum(a_u_samples.std(axis=0), 1e-3) * 0.25
+    noise_v = np.maximum(a_v_samples.std(axis=0), 1e-3) * 0.25
+    hold_u = a_u_samples[pick] + noise_u * rng.standard_normal((h_base, r_u))
+    hold_v = a_v_samples[pick] + noise_v * rng.standard_normal((h_base, r_v))
+    h_ref_u, h_ref_v = sample_all(hold_u, hold_v)
+    holdout_residual = 0.0
+    for i in range(h_base):
+        a = np.concatenate((hold_u[i], hold_v[i]))
+        for quad, ref in ((quad_u, h_ref_u[i]), (quad_v, h_ref_v[i])):
+            denom = max(float(np.linalg.norm(ref)), 1e-30)
+            holdout_residual = max(
+                holdout_residual,
+                float(np.linalg.norm(quad(a) - ref)) / denom)
+    if holdout_residual > holdout_tolerance:
+        raise RuntimeError(
+            "quadratic fit failed the held-out exactness check "
+            f"(max relative error {holdout_residual:.3e} > "
+            f"{holdout_tolerance:.1e}): the zero-pressure reduced rhs is "
+            "not quadratic in the coefficients for this configuration")
+
+    # -- pressure basis and closure --------------------------------------
+    h0_u = np.zeros(r_u)
+    h0_v = np.zeros(r_v)
+    H_u = np.zeros((r_u, n_a))
+    H_v = np.zeros((r_v, n_a))
+    K = np.zeros((0, n_a + 1))
+    closure_residual = 0.0
+
+    external_basis = pressure_basis is not None
+    if external_basis:
+        if pressure_snapshots is not None:
+            raise ValueError(
+                "pressure_basis and pressure_snapshots are alternatives "
+                "(an external basis skips the internal POD and the "
+                "affine closure map)")
+        pressure_modes = np.asarray(pressure_basis[0], dtype=np.float64)
+        pressure_mean = np.asarray(pressure_basis[1], dtype=np.float64)
+        if pressure_modes.ndim != 2 or pressure_modes.shape[1] != n_cells \
+                or pressure_mean.shape != (n_cells,):
+            raise ValueError(
+                f"pressure_basis must be (modes (r_p, {n_cells}), mean "
+                f"({n_cells},)), got {pressure_modes.shape} / "
+                f"{pressure_mean.shape}")
+        rank_p = pressure_modes.shape[0]
+        if rank_p == 0:
+            raise ValueError(
+                "an external pressure basis must carry at least one mode "
+                "(rank 0 silently degenerates to the zero-pressure rhs)")
+        energy_p = float("nan")
+    else:
+        has_closure = pressure_snapshots is not None
+        if has_closure != (velocity_snapshots is not None):
+            raise ValueError(
+                "the affine pressure closure needs paired velocity AND "
+                "pressure snapshots (pass both or neither)")
+        if has_closure:
+            u_snap = np.asarray(velocity_snapshots[0], dtype=np.float64)
+            v_snap = np.asarray(velocity_snapshots[1], dtype=np.float64)
+            p_snap = np.asarray(pressure_snapshots, dtype=np.float64)
+            if u_snap.ndim != 2 or u_snap.shape[1] != n_cells \
+                    or v_snap.shape != u_snap.shape \
+                    or p_snap.shape != u_snap.shape:
+                raise ValueError(
+                    "velocity/pressure snapshots must share shape "
+                    f"(S, {n_cells}), got u {u_snap.shape}, v "
+                    f"{v_snap.shape}, p {p_snap.shape}")
+            pod_p = pod_decompose(p_snap)
+            if pressure_rank is None:
+                reached = np.nonzero(
+                    pod_p.cumulative_energy >= pressure_energy)[0]
+                rank_p = int(reached[0]) + 1 if reached.size \
+                    else pod_p.modes.shape[0]
+            else:
+                rank_p = min(int(pressure_rank), pod_p.modes.shape[0])
+            pressure_modes = pod_p.modes[:rank_p]
+            pressure_mean = pod_p.mean
+            energy_p = float(pod_p.cumulative_energy[rank_p - 1])
+        else:
+            pressure_modes = np.zeros((0, n_cells))
+            pressure_mean = np.zeros(n_cells)
+            rank_p = 0
+            energy_p = 0.0
+
+    G_u = np.zeros((r_u, rank_p))
+    G_v = np.zeros((r_v, rank_p))
+    g0_u = np.zeros(r_u)
+    g0_v = np.zeros(r_v)
+    if rank_p > 0:
+        # Per-mode reduced sources via the b-difference trick, evaluated
+        # at the mean-field state a_ref = 0 (any state gives the same
+        # difference up to rounding: b^np is pressure-independent).
+        a_ref_u = np.zeros(r_u)
+        a_ref_v = np.zeros(r_v)
+        pressure_field.to_numpy()[:] = 0.0
+        ref_u, ref_v = sampler.rhs(0.0, a_ref_u, a_ref_v)
+        for k in range(rank_p):
+            pressure_field.to_numpy()[:] = pressure_modes[k]
+            f_u_k, f_v_k = sampler.rhs(0.0, a_ref_u, a_ref_v)
+            G_u[:, k] = f_u_k - ref_u
+            G_v[:, k] = f_v_k - ref_v
+        pressure_field.to_numpy()[:] = pressure_mean
+        f_mean_u, f_mean_v = sampler.rhs(0.0, a_ref_u, a_ref_v)
+        g0_u = f_mean_u - ref_u
+        g0_v = f_mean_v - ref_v
+
+    if not external_basis and rank_p > 0:
+        # Affine coefficient map c(a) = K a + c0 from snapshot pairs
+        # (lstsq returns (n_a + 1, r_p); transpose to (r_p, n_a + 1)).
+        a_u_snap = (u_snap - pod_u.mean) @ modes_u.T
+        a_v_snap = (v_snap - pod_v.mean) @ modes_v.T
+        c_snap = (p_snap - pressure_mean) @ pressure_modes.T  # (S, r_p)
+        design = np.hstack((np.hstack((a_u_snap, a_v_snap)),
+                            np.ones((u_snap.shape[0], 1))))
+        coef, *_ = np.linalg.lstsq(design, c_snap, rcond=None)
+        pred = design @ coef
+        closure_residual = float(
+            np.linalg.norm(pred - c_snap) / np.linalg.norm(c_snap))
+        K = coef.T
+        h0_u = g0_u + G_u @ K[:, -1]
+        h0_v = g0_v + G_v @ K[:, -1]
+        H_u = G_u @ K[:, :-1]
+        H_v = G_v @ K[:, :-1]
+
+    volumes = np.empty(n_cells, dtype=np.float64)
+    for cell in range(n_cells):
+        volumes[cell] = mesh.cell_volume(cell)
+
+    return ReducedOperatorFit(
+        quad_u=quad_u,
+        quad_v=quad_v,
+        h0_u=h0_u,
+        h0_v=h0_v,
+        H_u=H_u,
+        H_v=H_v,
+        pressure_modes=pressure_modes,
+        pressure_mean=pressure_mean,
+        source_modes_u=G_u,
+        source_modes_v=G_v,
+        mean_source_u=g0_u,
+        mean_source_v=g0_v,
+        coefficient_map=K,
+        mass_diagonal=rho * volumes,
+        modes_u=modes_u,
+        modes_v=modes_v,
+        mean_u=np.asarray(pod_u.mean, dtype=np.float64),
+        mean_v=np.asarray(pod_v.mean, dtype=np.float64),
+        rank_pressure=rank_p,
+        pressure_cumulative_energy=energy_p,
+        holdout_residual=holdout_residual,
+        closure_train_residual=closure_residual,
+        convection_is_central=central,
+    )
+
+
+@dataclass
+class RhieChowFieldFit:
+    """Cell-space coefficient fields reconstructing the Rhie-Chow data
+    exactly online (Phase 6.5c D2):
+
+    ``diag(a) = a_P(a) + rho V / dt_p`` with ``a_P`` affine in ``a`` and
+    ``uHat(a) = u(a) + r_np(a) / diag(a)`` with ``r_np = b^np - A u``
+    quadratic in ``a`` (steady assembly, relaxation = 1, dt = 0, zero
+    pressure; the transient-diagonal ddt terms cancel algebraically in
+    the Euler theta = 1 form).  ``triuI/triuJ`` map the quadratic
+    coefficient rows onto ``a_i a_j`` pairs.
+    """
+
+    volumes: np.ndarray             # (N,) cell volumes
+    diag_u: QuadraticFit            # a_P of the u equation (Q ~ 0)
+    diag_v: QuadraticFit
+    residual_u: QuadraticFit        # r_np of the u equation
+    residual_v: QuadraticFit
+    holdout_residual: float = np.inf  # max per-cell relative field error
+
+
+def fit_rhie_chow_fields(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
+                         convection, a_u_samples, a_v_samples,
+                         corrections=None, holdout_samples=8,
+                         holdout_tolerance=1e-10, rng=None):
+    """Fit the Rhie-Chow cell-field coefficients on a fixed-BC case.
+
+    Samples the public assembly chain (``compute_mass_flux`` +
+    ``assemble_momentum`` at relaxation = 1, dt = 0, zero pressure) at the
+    same graded coefficient samples the reduced fit uses; the per-cell
+    diagonal is affine and the per-cell steady residual quadratic, both
+    recovered by least squares and verified on perturbed held-out states
+    (max per-cell relative error below ``holdout_tolerance`` or
+    RuntimeError).  ``r_np`` needs the full joint quadratic sample count,
+    which :func:`make_fit_samples` produces by default.
+    """
+    import pyfvm as fvm  # lazy, like every sampler path in this module
+
+    rng = rng if rng is not None else np.random.default_rng()
+    modes_u = np.asarray(pod_u.modes, dtype=np.float64)
+    modes_v = np.asarray(pod_v.modes, dtype=np.float64)
+    n_cells = modes_u.shape[1]
+    a_u_samples = np.asarray(a_u_samples, dtype=np.float64)
+    a_v_samples = np.asarray(a_v_samples, dtype=np.float64)
+    n_a = a_u_samples.shape[1] + modes_v.shape[0]
+    n_features = 1 + n_a + n_a * (n_a + 1) // 2
+    if a_u_samples.shape[0] < n_features:
+        raise ValueError(
+            f"too few field-fit samples: {a_u_samples.shape[0]} < "
+            f"{n_features} (the joint quadratic design in cell space)")
+
+    velocity = fvm.VectorField(mesh, "fit_velocity")
+    flux = fvm.FaceFluxField(mesh, "phi")
+    zero_pressure = fvm.ScalarField(mesh, "fit_zero_pressure")
+
+    def sample_fields(u_samples, v_samples):
+        n = u_samples.shape[0]
+        diag = [np.empty((n, n_cells)), np.empty((n, n_cells))]
+        residual = [np.empty((n, n_cells)), np.empty((n, n_cells))]
+        for i, (a_u, a_v) in enumerate(zip(u_samples, v_samples)):
+            u = pod_u.mean + a_u @ modes_u
+            v = pod_v.mean + a_v @ modes_v
+            velocity.u.to_numpy()[:] = u
+            velocity.v.to_numpy()[:] = v
+            fvm.compute_mass_flux(mesh, velocity, rho, bc_u, bc_v, flux)
+            for component, bc, field in ((0, bc_u, u), (1, bc_v, v)):
+                s = fvm.assemble_momentum(
+                    mesh, flux, velocity, mu, convection, bc,
+                    component=component, pressure=zero_pressure,
+                    bc_p=fvm.BoundaryField(mesh))
+                au = np.bincount(s.rows, weights=s.vals * field[s.cols],
+                                 minlength=n_cells)
+                diag[component][i] = s.diag
+                residual[component][i] = s.rhs_no_pressure - au
+        return diag, residual
+
+    joint = np.hstack((a_u_samples, a_v_samples))
+    diag_vals, res_vals = sample_fields(a_u_samples, a_v_samples)
+    diag_fits = [_fit_quadratic(joint, diag_vals[c]) for c in (0, 1)]
+    res_fits = [_fit_quadratic(joint, res_vals[c]) for c in (0, 1)]
+
+    # Held-out per-cell verification on perturbed states.
+    h_base = min(a_u_samples.shape[0], holdout_samples)
+    pick = rng.choice(a_u_samples.shape[0], size=h_base, replace=False)
+    noise_u = np.maximum(a_u_samples.std(axis=0), 1e-3) * 0.25
+    noise_v = np.maximum(a_v_samples.std(axis=0), 1e-3) * 0.25
+    r_u_s, r_v_s = a_u_samples.shape[1], a_v_samples.shape[1]
+    hold_u = a_u_samples[pick] + noise_u * rng.standard_normal((h_base,
+                                                                r_u_s))
+    hold_v = a_v_samples[pick] + noise_v * rng.standard_normal((h_base,
+                                                                r_v_s))
+    d_ref, r_ref = sample_fields(hold_u, hold_v)
+    holdout_residual = 0.0
+    for i in range(h_base):
+        a = np.concatenate((hold_u[i], hold_v[i]))
+        for fit, ref in ((diag_fits[0], d_ref[0][i]),
+                         (diag_fits[1], d_ref[1][i]),
+                         (res_fits[0], r_ref[0][i]),
+                         (res_fits[1], r_ref[1][i])):
+            denom = max(float(np.abs(ref).max()), 1e-30)
+            holdout_residual = max(
+                holdout_residual,
+                float(np.abs(fit(a) - ref).max()) / denom)
+    if holdout_residual > holdout_tolerance:
+        raise RuntimeError(
+            "Rhie-Chow field fit failed the held-out exactness check "
+            f"(max per-cell relative error {holdout_residual:.3e} > "
+            f"{holdout_tolerance:.1e})")
+
+    volumes = np.empty(n_cells, dtype=np.float64)
+    for cell in range(n_cells):
+        volumes[cell] = mesh.cell_volume(cell)
+
+    return RhieChowFieldFit(volumes=volumes, diag_u=diag_fits[0],
+                            diag_v=diag_fits[1], residual_u=res_fits[0],
+                            residual_v=res_fits[1],
+                            holdout_residual=holdout_residual)
+
+
+class PrecomputedGalerkinRom:
+    """Online POD-Galerkin ROM evaluating only offline-fitted operators.
+
+    The state and POD machinery mirror :class:`rom.galerkin.GalerkinRom`;
+    the right-hand side is the fitted quadratic + affine pressure
+    closure, so one RK4 stage costs O(r^2)/O(r^3) numpy work with no
+    FOM calls.  Fixed-BC cases only (``advance`` rejects ``bc_refresh``).
+    """
+
+    def __init__(self, fit: ReducedOperatorFit):
+        self.fit = fit
+        self.modes_u = fit.modes_u
+        self.modes_v = fit.modes_v
+        self.mean_u = fit.mean_u
+        self.mean_v = fit.mean_v
+        self.a_u = np.zeros(fit.modes_u.shape[0])
+        self.a_v = np.zeros(fit.modes_v.shape[0])
+
+    # -- state ----------------------------------------------------------------
+
+    def set_state_from_fields(self, velocity) -> None:
+        """Project a full-order velocity field onto the POD bases."""
+        self.a_u = ((np.asarray(velocity.u.to_numpy(), dtype=np.float64)
+                     - self.mean_u) @ self.modes_u.T)
+        self.a_v = ((np.asarray(velocity.v.to_numpy(), dtype=np.float64)
+                     - self.mean_v) @ self.modes_v.T)
+
+    def reconstruct_arrays(self):
+        """Current reduced state as full-order (u, v) arrays."""
+        u = self.mean_u + self.a_u @ self.modes_u
+        v = self.mean_v + self.a_v @ self.modes_v
+        return u, v
+
+    # -- time integration -----------------------------------------------------
+
+    def rhs(self, a_u, a_v):
+        """Fitted reduced right-hand side (no time dependence)."""
+        a = np.concatenate((a_u, a_v))
+        f_u = self.fit.quad_u(a) + self.fit.h0_u + self.fit.H_u @ a
+        f_v = self.fit.quad_v(a) + self.fit.h0_v + self.fit.H_v @ a
+        return f_u, f_v
+
+    def _rk4_step(self, dt):
+        a_u, a_v = self.a_u, self.a_v
+        k1u, k1v = self.rhs(a_u, a_v)
+        k2u, k2v = self.rhs(a_u + 0.5 * dt * k1u, a_v + 0.5 * dt * k1v)
+        k3u, k3v = self.rhs(a_u + 0.5 * dt * k2u, a_v + 0.5 * dt * k2v)
+        k4u, k4v = self.rhs(a_u + dt * k3u, a_v + dt * k3v)
+        self.a_u = a_u + dt / 6.0 * (k1u + 2.0 * k2u + 2.0 * k3u + k4u)
+        self.a_v = a_v + dt / 6.0 * (k1v + 2.0 * k2v + 2.0 * k3v + k4v)
+
+    def advance(self, t0, dt, n_steps, bc_refresh=None, record_every=0):
+        """Advance ``n_steps`` explicit RK4 steps (GalerkinRom semantics).
+
+        ``t0`` only labels the recorded times - the fitted operators
+        carry no time dependence, so ``bc_refresh`` must be None (fixed
+        boundary conditions are the scope of Phase 6.5b).
+        """
+        if bc_refresh is not None:
+            raise ValueError(
+                "PrecomputedGalerkinRom supports fixed boundary "
+                "conditions only (the fitted operators carry no time "
+                "dependence); pass bc_refresh=None")
+        if dt <= 0.0:
+            raise ValueError(f"dt must be positive, got {dt}")
+        if n_steps < 1:
+            raise ValueError(f"n_steps must be >= 1, got {n_steps}")
+        times, hist_u, hist_v = [], [], []
+        for step in range(n_steps):
+            self._rk4_step(dt)
+            if record_every > 0 and (step + 1) % record_every == 0:
+                times.append(t0 + (step + 1) * dt)
+                hist_u.append(self.a_u.copy())
+                hist_v.append(self.a_v.copy())
+        if record_every > 0:
+            if not times or times[-1] < t0 + n_steps * dt:
+                times.append(t0 + n_steps * dt)
+                hist_u.append(self.a_u.copy())
+                hist_v.append(self.a_v.copy())
+            return (np.asarray(times), np.asarray(hist_u),
+                    np.asarray(hist_v))
+        return None
+
+
+class ReducedPressureRom(PrecomputedGalerkinRom):
+    """Precomputed ROM whose per-stage pressure comes from a full FOM
+    pressure solve on exactly reconstructed Rhie-Chow fields (Phase 6.5c
+    M1) - the 6.4 projection mechanism with the momentum assemblies
+    replaced by offline-fitted cell-field coefficients.
+
+    Per stage: reconstruct ``diag(a) = a_P(a) + rho V/dt_p`` (affine
+    steady diagonal + transient term) and ``uHat(a) = u(a) +
+    r_np(a)/diag(a)`` (quadratic steady residual; the ddt terms cancel
+    algebraically in the Euler theta = 1 form), run
+    ``pyfvm.pressure_projection_from_fields`` and apply the solved
+    pressure through the precomputed per-mode sources
+    ``s_p = G Psi^T (p - pbar)``.  The pressure response is
+    state-dependent and elliptic (no off-manifold extrapolation), unlike
+    the affine closure of a pressure-fitted
+    :class:`PrecomputedGalerkinRom`, which is documented unstable on the
+    shedding limit cycle.
+
+    ``dt_p`` mirrors ``GalerkinRom(projection_dt=...)``: the transient
+    diagonal ``a_P + rho V/dt_p`` is REQUIRED wherever the steady Central
+    diagonal is indefinite (cell Peclet >> 2; must be positive).
+    """
+
+    def __init__(self, fit, field_fit, mesh, rho, bc_u, bc_v, bc_p,
+                 dt_p, solver_config=None, corrections=None):
+        import pyfvm as fvm  # lazy: the online path needs the binding
+
+        super().__init__(fit)
+        if dt_p is None or dt_p <= 0.0:
+            raise ValueError(
+                f"dt_p must be positive (transient diagonal), got {dt_p}")
+        self._fvm = fvm
+        self._mesh = mesh
+        self._rho = float(rho)
+        self._bc_u = bc_u
+        self._bc_v = bc_v
+        self._bc_p = bc_p
+        self._dt_p = float(dt_p)
+        self._corrections = (corrections if corrections is not None
+                             else fvm.CorrectionOptions())
+        self._solver_cfg = (solver_config if solver_config is not None
+                            else fvm.SolverConfig())
+        self._field_fit = field_fit
+        self._transient = (self._rho * field_fit.volumes / self._dt_p)
+        self._velocity = fvm.VectorField(mesh, "rom_velocity")
+        self._pressure = fvm.ScalarField(mesh, "rom_pressure")
+        self._d_u = fvm.ScalarField(mesh, "rom_d_u")
+        self._d_v = fvm.ScalarField(mesh, "rom_d_v")
+        self._uhat_u = fvm.ScalarField(mesh, "rom_uhat_u")
+        self._uhat_v = fvm.ScalarField(mesh, "rom_uhat_v")
+        self.last_projection = None
+
+    def rhs(self, a_u, a_v):
+        """Reduced right-hand side with a per-stage full pressure solve."""
+        fvm = self._fvm
+        fields = self._field_fit
+        u = self.mean_u + a_u @ self.modes_u
+        v = self.mean_v + a_v @ self.modes_v
+        a = np.concatenate((a_u, a_v))
+        diag_u = fields.diag_u(a) + self._transient
+        diag_v = fields.diag_v(a) + self._transient
+        r_u = fields.residual_u(a)
+        r_v = fields.residual_v(a)
+        self._velocity.u.to_numpy()[:] = u
+        self._velocity.v.to_numpy()[:] = v
+        self._d_u.to_numpy()[:] = fields.volumes / diag_u
+        self._d_v.to_numpy()[:] = fields.volumes / diag_v
+        self._uhat_u.to_numpy()[:] = u + r_u / diag_u
+        self._uhat_v.to_numpy()[:] = v + r_v / diag_v
+        result = fvm.pressure_projection_from_fields(
+            self._mesh, self._rho, self._bc_u, self._bc_v, self._bc_p,
+            self._d_u, self._d_v, self._uhat_u, self._uhat_v,
+            self._pressure, solver_config=self._solver_cfg,
+            corrections=self._corrections)
+        self.last_projection = (result.max_imbalance, result.du_max,
+                                result.dv_max, result.dp_max)
+        c = self.fit.pressure_modes @ (self._pressure.to_numpy()
+                                       - self.fit.pressure_mean)
+        f_u = (self.fit.quad_u(a) + self.fit.mean_source_u
+               + self.fit.source_modes_u @ c)
+        f_v = (self.fit.quad_v(a) + self.fit.mean_source_v
+               + self.fit.source_modes_v @ c)
+        return f_u, f_v

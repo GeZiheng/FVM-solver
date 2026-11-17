@@ -22,6 +22,10 @@ imported here (or by the test suite).
 from .snapshots import SnapshotCollector, SnapshotData, load_snapshots
 from .pod import PodResult, pod_decompose
 from .dmd import DmdResult, dmd
+from .precomputed import (PrecomputedGalerkinRom, QuadraticFit,
+    ReducedOperatorFit, ReducedPressureRom, RhieChowFieldFit,
+    fit_reduced_operators, fit_rhie_chow_fields, make_fit_samples,
+    projected_pressure_snapshots)
 
 __version__ = "0.1.0"
 
@@ -33,4 +37,13 @@ __all__ = [
     "pod_decompose",
     "DmdResult",
     "dmd",
+    "PrecomputedGalerkinRom",
+    "QuadraticFit",
+    "ReducedOperatorFit",
+    "ReducedPressureRom",
+    "RhieChowFieldFit",
+    "fit_reduced_operators",
+    "fit_rhie_chow_fields",
+    "make_fit_samples",
+    "projected_pressure_snapshots",
 ]

@@ -662,6 +662,80 @@ py::object runPressureProjection(const Mesh& mesh,
             steadyDiagV, steadyRhsNoPressureV)));
 }
 
+/// One pressure projection with the Rhie-Chow data supplied as external
+/// cell fields (Phase 6.5c M1): dU/dV (mobility V/a_P) and uHatU/uHatV
+/// (pressure-free velocity) replace the internally assembled prediction -
+/// exactly correctPressure on a dummy MomentumPrediction whose only live
+/// members are the four vectors.  Everything else (reference-cell
+/// elimination, adjustPhi, the non-orthogonal cross-pressure corrector
+/// loop) is the untouched correctPressure logic.  `pressure` receives the
+/// solved absolute pressure in place; the corrected velocity/flux are
+/// internal scratch and discarded (ROM callers consume only p).  With the
+/// same (d, uHat) a pressure_projection call would derive internally, the
+/// solved pressure is identical to that entry.
+py::object runPressureProjectionFromFields(const Mesh& mesh,
+    Scalar rho,
+    const BoundaryField& bcU,
+    const BoundaryField& bcV,
+    const BoundaryField& bcP,
+    const ScalarField& dU,
+    const ScalarField& dV,
+    const ScalarField& uHatU,
+    const ScalarField& uHatV,
+    ScalarField& pressure,
+    const SolverConfig& solverConfig,
+    const CorrectionOptions& corrections)
+{
+    requireSameMesh(mesh, pressure, "pressure");
+    requireSameMesh(mesh, bcU, "bc_u");
+    requireSameMesh(mesh, bcV, "bc_v");
+    requireSameMesh(mesh, bcP, "bc_p");
+    requireSameMesh(mesh, dU, "d_u");
+    requireSameMesh(mesh, dV, "d_v");
+    requireSameMesh(mesh, uHatU, "uhat_u");
+    requireSameMesh(mesh, uHatV, "uhat_v");
+
+    ProjectionResult out;
+    {
+        py::gil_scoped_release release;
+
+        // Dummy prediction: empty matrix systems (never solved), the four
+        // live Rhie-Chow vectors copied from the caller's fields.
+        const Index nCells = mesh.cellCount();
+        numerical::MomentumPrediction pred{
+            numerical::MomentumAssembly{numerical::EquationSystem(nCells),
+                                         Vector(), Vector()},
+            numerical::MomentumAssembly{numerical::EquationSystem(nCells),
+                                         Vector(), Vector()},
+            Vector(),
+            Vector(),
+            Vector(uHatU.data()),
+            Vector(uHatV.data()),
+            Vector(dU.data()),
+            Vector(dV.data()) };
+
+        auto solver = fvm::math::makeLinearSolver(solverConfig);
+        VectorField velocity(mesh, "scratch_velocity");
+        FaceFluxField flux(mesh, "scratch_phi");
+        const numerical::CorrectorResult r = numerical::correctPressure(
+            mesh,
+            rho,
+            pred,
+            bcU,
+            bcV,
+            bcP,
+            *solver,
+            1.0,
+            velocity,
+            pressure,
+            flux,
+            corrections);
+        out = ProjectionResult{ r.maxImbalance, r.duMax, r.dvMax,
+                                r.dpMax };
+    }
+    return py::cast(std::move(out));
+}
+
 MomentumSystem assembleMomentum(const Mesh& mesh,
     const FaceFluxField& flux,
     const VectorField& velocity,
@@ -1235,6 +1309,21 @@ void bindNumerical(py::module_& m)
         "to a separate assemble_momentum(dt = 0, relaxation = 1) call) "
         "with b recomputed on the projected pressure, and the caller's "
         "flux is left untouched (dt > 0 requires the Euler scheme).");
+
+    m.def("pressure_projection_from_fields", &runPressureProjectionFromFields,
+        py::arg("mesh"), py::arg("rho"),
+        py::arg("bc_u"), py::arg("bc_v"), py::arg("bc_p"),
+        py::arg("d_u"), py::arg("d_v"), py::arg("uhat_u"), py::arg("uhat_v"),
+        py::arg("pressure"),
+        py::arg("solver_config") = SolverConfig{},
+        py::arg("corrections") = CorrectionOptions{},
+        "One pressure projection with externally supplied Rhie-Chow cell "
+        "fields (Phase 6.5c M1): d_u/d_v are the mobilities V/a_P and "
+        "uhat_u/uhat_v the pressure-free velocities. The solved absolute "
+        "pressure is written into `pressure` in place; the corrected "
+        "velocity/flux are internal scratch and discarded. Same equation "
+        "as pressure_projection - feeding the (d, uHat) it would derive "
+        "internally reproduces its pressure.");
 
     // -- Scalar transport (high level) ---------------------------------------
     m.def("solve_transport", &solveTransport,

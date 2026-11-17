@@ -27,7 +27,9 @@ physical.
 Run:  python python/examples/vortex_shedding_galerkin.py
       [--grid {coarse,medium,fine}] [--dt DT] [--end-time T] [--re RE]
       [--snap-every K] [--window-frac F] [--rank R] [--dt-rom DT]
-      [--projection] [--timing] [--test]
+      [--projection] [--precomputed] [--pressure-basis]
+      [--pressure-rank RP] [--timing]
+      [--test]
 """
 
 import argparse
@@ -40,6 +42,10 @@ from _common import fvm, report_test, write_results
 
 from rom import SnapshotCollector, pod_decompose
 from rom.galerkin import GalerkinRom
+from rom.precomputed import (PrecomputedGalerkinRom, ReducedPressureRom,
+                             fit_reduced_operators, fit_rhie_chow_fields,
+                             make_fit_samples,
+                             projected_pressure_snapshots)
 
 from cylinder import (GRIDS, configure_boundary_conditions,
                       force_coefficients)
@@ -157,6 +163,21 @@ def main():
                              "projection ROM (Phase 6.4) on the same "
                              "windowed basis and print the comparison "
                              "(diagnostics only)")
+    parser.add_argument("--precomputed", action="store_true",
+                        help="also integrate the offline-precomputed ROM "
+                             "(Phase 6.5b: fitted quadratic operators + "
+                             "pressure closure, no per-stage FOM work) "
+                             "and print the comparison")
+    parser.add_argument("--pressure-rank", type=int, default=16,
+                        help="pressure POD rank r_p of the precomputed "
+                             "closure / pressure basis (default 16)")
+    parser.add_argument("--pressure-basis", action="store_true",
+                        help="also integrate the Phase 6.5c M1 ROM: "
+                             "precomputed quadratic operators + a "
+                             "per-stage full pressure solve on "
+                             "offline-fitted Rhie-Chow fields (pressure "
+                             "applied through a projection-solution "
+                             "basis)")
     parser.add_argument("--timing", action="store_true",
                         help="print per-step wall-clock costs of the FOM "
                              "snapshot collection and of each ROM "
@@ -234,6 +255,69 @@ def main():
             bc_p=bc_p, projection_dt=dt_rom)
         rom_projective.set_state_from_fields(initial)
 
+    # Optional precomputed twin (Phase 6.5b): the quadratic operators are
+    # sampled offline on the same windowed basis (zero-pressure GalerkinRom
+    # rhs at snapshot coefficients + perturbations); the pressure closure
+    # is fitted from the paired windowed velocity/pressure snapshots.  The
+    # online advance is pure numpy - no per-stage FOM calls.
+    rom_precomputed = None
+    if args.precomputed:
+        rng = np.random.default_rng(0)
+        au_samples, av_samples = make_fit_samples(
+            pod_u.project(collector.u[first:]),
+            pod_v.project(collector.v[first:]), rng=rng)
+        fit = fit_reduced_operators(
+            mesh, 1.0 / args.re, 1.0, pod_u, pod_v, bc_u, bc_v,
+            fvm.ConvectionScheme.Central, au_samples, av_samples,
+            velocity_snapshots=(collector.u[first:], collector.v[first:]),
+            pressure_snapshots=collector.p[first:],
+            pressure_rank=args.pressure_rank, rng=rng)
+        rom_precomputed = PrecomputedGalerkinRom(fit)
+        rom_precomputed.set_state_from_fields(initial)
+        print(f"precomputed fit: r_p = {fit.rank_pressure} "
+              f"(cumulative energy {fit.pressure_cumulative_energy:.6f}), "
+              f"quadratic holdout residual {fit.holdout_residual:.2e}, "
+              f"closure train residual {fit.closure_train_residual:.2e}")
+
+    # Optional pressure-basis twin (Phase 6.5c M1): precomputed quadratic
+    # operators + per-stage FULL pressure solve on offline-fitted
+    # Rhie-Chow fields (transient diagonal dt_p = dt_rom, the projection
+    # twin's configuration); the solved pressure acts through a basis
+    # built from projection-solution pressures (FOM pressure snapshots
+    # measurably do not span them).
+    rom_pressure_basis = None
+    if args.pressure_basis:
+        rng = np.random.default_rng(1)
+        au_samples, av_samples = make_fit_samples(
+            pod_u.project(collector.u[first:]),
+            pod_v.project(collector.v[first:]), rng=rng)
+        p_cfg = make_piso_config(args.dt).pressure_solver_config
+        p_proj = projected_pressure_snapshots(
+            mesh, 1.0 / args.re, 1.0, pod_u, pod_v, bc_u, bc_v, bc_p,
+            fvm.ConvectionScheme.Central,
+            pod_u.project(collector.u[first:]),
+            pod_v.project(collector.v[first:]), dt_rom,
+            solver_config=p_cfg)
+        pod_pp = pod_decompose(p_proj)
+        rank_pb = min(args.pressure_rank, pod_pp.modes.shape[0])
+        fit_pb = fit_reduced_operators(
+            mesh, 1.0 / args.re, 1.0, pod_u, pod_v, bc_u, bc_v,
+            fvm.ConvectionScheme.Central, au_samples, av_samples,
+            pressure_basis=(pod_pp.modes[:rank_pb], pod_pp.mean), rng=rng)
+        field_fit = fit_rhie_chow_fields(
+            mesh, 1.0 / args.re, 1.0, pod_u, pod_v, bc_u, bc_v,
+            fvm.ConvectionScheme.Central, au_samples, av_samples, rng=rng)
+        rom_pressure_basis = ReducedPressureRom(
+            fit_pb, field_fit, mesh, 1.0, bc_u, bc_v, bc_p, dt_rom,
+            solver_config=p_cfg)
+        rom_pressure_basis.set_state_from_fields(initial)
+        print(f"pressure-basis fit: r_p = {rank_pb} "
+              f"(cumulative energy "
+              f"{pod_pp.cumulative_energy[rank_pb - 1]:.6f}), "
+              f"quadratic holdout {fit_pb.holdout_residual:.2e}, "
+              f"Rhie-Chow field holdout "
+              f"{field_fit.holdout_residual:.2e}")
+
     t0 = times[first]
     duration = times[-1] - t0
     n_steps = round(duration / dt_rom)
@@ -254,6 +338,14 @@ def main():
     if rom_projective is not None:
         _, a_up_hist, a_vp_hist = timed_advance("projection",
                                                 rom_projective)
+    a_pc_u_hist = a_pc_v_hist = None
+    if rom_precomputed is not None:
+        _, a_pc_u_hist, a_pc_v_hist = timed_advance("precomputed",
+                                                    rom_precomputed)
+    a_pb_u_hist = a_pb_v_hist = None
+    if rom_pressure_basis is not None:
+        _, a_pb_u_hist, a_pb_v_hist = timed_advance("pressure-basis",
+                                                    rom_pressure_basis)
     print(f"ROM advanced {n_steps} RK4 steps of dt = {dt_rom} "
           f"(t in [{t0:.2f}, {rec_times[-1]:.2f}])")
 
@@ -277,42 +369,53 @@ def main():
           f"max|a_v| = {span[1]:.3e} (limit-cycle preservation is NOT "
           f"guaranteed for a velocity-only ROM)")
 
+    twins = []
     if rom_projective is not None:
-        # Zero-pressure vs projective comparison (diagnostics only; the
-        # std rows are the persistent-amplitude metric behind the
-        # documented limit-cycle collapse, err|FOM is the mean relative
-        # L2 velocity error against the nearest FOM snapshot over the
-        # last 20% of the record).
-        st_p_a1 = coefficient_strouhal(rec_times, a_up_hist[:, 0])
-        st_p_a2 = coefficient_strouhal(rec_times, a_vp_hist[:, 0])
+        twins.append(("projective", a_up_hist, a_vp_hist))
+    if rom_precomputed is not None:
+        twins.append(("precomputed", a_pc_u_hist, a_pc_v_hist))
+    if rom_pressure_basis is not None:
+        twins.append(("pressure-basis", a_pb_u_hist, a_pb_v_hist))
+    if twins:
+        # Variant comparison (diagnostics only; the std rows are the
+        # persistent-amplitude metric behind the documented limit-cycle
+        # collapse, err|FOM is the mean relative L2 velocity error
+        # against the nearest FOM snapshot over the last 20% of the
+        # record).
         snap_dt = args.dt * args.snap_every
         tail0 = int(0.8 * rec_times.size)
-        err_zero, err_proj = [], []
-        for row in range(tail0, rec_times.size):
-            idx = min(first + round((rec_times[row] - t0) / snap_dt),
-                      len(collector) - 1)
-            err_zero.append(relative_velocity_error(
-                pod_u.mean + a_u_hist[row] @ pod_u.modes,
-                pod_v.mean + a_v_hist[row] @ pod_v.modes,
-                collector.u[idx], collector.v[idx]))
-            err_proj.append(relative_velocity_error(
-                pod_u.mean + a_up_hist[row] @ pod_u.modes,
-                pod_v.mean + a_vp_hist[row] @ pod_v.modes,
-                collector.u[idx], collector.v[idx]))
-        print("zero-pressure vs projective comparison (no physical "
-              "assertions):")
-        print(f"{'':>14} {'zero':>12} {'projective':>12}")
-        print(f"{'St(a1 FFT)':>14} {st_a1:12.4f} {st_p_a1:12.4f}")
-        print(f"{'St(a2 FFT)':>14} {st_a2:12.4f} {st_p_a2:12.4f}")
+
+        def tail_err(a_uh, a_vh):
+            errs = []
+            for row in range(tail0, rec_times.size):
+                idx = min(first + round((rec_times[row] - t0) / snap_dt),
+                          len(collector) - 1)
+                errs.append(relative_velocity_error(
+                    pod_u.mean + a_uh[row] @ pod_u.modes,
+                    pod_v.mean + a_vh[row] @ pod_v.modes,
+                    collector.u[idx], collector.v[idx]))
+            return float(np.mean(errs))
+
+        print("ROM variant comparison (no physical assertions):")
+        print(f"{'':>14} {'zero':>12} "
+              + " ".join(f"{name:>12}" for name, _, _ in twins))
+        print(f"{'St(a1 FFT)':>14} {st_a1:12.4f} "
+              + " ".join(f"{coefficient_strouhal(rec_times, hu[:, 0]):12.4f}"
+                         for _, hu, _ in twins))
+        print(f"{'St(a2 FFT)':>14} {st_a2:12.4f} "
+              + " ".join(f"{coefficient_strouhal(rec_times, hv[:, 0]):12.4f}"
+                         for _, _, hv in twins))
         print(f"{'std(a1)':>14} {np.std(a_u_hist[:, 0]):12.3e} "
-              f"{np.std(a_up_hist[:, 0]):12.3e}")
+              + " ".join(f"{np.std(hu[:, 0]):12.3e}" for _, hu, _ in twins))
         print(f"{'std(a2)':>14} {np.std(a_v_hist[:, 0]):12.3e} "
-              f"{np.std(a_vp_hist[:, 0]):12.3e}")
-        print(f"{'err|FOM(1)':>14} {np.mean(err_zero):12.4f} "
-              f"{np.mean(err_proj):12.4f}   (mean over the last 20% of "
-              f"the record, vs nearest FOM snapshot)")
-        print(f"projective last-stage projection (imb, du, dv, dp): "
-              f"{rom_projective.last_projection}")
+              + " ".join(f"{np.std(hv[:, 0]):12.3e}" for _, _, hv in twins))
+        print(f"{'err|FOM(1)':>14} {tail_err(a_u_hist, a_v_hist):12.4f} "
+              + " ".join(f"{tail_err(hu, hv):12.4f}" for _, hu, hv in twins)
+              + "   (mean over the last 20% of the record, vs nearest "
+              "FOM snapshot)")
+        if rom_projective is not None:
+            print(f"projective last-stage projection (imb, du, dv, dp): "
+                  f"{rom_projective.last_projection}")
 
     if args.frames > 0 and not args.test:
         # ROM reconstructions at recorded rows plus the matching FOM
@@ -362,6 +465,16 @@ def main():
             # advance with finite coefficients (same record schedule).
             checks["projective_finite"] = bool(
                 np.isfinite(a_up_hist).all() and np.isfinite(a_vp_hist).all())
+        if rom_precomputed is not None:
+            # machine-level only: same for the precomputed twin.
+            checks["precomputed_finite"] = bool(
+                np.isfinite(a_pc_u_hist).all()
+                and np.isfinite(a_pc_v_hist).all())
+        if rom_pressure_basis is not None:
+            # machine-level only: same for the pressure-basis twin.
+            checks["pressure_basis_finite"] = bool(
+                np.isfinite(a_pb_u_hist).all()
+                and np.isfinite(a_pb_v_hist).all())
         rom.write_state(initial)
         rom.set_state_from_fields(initial)
         np.testing.assert_allclose(rom.a_u, a_u_hist[-1], atol=1e-12)

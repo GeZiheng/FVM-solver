@@ -30,6 +30,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
 
 from rom import SnapshotCollector, dmd, load_snapshots, pod_decompose  # noqa: E402
+from rom.galerkin import GalerkinRom  # noqa: E402
+from rom.precomputed import (PrecomputedGalerkinRom,  # noqa: E402
+                             ReducedPressureRom,
+                             fit_reduced_operators, fit_rhie_chow_fields,
+                             make_fit_samples,
+                             projected_pressure_snapshots)
 
 # The algebra and contract tests above never touch pyfvm; only the
 # Taylor-Green smoke needs the built extension (_path honors
@@ -741,6 +747,361 @@ class TestGalerkinRomProjection(_TaylorGreenRomFixture, unittest.TestCase):
 
         np.testing.assert_array_equal(rom.a_u, a_u)
         np.testing.assert_array_equal(rom.a_v, a_v)
+
+
+class _FrozenBcRomFixture(_TaylorGreenRomFixture):
+    """Taylor-Green geometry with the exact BCs FROZEN at t = 0 (Phase
+    6.5b fixture): the interior evolves away from the boundary state, so
+    the FOM relaxes with real pressure dynamics under FIXED boundary
+    conditions - the scope of the precomputed operators.  A plain mixin
+    (not a TestCase), like its parent."""
+
+    STEPS = 24
+    RANK = 4
+
+    def _build_frozen_case(self):
+        """FOM relaxation under frozen BCs; returns (mesh, snapshot
+        triplet (u, v, p) arrays, bc triplet)."""
+        mesh = pyfvm.CartesianMesh(self.NX, self.NX, 0.0, 0.0,
+                                   math.pi, math.pi)
+        velocity = pyfvm.VectorField(mesh, "velocity")
+        pressure = pyfvm.ScalarField(mesh, "pressure")
+        flux = pyfvm.FaceFluxField(mesh, "phi")
+
+        u0, v0, p0 = self._exact_fields(mesh, 0.0)
+        velocity.u.to_numpy()[:] = u0
+        velocity.v.to_numpy()[:] = v0
+        pressure.to_numpy()[:] = p0
+
+        bc_u = pyfvm.BoundaryField(mesh)
+        bc_v = pyfvm.BoundaryField(mesh)
+        bc_p = pyfvm.BoundaryField(mesh)
+        self._refresh_boundary_conditions(mesh, bc_u, bc_v, bc_p, 0.0)
+
+        cfg = pyfvm.PisoConfig()
+        cfg.dt = self.DT
+        cfg.n_steps = 1
+        cfg.n_correctors = 2
+        cfg.time_scheme = pyfvm.TimeScheme.CrankNicolson
+        cfg.scheme = pyfvm.ConvectionScheme.Central
+        cfg.solver_config.tolerance = 1e-10
+        cfg.solver_config.max_iterations = 20000
+        cfg.pressure_solver_config.tolerance = 1e-10
+        cfg.pressure_solver_config.max_iterations = 20000
+
+        count = mesh.cell_count()
+        steps = self.STEPS
+        snap_u = np.empty((steps + 1, count))
+        snap_v = np.empty((steps + 1, count))
+        snap_p = np.empty((steps + 1, count))
+        snap_u[0], snap_v[0], snap_p[0] = u0, v0, p0
+        for step in range(steps):
+            pyfvm.solve_piso(mesh, self.RHO, self.NU, bc_u, bc_v, bc_p,
+                             cfg, velocity, pressure, flux)
+            snap_u[step + 1] = velocity.u.to_numpy()
+            snap_v[step + 1] = velocity.v.to_numpy()
+            snap_p[step + 1] = pressure.to_numpy()
+        return mesh, (snap_u, snap_v, snap_p), (bc_u, bc_v, bc_p)
+
+    def _build_fit(self, case, with_closure, rng):
+        """Fit the precomputed operators on the frozen case; returns
+        (pod pair, fit)."""
+        mesh, (snap_u, snap_v, snap_p), (bc_u, bc_v, _) = case
+        pod_u = pod_decompose(snap_u).truncated(self.RANK)
+        pod_v = pod_decompose(snap_v).truncated(self.RANK)
+        au_samples, av_samples = make_fit_samples(
+            pod_u.project(snap_u), pod_v.project(snap_v), rng=rng)
+        fit = fit_reduced_operators(
+            mesh, self.NU, self.RHO, pod_u, pod_v, bc_u, bc_v,
+            pyfvm.ConvectionScheme.Central, au_samples, av_samples,
+            velocity_snapshots=(snap_u, snap_v) if with_closure else None,
+            pressure_snapshots=snap_p if with_closure else None,
+            rng=rng)
+        return (pod_u, pod_v), fit
+
+    def _zero_pressure_rom(self, case, pod_pair):
+        """GalerkinRom sampler twin with an injectable pressure field
+        (the fitter's own construction, exposed for the identity
+        checks)."""
+        mesh, _, (bc_u, bc_v, _) = case
+        field = pyfvm.ScalarField(mesh, "check_pressure")
+        rom = GalerkinRom(mesh, self.NU, self.RHO, pod_pair[0],
+                          pod_pair[1], bc_u, bc_v,
+                          pyfvm.ConvectionScheme.Central, pressure=field)
+        return rom, field
+
+
+@unittest.skipIf(not HAVE_PYFVM, "pyfvm extension not built")
+class TestPrecomputedRom(_FrozenBcRomFixture, unittest.TestCase):
+    """Precomputed reduced operators (Phase 6.5b) contract tests: the
+    quadratic fit is exact (the zero-pressure rhs is a polynomial in the
+    joint coefficients for Central convection), the closure reproduces
+    the snapshot pressure sources within its linear expressiveness, and
+    the fixed-BC scope is enforced."""
+
+    FIT_TOLERANCE = 1e-10
+    CLOSURE_TOLERANCE = 0.05
+
+    def test_quadratic_fit_exactness(self):
+        # Without pressure snapshots the fit must reproduce the
+        # zero-pressure GalerkinRom rhs to machine-level precision at
+        # states it never sampled (the quadratic model is exact, not
+        # approximate).
+        case = self._build_frozen_case()
+        pod_pair, fit = self._build_fit(case, with_closure=False,
+                                        rng=np.random.default_rng(3))
+        rom, _ = self._zero_pressure_rom(case, pod_pair)
+
+        rng = np.random.default_rng(9)
+        a_u_snap = pod_pair[0].project(case[1][0])
+        scale_u = a_u_snap.std(axis=0).mean()
+        for _ in range(6):
+            a_u = rng.standard_normal(a_u_snap.shape[1]) * scale_u
+            a_v = rng.standard_normal(a_u_snap.shape[1]) * scale_u
+            f_ref_u, f_ref_v = rom.rhs(0.0, a_u, a_v)
+            f_fit_u, f_fit_v = PrecomputedGalerkinRom(fit).rhs(a_u, a_v)
+            np.testing.assert_allclose(f_fit_u, f_ref_u,
+                                       rtol=self.FIT_TOLERANCE, atol=0.0)
+            np.testing.assert_allclose(f_fit_v, f_ref_v,
+                                       rtol=self.FIT_TOLERANCE, atol=0.0)
+        self.assertLessEqual(fit.holdout_residual, self.FIT_TOLERANCE)
+        self.assertEqual(fit.rank_pressure, 0)
+
+    def test_precomputed_tracks_zero_pressure_rom(self):
+        # Same rhs + same RK4 => the closure-free precomputed ROM
+        # reproduces the zero-pressure GalerkinRom trajectory (fit
+        # tolerance, not bit identity: the polynomial is refitted, not
+        # copied).
+        case = self._build_frozen_case()
+        pod_pair, fit = self._build_fit(case, with_closure=False,
+                                        rng=np.random.default_rng(4))
+        rom, _ = self._zero_pressure_rom(case, pod_pair)
+        mesh, (snap_u, snap_v, _), _ = case
+
+        initial = pyfvm.VectorField(mesh, "initial")
+        initial.u.to_numpy()[:] = snap_u[0]
+        initial.v.to_numpy()[:] = snap_v[0]
+        rom.set_state_from_fields(initial)
+        fast = PrecomputedGalerkinRom(fit)
+        fast.set_state_from_fields(initial)
+
+        n_steps = 10
+        ref = rom.advance(0.0, self.DT, n_steps, record_every=1)
+        got = fast.advance(0.0, self.DT, n_steps, record_every=1)
+        np.testing.assert_allclose(got[1], ref[1], rtol=1e-8, atol=1e-9)
+        np.testing.assert_allclose(got[2], ref[2], rtol=1e-8, atol=1e-9)
+
+    def test_pressure_closure_reconstruction(self):
+        # (a) b-difference identity: the pressure-source difference of
+        # two rhs evaluations is independent of the evaluation state
+        # (b^np carries no pressure) - the property the per-mode sources
+        # rely on; (b) the affine map reproduces the snapshot pressure
+        # coefficients; (c) the folded closure reproduces the snapshot
+        # pressure sources at snapshot states.
+        case = self._build_frozen_case()
+        pod_pair, fit = self._build_fit(case, with_closure=True,
+                                        rng=np.random.default_rng(5))
+        rom, field = self._zero_pressure_rom(case, pod_pair)
+        mesh, (snap_u, snap_v, snap_p), _ = case
+
+        self.assertGreaterEqual(fit.rank_pressure, 1)
+        self.assertGreater(fit.pressure_cumulative_energy, 0.99)
+        self.assertLessEqual(fit.closure_train_residual,
+                             self.CLOSURE_TOLERANCE)
+
+        # (a) state independence of the per-mode source difference.
+        a_u_snap = pod_pair[0].project(snap_u)
+        a_v_snap = pod_pair[1].project(snap_v)
+        for k in (0, fit.rank_pressure - 1):
+            sources = []
+            for a_u, a_v in ((np.zeros(a_u_snap.shape[1]),
+                              np.zeros(a_u_snap.shape[1])),
+                             (a_u_snap[7], a_v_snap[7])):
+                field.to_numpy()[:] = 0.0
+                base_u, base_v = rom.rhs(0.0, a_u, a_v)
+                field.to_numpy()[:] = fit.pressure_modes[k]
+                f_u, f_v = rom.rhs(0.0, a_u, a_v)
+                sources.append((f_u - base_u, f_v - base_v))
+            np.testing.assert_allclose(sources[1][0], sources[0][0],
+                                       rtol=1e-8, atol=1e-9)
+            np.testing.assert_allclose(sources[1][1], sources[0][1],
+                                       rtol=1e-8, atol=1e-9)
+
+        # (c) folded closure vs the direct snapshot pressure source.
+        for row in (3, 12, self.STEPS - 1):
+            a_u, a_v = a_u_snap[row], a_v_snap[row]
+            field.to_numpy()[:] = 0.0
+            base_u, base_v = rom.rhs(0.0, a_u, a_v)
+            field.to_numpy()[:] = snap_p[row]
+            f_u, f_v = rom.rhs(0.0, a_u, a_v)
+            a = np.concatenate((a_u, a_v))
+            for direct, closure in (((f_u - base_u), fit.h0_u + fit.H_u @ a),
+                                    ((f_v - base_v), fit.h0_v + fit.H_v @ a)):
+                rel = (np.linalg.norm(closure - direct)
+                       / np.linalg.norm(direct))
+                self.assertLess(rel, self.CLOSURE_TOLERANCE)
+
+    def test_precomputed_input_validation(self):
+        # Fixed-BC scope, sample-count floor and the paired-snapshot
+        # requirement are enforced.
+        case = self._build_frozen_case()
+        pod_pair, fit = self._build_fit(case, with_closure=False,
+                                        rng=np.random.default_rng(6))
+        fast = PrecomputedGalerkinRom(fit)
+        with self.assertRaises(ValueError):
+            fast.advance(0.0, self.DT, 1, bc_refresh=lambda t: None)
+
+        mesh, (snap_u, snap_v, snap_p), (bc_u, bc_v, _) = case
+        pod_u, pod_v = pod_pair
+        a_u = pod_u.project(snap_u)[:4]
+        a_v = pod_v.project(snap_v)[:4]
+        with self.assertRaises(ValueError):
+            fit_reduced_operators(mesh, self.NU, self.RHO, pod_u, pod_v,
+                                  bc_u, bc_v, pyfvm.ConvectionScheme.Central,
+                                  a_u, a_v)
+        with self.assertRaises(ValueError):
+            fit_reduced_operators(
+                mesh, self.NU, self.RHO, pod_u, pod_v, bc_u, bc_v,
+                pyfvm.ConvectionScheme.Central,
+                *make_fit_samples(a_u, a_v, rng=np.random.default_rng(1)),
+                velocity_snapshots=(snap_u, snap_v))
+
+
+@unittest.skipIf(not HAVE_PYFVM, "pyfvm extension not built")
+class TestReducedPressureRom(_FrozenBcRomFixture, unittest.TestCase):
+    """Phase 6.5c M1 contract tests: the per-stage full pressure solve
+    on offline-fitted Rhie-Chow fields reproduces the GalerkinRom
+    projection mode (same equation, pressure applied through the
+    projection-solution basis) and stays stable on horizons where the
+    6.5b affine closure diverged."""
+
+    # Snapshot-state rhs agreement is ~3e-9; mildly off-manifold states
+    # see the projection-basis POD truncation (~4e-5 measured), so the
+    # gate follows the plan's model tolerance rather than the in-basis
+    # floor.
+    RHS_TOLERANCE = 1e-3
+
+    PRESSURE_RANK = 12
+
+    def _build_m1(self, case, rng):
+        """(pod pair, fit, field fit) with the projection-solution
+        pressure basis (D3 revision)."""
+        mesh, (snap_u, snap_v, _), (bc_u, bc_v, _) = case
+        pod_u = pod_decompose(snap_u).truncated(self.RANK)
+        pod_v = pod_decompose(snap_v).truncated(self.RANK)
+        a_u_snap = pod_u.project(snap_u)
+        a_v_snap = pod_v.project(snap_v)
+        samples = make_fit_samples(a_u_snap, a_v_snap, rng=rng)
+        p_proj = projected_pressure_snapshots(
+            mesh, self.NU, self.RHO, pod_u, pod_v, bc_u, bc_v,
+            pyfvm.BoundaryField(mesh), pyfvm.ConvectionScheme.Central,
+            a_u_snap, a_v_snap, self.DT)
+        pod_pp = pod_decompose(p_proj)
+        fit = fit_reduced_operators(
+            mesh, self.NU, self.RHO, pod_u, pod_v, bc_u, bc_v,
+            pyfvm.ConvectionScheme.Central, *samples,
+            pressure_basis=(pod_pp.modes[:self.PRESSURE_RANK],
+                            pod_pp.mean), rng=rng)
+        field_fit = fit_rhie_chow_fields(
+            mesh, self.NU, self.RHO, pod_u, pod_v, bc_u, bc_v,
+            pyfvm.ConvectionScheme.Central, *samples, rng=rng)
+        return (pod_u, pod_v), fit, field_fit
+
+    def _projection_rom(self, case, pod_pair):
+        mesh, _, (bc_u, bc_v, _) = case
+        return GalerkinRom(mesh, self.NU, self.RHO, pod_pair[0],
+                           pod_pair[1], bc_u, bc_v,
+                           pyfvm.ConvectionScheme.Central,
+                           pressure_projection=True, projection_dt=self.DT)
+
+    def test_rhs_matches_projection_rom(self):
+        # Snapshot states (in-basis) and perturbed states (mildly
+        # off-manifold): the fitted fields + full solve + g0 + G c must
+        # track the projection-mode rhs far below the model tolerance.
+        case = self._build_frozen_case()
+        pod_pair, fit, field_fit = self._build_m1(case,
+                                                  np.random.default_rng(2))
+        mesh, (snap_u, snap_v, _), (bc_u, bc_v, _) = case
+        rom = ReducedPressureRom(fit, field_fit, mesh, self.RHO, bc_u,
+                                 bc_v, pyfvm.BoundaryField(mesh), self.DT)
+        ref = self._projection_rom(case, pod_pair)
+        a_u_snap = pod_pair[0].project(snap_u)
+        a_v_snap = pod_pair[1].project(snap_v)
+
+        rng = np.random.default_rng(3)
+        states = [(a_u_snap[i], a_v_snap[i])
+                  for i in (5, 15, self.STEPS)]
+        states.append((a_u_snap[10]
+                       + 0.3 * a_u_snap.std(axis=0)
+                       * rng.standard_normal(a_u_snap.shape[1]),
+                       a_v_snap[10]
+                       + 0.3 * a_v_snap.std(axis=0)
+                       * rng.standard_normal(a_v_snap.shape[1])))
+        for a_u, a_v in states:
+            f_u, f_v = rom.rhs(a_u, a_v)
+            r_u, r_v = ref.rhs(0.0, a_u, a_v)
+            rel = max(np.linalg.norm(f_u - r_u) / np.linalg.norm(r_u),
+                      np.linalg.norm(f_v - r_v) / np.linalg.norm(r_v))
+            self.assertLess(rel, self.RHS_TOLERANCE)
+        self.assertLessEqual(fit.holdout_residual, 1e-10)
+        self.assertLessEqual(field_fit.holdout_residual, 1e-10)
+        self.assertIsNotNone(rom.last_projection)
+
+    def test_tracks_projection_rom_trajectory(self):
+        # Same rhs (to fit tolerance) + same RK4 => the M1 ROM tracks the
+        # projection-mode GalerkinRom over a short horizon.
+        case = self._build_frozen_case()
+        pod_pair, fit, field_fit = self._build_m1(case,
+                                                  np.random.default_rng(4))
+        mesh, (snap_u, snap_v, _), (bc_u, bc_v, _) = case
+        rom = ReducedPressureRom(fit, field_fit, mesh, self.RHO, bc_u,
+                                 bc_v, pyfvm.BoundaryField(mesh), self.DT)
+        ref = self._projection_rom(case, pod_pair)
+
+        initial = pyfvm.VectorField(mesh, "initial")
+        initial.u.to_numpy()[:] = snap_u[0]
+        initial.v.to_numpy()[:] = snap_v[0]
+        ref.set_state_from_fields(initial)
+        rom.set_state_from_fields(initial)
+        n_steps = 20
+        ref_hist = ref.advance(0.0, self.DT, n_steps, record_every=1)
+        got_hist = rom.advance(0.0, self.DT, n_steps, record_every=1)
+        # RK4 stages wander slightly off the snapshot manifold, where
+        # the rhs difference is the basis truncation (~4e-5/stage); the
+        # drift concentrates on the smallest coefficients, hence the
+        # generous rtol paired with a tight atol.
+        np.testing.assert_allclose(got_hist[1], ref_hist[1],
+                                   rtol=0.1, atol=1e-4)
+        np.testing.assert_allclose(got_hist[2], ref_hist[2],
+                                   rtol=0.1, atol=1e-4)
+
+    def test_long_horizon_stability(self):
+        # The 6.5b affine closure diverges on shedding after ~225 steps;
+        # the state-dependent pressure solve must stay finite on a long
+        # horizon (contract-level stability smoke, no accuracy gate).
+        case = self._build_frozen_case()
+        _, fit, field_fit = self._build_m1(case, np.random.default_rng(5))
+        mesh, (snap_u, snap_v, _), (bc_u, bc_v, _) = case
+        rom = ReducedPressureRom(fit, field_fit, mesh, self.RHO, bc_u,
+                                 bc_v, pyfvm.BoundaryField(mesh), self.DT)
+        initial = pyfvm.VectorField(mesh, "initial")
+        initial.u.to_numpy()[:] = snap_u[0]
+        initial.v.to_numpy()[:] = snap_v[0]
+        rom.set_state_from_fields(initial)
+        rom.advance(0.0, self.DT, 6000)
+        self.assertTrue(np.isfinite(rom.a_u).all())
+        self.assertTrue(np.isfinite(rom.a_v).all())
+
+    def test_dt_p_validation(self):
+        # The transient diagonal is mandatory (indefinite steady
+        # diagonals otherwise), so dt_p must be positive.
+        case = self._build_frozen_case()
+        _, fit, field_fit = self._build_m1(case, np.random.default_rng(6))
+        mesh, _, (bc_u, bc_v, _) = case
+        for bad in (None, 0.0, -0.01):
+            with self.assertRaises(ValueError):
+                ReducedPressureRom(fit, field_fit, mesh, self.RHO, bc_u,
+                                   bc_v, pyfvm.BoundaryField(mesh), bad)
 
 
 if __name__ == "__main__":
