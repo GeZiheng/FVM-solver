@@ -45,7 +45,7 @@ FOM: pyfvm PISO (n_steps=1 逐步循环)
 
 `PodResult.truncated(r)` 返回仅保留前 r 阶模态的拷贝（r 封顶于满秩；谱属性沿切片保留，`reconstruction_error` 仍反映分解的完整谱）——Galerkin ROM 按秩截断基的标准入口。
 
-**已知 caveat**：collocated Rhie–Chow 排布下 POD 速度模态**非逐点散度自由**，侵入式路径的重构场缺 $\nabla p$ 约束——6.3 已在 TG 上定量（见 Galerkin 节），6.4 以预测性压力投影补上缺失约束（TG 上泄漏降 ~8×，见压力投影节）。
+**已知 caveat**：collocated Rhie–Chow 排布下 POD 速度模态**非逐点散度自由**，侵入式路径的重构场缺 $\nabla p$ 约束——6.3 已在 TG 上定量（见 Galerkin 节），6.4 以预测性压力投影补上缺失约束（TG 上泄漏降 ~8×，见压力响应的演进节）。
 
 ## DMD（`rom.dmd`，exact DMD，Tu et al. 2014）
 
@@ -63,15 +63,37 @@ FOM: pyfvm PISO (n_steps=1 逐步循环)
 
 `GalerkinRom` 是纯速度侵入式 POD-Galerkin ROM 的在线积分器（显式 RK4）。与 `rom` 包其余部分不同，它通过 pyfvm 扩展驱动 FOM——`pyfvm` 在 `GalerkinRom` 构造内**惰性 import**，单独 `import rom.galerkin` 无需扩展。
 
-**降阶模型**：u、v 各自独立 POD 基（中心化，行正交），$u = \bar{u} + a_u \Phi_u$；半离散 FOM 为 $M\,\mathrm{d}u/\mathrm{d}t = -A_{\mathrm{sp}}(t, u)\,u + b_{\mathrm{sp}}(t)$，其中 $M = \rho\,\mathrm{diag}(V)$（6.2 theta 分离恒等式）、`A_sp`/`b_sp` 来自 `assemble_momentum(dt=0, 零压场, Neumann-p)`。投影得降阶 ODE（逐分量，r×r 稠密 SPD）：
+**降阶模型与推导**：u、v 各自独立 POD 基（中心化，行正交），$u = \bar{u} + a_u \Phi_u$（$\Phi$ 为 $r\times N$ 行模态，$a$ 为系数向量）。半离散 FOM 是**逐单元的动量积分平衡**（有限体积把 PDE 乘上单元体积）：
 
-$$M_r\,\dot{a} = \Phi\,(b - A u)^{\top}, \qquad M_r = \Phi\,\mathrm{diag}(\rho V)\,\Phi^{\top}$$
+$$\underbrace{\rho\,\mathrm{diag}(V)}_{M}\,\frac{\mathrm{d}u}{\mathrm{d}t} = b_{\mathrm{sp}}(t) - A_{\mathrm{sp}}\,u$$
 
-**$M_r$ 不是单位阵**：POD 模态非质量正交，$M_r$ 构造后缓存一次，每次残差评估用 `numpy.linalg.solve` 求解。初值投影 $a_0 = (u_0 - \bar{u})\,\Phi^{\top}$（行正交基，全秩时往返精确）。
+$M = \rho\,\mathrm{diag}(V)$ 是 FOM 的**集中质量算子**：第 P 个方程的物理意义是"单元 P 的动量 $\rho V_P u_P$ 的变化率 = 该单元所受合力"；`A_sp`/`b_sp` 来自 `assemble_momentum(dt=0, 零压场, Neumann-p)`（6.2 theta 分离恒等式）。代入 $u = \bar{u} + a\Phi$、以模态为测试函数对单元求和（Galerkin：trial = test = POD 基，本质是**加权残差法**——要求 FOM 残差与模态子空间正交，方程只在投影/弱意义下满足，与有限元对连续弱形式做 Galerkin 是同一原理；差别仅在 FV 半离散方程已是逐单元的积分平衡，无需再分部积分）：
+
+$$\big\langle \varphi_i,\ M \varphi_j \big\rangle\, \dot{a}_j = \big\langle \varphi_i,\ b - A u \big\rangle \;\;\Longrightarrow\;\; M_r\,\dot{a} = \Phi\,(b - A u)^{\top}$$
+
+$$M_r \;=\; \Phi\,M\,\Phi^{\top} \;=\; \Phi\,\mathrm{diag}(\rho V)\,\Phi^{\top}$$
+
+（逐分量各一组，$r\times r$ 稠密 SPD；内积为对单元的欧氏求和。）
+
+**$M_r$ 的含义**：
+
+- **模态坐标下的质量阵（广义惯性）**——FOM 质量算子到系数空间的 Galerkin 投影。$M_r \dot{a}$ 是各模态广义动量的变化率，右端是对应的广义力：牛顿第二定律的模态形式。
+- **动能度量**——涨落场动能 $\tfrac{1}{2}\sum_P \rho V_P\,|u_P - \bar{u}_P|^2 = \tfrac{1}{2}\,a^{\top} M_r\,a$，即 $M_r$ 是系数空间上的动能（黎曼）度量；权重 $\rho V$ 正是动量方程积分形式带来的。
+- **为何不是单位阵**——POD 用欧氏 SVD，模态满足 $\Phi\Phi^{\top} = I$（欧氏正交），但 FOM 质量是 $\rho V$ 加权的：均匀笛卡尔网格上 $V$ 为常数，$M_r$ 退化为纯标量 $\rho V \cdot I$；非均匀/非结构网格（涡街 O-4）上 $V$ 逐单元不同，模态在质量加权内积下不再正交，$M_r$ 出现真实非对角结构。若改用质量加权 POD（能量范数正交模态）则恒有 $M_r = I$——本仓库取欧氏 SVD（numpy 直截），代价是每次残差评估 `numpy.linalg.solve(M_r, ·)`（$O(r^3)$，$r \le 24$ 可忽略；满秩 SPD：$x^{\top} M_r x = \sum_P \rho V_P\,(x^{\top}\Phi)_P^2 > 0$，构造后缓存一次）。
+
+初值投影 $a_0 = (u_0 - \bar{u})\,\Phi^{\top}$（行正交基，全秩时往返精确）。
 
 **每 RK4 阶段的残差评估**：重构 u/v 写入内部 VectorField → `bc_refresh(t)`（时间相关 BC 在阶段时刻刷新；静态 BC 传 None）→ `compute_mass_flux` → `assemble_momentum(dt=0)` 两个分量 → $\dot{a} = M_r^{-1}\,\Phi\,(b - A\,u)^{\top}$。ROM 的 dt 独立于 FOM dt（显式积分器继承投影算子刚性）。重构场不精确满足 BC（子空间不含边界修正），边界效应经装配 RHS 进入——Galerkin-ROM 标准行为。
 
-**pressure 注入口**：构造器接受可选 `pressure` ScalarField，被每次残差评估**活读**（`bc_refresh` 可在阶段时刻更新它）。零压 = 纯速度 ROM，承受结构性压力泄漏；供入精确压力 = oracle 隔离实验，把泄漏从机构误差中分离。预测性压力投影（6.4）即经注入口逐 stage 写入投影压力（见压力投影节）。
+**pressure 注入口**：构造器接受可选 `pressure` ScalarField，被每次残差评估**活读**（`bc_refresh` 可在阶段时刻更新它）。零压 = 纯速度 ROM，承受结构性压力泄漏；供入精确压力 = oracle 隔离实验，把泄漏从机构误差中分离。预测性压力投影（6.4）即经注入口逐 stage 写入投影压力（见压力响应的演进节）。
+
+**为什么压力项不可省（同位网格的根源链）**：本仓库 FOM 是 collocated 排布，连续性约束施加在**面通量**上（修正通量 `phi =
+phiHbyA − C·∇p` 守恒），而面速度不是单元心速度的普通插值——差一个 Rhie–Chow
+压力修正项，这是同位格式压住压力棋盘解耦的**设计代价**。因此**面通量守恒 ≠ 单元心速度无散**：快照存的是单元心
+u/v，每个快照都带残差散度；散度算子线性，POD 模态与均值场作为快照的线性组合**原样继承**该残差（截断不引入新散度——重构仍在子空间内）。于是 ∇p
+在模态上的投影非零，是降阶方程的真实项：删掉它误差线性漂移（下表 TG 实测；对 dt_rom/4 与网格加密不变 ⇒
+结构性），供压力即回离散地板。对照：交错网格（速度即通量）或散度自由基的谱/FE 方法，快照可精确无散，其无压力 Galerkin
+才严格合法——"教科书无压力标准形式"的隐藏前提正在于此。
 
 **Taylor–Green 实测**（16² 全秩，2026-11-13）：
 
@@ -87,102 +109,110 @@ $$M_r\,\dot{a} = \Phi\,(b - A u)^{\top}, \qquad M_r = \Phi\,\mathrm{diag}(\rho V
 - **幅值**：主导系数 a₁/a₂ 的持续振荡 std ≈ 0.33，而 FOM 投影系数 std ≈ 2.68/2.47——**ROM 的持续振幅塌缩到 ~1/8**（此前报告的"包络 3.67/5.71"是初值瞬态的峰值，不是持续振幅——该解读已更正）；同时 a₃ 出现 +0.38 的均值偏移（时均尾迹被扭曲）；
 - **误差形态**：全程相对误差从 0.001 快速升至 ~0.14 后平台缓降（t=250 时 0.115）；**最优时移只把中位误差从 0.118 降到 0.114**——差距主体是幅值/模态构成与均值的结构性偏移，不是相位滑动（此前"主因相位错位"的说法有误，已在此更正）；
 - **时间外推**（POD 只用 $t \in [100, 200]$、从 t=200 预报 50 单位）：误差有界（中位 13.8%）、振荡持续，但外推窗 50 单位的 FFT 分辨率仅 ±0.01，此前"预报 St 降级至 0.1400（−12%）"在分辨率上不成立，外推窗内的真实频率未单独测定；
-- **每步成本**：实测 ROM 48.9 ms/步 vs FOM 46.8 ms/步（比值 1.05）——本实现的逐降阶步重装配设计**没有任何步级加速**，其价值在 r 维状态与机构验证；经典 Galerkin 的加速来自预计算降阶算子张量（6.5b 起交付，见压力入基节）。该数为零压路径的历史记录（2026-11-14，去重前后不变——零压路径无重复装配）；投影变体与 6.5a 装配去重后的最新成本见压力投影节。
+- **每步成本**：实测 ROM 48.9 ms/步 vs FOM 46.8 ms/步（比值 1.05）——本实现的逐降阶步重装配设计**没有任何步级加速**，其价值在 r 维状态与机构验证；经典 Galerkin 的加速来自预计算降阶算子张量（6.5b 起交付，见压力响应的演进节）。该数为零压路径的历史记录（2026-11-14，去重前后不变——零压路径无重复装配）；投影变体与 6.5a 装配去重后的最新成本见压力响应的演进节。
 
 结论：纯速度 ROM 在涡街上抓住了振荡频率与有界性，但持续幅值塌缩 ~8×、时均场偏移——这些结构性偏差与 TG 上的压力泄漏同源，是 6.4 压力投影的最强动机。
 
-## 压力投影（Phase 6.4）
+## 压力响应的演进（6.4 投影 → 6.5c M2 约化解）
 
-6.3 量化的结构性压力泄漏的修复：**预测性压力投影**——逐 RK4 stage 在冻结重构场上用 FOM 的 `correctPressure` 机器求解一次离散压力方程（= PISO 单 corrector 的压力半步，不动动量解），结果写入 `GalerkinRom` 既有的 pressure 注入口。落点 = `pyfvm.pressure_projection` 绑定（签名与语义见 [`docs/python.md`](python.md) §API 一览）+ `GalerkinRom(pressure_projection=True)`；C++ numerical 模块零改动（延续 6.1–6.3 惯例）。
+6.3 的结论（见 Galerkin 节）：纯速度 POD-Galerkin ROM 的误差漂移全部归因**结构性压力
+泄漏**——collocated 模态非逐点散度自由、降阶方程缺 ∇p 约束（TG 上 T=1.0 达 43%，oracle
+注入精确压力即回到 FOM 离散地板 0.0091）。此后各批次回答同一问题——**ROM 里压力的
+状态相关椭圆响应怎么供**——差别只在"解多少、在哪解"：
 
-**投影链**（绑定内一次完成）：稳态装配两分量（`assembleMomentum`，relaxation=1、`TimeTerm{}`，与 ROM 残差同算子）→ `finalize` → `refreshUHat` → `d = V/a_P` → `correctPressure(relaxationP=1)`（线性求解器由 `solver_config` 内部创建，不暴露 LinearSolver 类）。传给装配的 pressure 内容无关紧要（投影只消费 `diag` 与 `rhsNoPressure`）；`relaxationP=1` ⇒ 存储 pressure = p_solved。`velocity` 按契约被**原位**写为修正速度 uHat − d∇p（丢弃与否由调用方自备 scratch 决定）；`flux` 被覆写为修正通量（phiHbyA − C∇p）。
+| 变体 | 逐 stage 压力处置 | 每 stage FOM 侧工作 | 涡街 T=250 err\|FOM | 状态 |
+| --- | --- | --- | --- | --- |
+| 零压（6.3 基线） | 无 | 2 装配（残差） | 0.1173 | 泄漏基线 |
+| oracle（6.3 隔离实验） | 注入精确 p | 2 装配 | —（TG 0.0091） | 机制归因 |
+| 投影（6.4） | 全量解（冻结场装配） | 2 装配 + 1 解 | 0.0021 | 修复机制 |
+| └ 装配去重（6.5a） | 同上（装配共享） | 1 装配 + 1 解 | 0.0021 | 成本优化，轨迹逐位一致 |
+| 闭包（6.5b） | 数据拟合 c(a)=Ka+c₀ | 无（纯 numpy 0.2 ms/步） | 发散 @t≈2.25 | **熔断**，UNSTABLE 保留 |
+| 压力入基（6.5c M1） | 全量解（离线场重构驱动） | 1 解 | 0.0087 / 0.0019（r_p=24） | 交付 |
+| 约化解（6.5c M2） | Ψ 投影 r_p×r_p 稠密解 | 1 导出 + numpy 投影 | 0.0040 / 0.0036（r_p=24） | 交付 |
 
-**galerkin.py 侧时序**（逐 stage，镜像 oracle 时刻语义；6.5a 起走融合入口，见下节）：`compute_mass_flux` 之后——先以 numpy **拷贝**捕获重构 u/v（`to_numpy()` 是视图，融合入口对 `velocity` 的原位校正会污染视图）→ 调 `pressure_projection(..., return_systems=True)`：一次稳态装配同时驱动投影与残差算子导出，投影压力写入 pressure 注入口，返回的系统直接供降阶残差；`flux` 保持重构场质量通量不动（融合入口在内部工作副本上投影），无需恢复重算。**与 oracle 通路的唯一差异 = pressure 场内容**（干净 A/B 对照）。纯 Neumann-p（TG）走 correctPressure 既有参考单元消元 + 闭域平衡路径。每 stage 成本 = 2 次装配 + 1 次压力求解（`last_projection` 存最近一次诊断四元组）。
+### 6.4 预测性压力投影
 
-**稳态系数的理由**：ROM 残差算子就是稳态装配（dt=0），投影出的 ∇p 与被投影算子一致；TG（μ=0.1，Pe O(1–2)）上验证成立。
+逐 RK4 stage 在冻结重构场上用 FOM 的 `correctPressure` 解一次离散压力方程（= PISO 单
+corrector 的压力半步，不动动量解），结果写入 `GalerkinRom` 既有的 pressure 注入口。落点
+= `pyfvm.pressure_projection` 绑定 + `GalerkinRom(pressure_projection=True)`，C++
+numerical 零改动；签名与原位语义（velocity 原位修正、调用方自备 scratch、flux 于内部
+工作副本）见 `docs/python.md` §API 一览。投影链（6.5a 起为融合入口，一次完成）：稳态
+装配两分量（relaxation=1、与 ROM 残差同算子）→ `refreshUHat` → d = V/a_P →
+`correctPressure(relaxationP=1)`。
 
-**瞬态对角变体**（涡街裁决）：稳态投影在涡街 coarse 网格不可用——Central、Re=100、Pe≫2 下稳态算子对角不定（60/4224 单元 a_P ≤ 0，min −0.0303 ⇒ d min −671 ⇒ 压力系统非 SPD，CG/BiCGSTAB 均不收敛）；FOM 因瞬态 ρV/dt 对角（min +0.1997）从不触发，零压 ROM 双胞胎也不受影响（只做矩阵-向量乘、从不求逆对角）。`dt>0` ⇒ 装配带 `TimeTerm{rho, dt, Euler}`，ddt 源以冻结状态为 u_old ⇒ uHat = u_stage + r_s/(a_P+ρV/dt)（阻尼残差步，a_P^tr > 0）；dt=0 保持稳态算子 bit-identical。TG 默认稳态（μ=0.1、Pe O(1–2) 不受影响），涡街 `--projection` 传瞬态 dt。
+**瞬态对角变体**（涡街必需）：稳态投影在涡街 coarse 不可用——Central、Re=100、Pe≫2 下
+稳态算子对角不定（60/4224 单元 a_P ≤ 0，min −0.0303 ⇒ CG/BiCGSTAB 均不收敛；FOM 因瞬态
+ρV/dt 对角 min +0.1997 从不触发）。`dt>0` ⇒ 装配带 `TimeTerm{rho, dt, Euler}`，uHat =
+u_stage + r_s/(a_P+ρV/dt)（阻尼残差步，对角恒正）；TG（Pe O(1–2)）默认稳态。
 
-**实测证据**（2026-11-14，TG 16² 全秩 / 涡街 coarse rank 8）：
+**证据**：TG 16² 泄漏 0.182 → 稳态投影 0.0229 / 瞬态 0.0110（oracle 地板 0.0091，~8×
+削减，`test_rom` 锁定 ≤0.05）；涡街 T=250 全视界 err|FOM 尾 20% 均值 0.117 → **0.0021**、
+std(a₁) 0.604 → **2.668**（FOM 投影幅值 2.68，幅值塌缩修复）、St **0.1600** vs FOM
+0.1593（0.4%）——零压变体的频率偏低与幅值塌缩两个结构性偏差均被修复。契约：
+`TestPressureProjection` + `TestGalerkinRomProjection`（单步一致性/泄漏视界/瞬态视界/
+注入口互斥）。
 
-| 场景 | 变体 | 结果 | 对照 |
-| --- | --- | --- | --- |
-| TG，T=0.2（20 步） | 稳态投影 err 0.0203 | 泄漏降 ~8× | 零压 0.124、oracle 地板 0.0091 |
-| TG，T=0.3 | 稳态投影 err 0.0229 | 同上；驱动 `--test`/`test_rom` 锁定 ≤0.05 | 零压 0.182、oracle 0.0091 |
-| TG，T=0.2 / T=0.3 | 瞬态投影（dt=0.01）err 0.0101 / 0.0110 | 优于稳态，距 oracle 地板 ~10–20% | `test_projection_transient_horizon` 锁定 ≤0.05 |
-| 涡街，T=20 短窗 `--test --projection` | 瞬态投影 | err\|FOM 尾段均值 ~1e-4（零压 0.1709）、std(a1) 3.907→1.333 | 跑通且诊断有限；全视界运行留作用户后续 |
+### 6.5a 装配去重
 
-涡街 St(a1/a2) 在 T=20 短窗内与零压基线同值（0.0833）——窗口内极限环尚未建立（FOM 同因），只诊断不断言。契约测试：`TestPressureProjection`（Poiseuille 精确性、散度修复、原位语义、`relaxation_p` 校验）+ `TestPressureProjectionSystems`（融合出口：dt=0/dt>0 与朴素入口逐位恒等、`b` 带投影压力重算、`flux` 不动、`dt>0` 仅 Euler、默认返回类型，6.5a）+ `TestGalerkinRomProjection`（单步一致性、泄漏视界、瞬态视界、投影/注入口互斥、去重轨迹恒等），见 `docs/python.md` §测试分工。
+投影变体每 stage 原本做两遍同一冻结状态的装配（投影内部 + 残差侧）。融合入口
+`pressure_projection(..., return_systems=True)` 一次稳态装配同时驱动投影与残差算子导出
+（`dt>0` 按 theta=1 恒等式派生瞬态形态，逐位一致、仅 Euler），`GalerkinRom` 投影分支直接
+消费返回系统，每 stage O(N) 全场操作 6→4；**轨迹与去重前逐位一致**
+（`test_projection_dedup_trajectory_identity` 手工重演去重前流程锁定）。实测投影变体
+−16~30%/步（TG 相对 FOM 6.62×→4.81×）；**dt_rom 放大 4× 无精度损失**（投影 4×dt_rom 后
+≈1.2× FOM；8× 触及 RK4 显式稳定边界）。
 
-## 装配去重与在线成本（Phase 6.5a）
+### 6.5b 闭包熔断（离线预计算的交付与失败）
 
-6.4 投影变体每 RK stage 做了两遍同一冻结状态的装配：投影内部（稳态装配 2 分量）与残差侧（`assemble_momentum` 2 分量）消费同一算子 (A, b^np, diag)，另有投影后一次通量恢复重算——合计 ≈6 次 O(N) 全场操作。6.5a 以融合入口消除重复：`pyfvm.pressure_projection(..., return_systems=True)`（契约细节见 `docs/python.md` §API 一览）一次稳态装配（relaxation=1、dt=0）同时供投影与导出，`GalerkinRom` 投影分支直接消费返回系统（删除 `_scratch` 字段与投影后的通量恢复重算；u/v 在调用前以 numpy 拷贝捕获）。`dt>0`（瞬态对角变体）时投影内部按 theta=1 恒等式从该稳态装配派生瞬态形态，逐位一致，仅支持 Euler。**轨迹与去重前逐位一致**——`test_rom.py::test_projection_dedup_trajectory_identity` 用公共绑定手工重演去重前的 rhs 流程（compute_mass_flux → 朴素 pressure_projection → 通量恢复 → assemble_momentum×2 → 降阶右端）锁定，永久冻结去重语义。每 stage O(N) 全场操作 6→4（2 装配 + 1 压力解 + 1 通量）。两个 Galerkin 驱动新增 `--timing` 计时输出（默认关闭，路径不变）。
+`python/rom/precomputed.py` 把零压降阶右端离线成纯 numpy 二次算子：Central 下 f_np 严格
+二次，分级扰动采样（0.1/0.2/0.3σ——吸引子低维，仅用吸引子状态会使联合二次设计欠定），
+留出验证 **1.4e-13**；`PrecomputedGalerkinRom` 在线 **0.2 ms/步**；逐模态压力源走 b-差
+技巧 g_k = rhs(p=ψ_k) − rhs(p=0)（与 a_ref 无关），g₀ 同法取自 p̄。**仿射压力闭包**
+c(a) = Ka + c₀（监督拟合于 FOM 快照对，流形残差 3.7e-4）在涡街极限环长视界**失稳**：
+T=250 于 t≈2.25 发散；二分定位——dt 减半失稳点不动（非显式稳定性）、闭包关闭即稳定、
+岭收缩/主子空间投影仅延后（223→822→~4400 步）；机制 = 常数雅可比闭包在流形外任意
+外推形成正反馈。**教训：监督式数据驱动闭包替代不了状态相关的椭圆压力响应**——这是
+M1/M2 保留"解方程"路线的直接依据。闭包保留为 UNSTABLE 基础设施（诊断/短视界用）；
+完整失败记录：`.agents/plans/phase6-5b-offline-reduced-operators.md` 变更记录。
 
-**成本实测**（2026-11-15，Release，Windows 本机，快照复用法；机器噪声约 ±20%）：
+### 6.5c M1 压力入基（全量压力解 + 离线算子）
 
-| 场景 | FOM ms/步 | ROM 零压 | ROM 投影（去重前 → 后） |
-| --- | --- | --- | --- |
-| TG 64²（N=4096, r=8, dt_rom=dt=0.0025） | 30.8 | 53.0（未变路径） | 稳态 203.9 → 148.0（−27.4%）；瞬态 221.0 → 154.2（−30.2%） |
-| 涡街 coarse（N=4224, r=16, 瞬态投影） | 45.9 | 73.4 → 54.3（中位数，噪声） | 207.4 → 174.6（中位 −15.8%，单次最好 −35%） |
+保留 6.5b 全部离线设施，把闭包换回**逐 stage 状态相关的全量压力解**（6.4 的同一物理
+机制，动量侧零装配）。`ReducedPressureRom` 每 stage 三步：
 
-投影变体相对 FOM：TG 6.62× → 4.81×。**dt_rom 放大**（TG 64², r=8, T=0.5，err vs 精确解）：dt、2dt、4dt 全部零压 0.1568 / 投影 1.6948e-3→1.6950e-3——**无损**；8dt 零压 0.9231（失稳）、投影 NaN（RK4 显式稳定边界 ~8×dt，对应降阶谱最快模态）。即 **dt_rom 可放大 4× 无精度损失**：投影变体（稳态，148.0 ms/步）4×dt_rom 后 ≈37 ms/FOM-dt ≈ 1.2× FOM。涡街瞬态对角路径的 dt 是算子参数而非单纯放大，其 dt_rom 放大留待 6.5b。
+1. **Rhie–Chow 场重构**（`fit_rhie_chow_fields`，单元空间精确拟合）：diag(a) = a_P(a) +
+   ρV/dt_p（a_P 严格仿射），uHat(a) = u(a) + r_np(a)/diag(a)，r_np = b^np − A·u 严格二次
+   （瞬态对角下 ddt 源与对角项在 Euler theta=1 形式中代数相消 ⇒ 只需稳态装配公开输出），
+   留出 **1.1e-12**；
+2. **全量压力解**（`pressure_projection_from_fields`）：外部 (d, uHat) 场直调
+   `correctPressure`（消元/adjustPhi/crossP 环全部沿用）；契约**同输入同方程**——与
+   6.5a 融合入口同态解出的 p 相对差 Neumann **3.6e-12** / Dirichlet-p **8.4e-14**；
+3. **压力源作用**：c = Ψᵀ(p − p̄)，f = quad(a) + g₀ + G·c；rhs vs GalerkinRom 投影模式
+   快照态 **2.8e-9** / 扰动态 4.2e-5。
 
-## 压力入基（Phase 6.5c M1）
+**两条执行期教训（D3 修订）**：压力基 Ψ 必须取**投影解**压力快照（FOM 收敛压力在满秩
+下仍留 0.42 子空间外残差——单 corrector 投影解与收敛解不同子空间）；g₀ 必须作用（∇
+线性，漏掉 g₀ 使 rhs 相对差 1.3）。另 `QuadraticFit` 求值改展平上三角 GEMM（einsum
+等价 8.9e-16）。成本 **67–106 ms/步 = 1.5–2.3× vs 投影变体（154–175）**：动量侧已全部
+离线化，残差成本就是全量压力解本身——M2 的直接目标。驱动 `--pressure-basis`；测试
+`TestReducedPressureRom` 4 用例（含 6000 步稳定性、dt_p>0 校验）。
 
-6.5a 后投影变体每 stage 仍保留 2 装配 + 1 压力解。6.5b 把零压降阶右端离线预计算成纯 numpy 二次算子（Central 下严格二次、机器精度复原），但其**仿射压力闭包在涡街极限环长视界失稳**（熔断，失败形态与机制见 §后续批次 6.5b 条目）；6.5c M1 保留 6.5b 全部离线基础设施，把闭包替换为**逐 stage 状态相关的全量压力解**——6.4 投影的同一物理机制（椭圆压力响应，无离流形正反馈）。落点：`python/rom/precomputed.py` + 新绑定 `pyfvm.pressure_projection_from_fields`（M1 零改数值内核）。设计全文（含熔断与 D3 修订记录）：`.agents/plans/phase6-5b-offline-reduced-operators.md`、`.agents/plans/phase6-5c-pressure-basis-rom.md`。
+### 6.5c M2 约化压力解（2026-11-18）
 
-**离线拟合算子**（6.5b 部分交付，`fit_reduced_operators` → `ReducedOperatorFit`；f-空间分解 f(a) = f_np(a) + s_p(a)，a = [a_u, a_v]）：
+把全量压力解替换为**压力方程自身的 Galerkin 投影**：`correctPressure` 增可选
+`PressureSystemExport*` 尾参（唯一触 `Pressure.cpp` 的改动），绑定
+`pressure_projection_from_fields(..., return_systems=True)` 导出
+`(ProjectionResult, PressureSystem{rows/cols/vals/n/b})`，numpy 侧 `A_r = Ψ A_p Ψᵀ`
+（bincount O(nnz·r_p) + GEMM O(N·r_p²)）、`b_r = Ψ (b_p − A_p p̄)`（绝对压力方程，
+p̄ 分解必须进 RHS）、r_p×r_p 稠密解；`ReducedPressureRom(reduced_solve=True)` 切换，
+COO 模式跨 stage 固定 → idx/Ψᵀ 列/p̄ 列缓存（轨迹与未缓存逐位一致）。
 
-- **二次算子**：f_np = q + L a + Q[a,a]（每分量一组）。Central 下对流算子线性于质量通量、质量通量线性于重构速度、固定 BC 边界项为常数/双线性 ⇒ f_np **严格二次**，特征归一化最小二乘机器精度复原，留出验证 **1.4e-13**（超出即抛错）。采样用**分级扰动**（`make_fit_samples`，0.1/0.2/0.3σ）：吸引子低维，仅用吸引子上状态使联合二次设计矩阵欠定（全 σ 扰动副本 holdout 0.27；分级后机器精度）。
-- **逐模态压力源（b-差技巧）**：g_k = rhs(a_ref; p=ψ_k) − rhs(a_ref; p=0)——b^np 与压力无关，差恰为 M_r⁻¹Φ(−∇ψ_k·V)，与 a_ref 无关；g₀ 由均值压力 p̄ 同法取得。
+**两处关键设计**：导出恒为**未消元 N×N 系统**——均值中心化模态 Ψ·1 = 0 使 ΨA_pΨᵀ 自行
+消去纯 Neumann 零空间，常数偏移对 c 不可见，一条公式统一两族 BC（adjustPhi 仍运行）；
+**crossP 裁决 = 第一遍系统 + 单遍塌缩**——导出 RHS 的显式交叉项取传入压力状态，与
+correctors=0（驱动/夹具口径）下 M1 首解装配同一方程。
 
-**M1 在线机制**（`ReducedPressureRom`，逐 RK4 stage 三步）：
-
-1. **Rhie–Chow 场重构**（`fit_rhie_chow_fields` → `RhieChowFieldFit`，单元空间系数精确拟合）：diag(a) = a_P(a) + ρV/dt_p（稳态对角 a_P 严格仿射：常数扩散 + 线性对流），uHat(a) = u(a) + r_np(a)/diag(a)，其中 r_np = b^np − A·u 严格二次（b 二次 − 仿射 A × 仿射 u）。瞬态对角下 ddt 源与对角项在 Euler theta=1 形式中**代数相消** ⇒ 拟合只需稳态装配的公开输出（`assemble_momentum(dt=0, relaxation=1)` 的 diag/b/COO A），留出验证（逐单元最大相对）**1.1e-12**。
-2. **全量压力解**（`pyfvm.pressure_projection_from_fields`）：外部供给的 (dU, dV, uHatU, uHatV) 装进哑元 `MomentumPrediction` 直调 `correctPressure`（relaxationP = 1；参考单元消元 / adjustPhi / 非正交 crossP 校正环全部精确沿用 C++ 既有逻辑）；修正速度/通量是绑定内部 scratch、返回即丢弃，ROM 只消费原位写入的解。契约（`TestPressureProjectionFromFields`）：**同输入同方程**——喂入 6.5a 融合入口内部会派生的同一 (d, uHat) 场，解出的 p 相对差 Neumann **3.6e-12** / Dirichlet-p **8.4e-14**。
-3. **压力源作用**：c = Ψᵀ(p − p̄)（O(N·r_p)），s_p = g₀ + G·c（O(r·r_p)），f = quad(a) + s_p。rhs 与 `GalerkinRom` 投影模式对照：快照态 **2.8e-9**、扰动态 4.2e-5。
-
-**两处 D3 修订**（执行期实测驱动，教训价值入档）：
-
-- **压力基 Ψ 必须来自投影解压力快照**（`projected_pressure_snapshots`：对窗口每个快照态在 scratch 上用朴素 `pressure_projection(dt=dt_p)` 解一次 p_proj 再 POD）。原设计用 FOM 收敛压力快照被实测否决：frozen-BC 夹具上满秩 r_p=24 时投影解仍在 FOM-p 子空间外残留 **0.42** 场误差（单 corrector 投影解与收敛解不同子空间），源项误差 0.16–0.59。`fit_reduced_operators` 为此增设 `pressure_basis=(modes, mean)` 覆盖参数（外部基跳过内部 POD 与闭包映射）。
-- **p = p̄ + Ψc 分解后 g₀（均值压力源）必须作用**：∇ 线性，p̄ 的梯度贡献真实存在；漏掉 g₀ 使 rhs 相对差 **1.3**（该修订推翻了计划早期"g₀ 不再需要"的论断）。`ReducedOperatorFit` 为此增设 `mean_source_u/v` 字段。
-
-另：`QuadraticFit` 评估改为**展平上三角 GEMM**——单次矩阵乘代替代逐输出 einsum 收缩 (n_out, n_a, n_a) 张量（单元空间场拟合为内存带宽受限路径），与 einsum 等价 **8.9e-16**。
-
-**实测证据**（2026-11-17，涡街 coarse T=250，r=16、r_p=16、窗口 0.6，与 6.4/6.5a 同口径）：
-
-| 指标 | 零压 | 投影（6.4） | 压力入基（M1） |
-| --- | --- | --- | --- |
-| err\|FOM 尾 20% 均值 | 0.1173 | 0.0021 | **0.0087** |
-| St(a₁) | — | 0.1600 | **0.1600**（FOM 0.1593，偏差 0.44%，与投影完全一致） |
-| std(a₁) | 0.604 | 2.668 | **2.646**（vs 投影 0.82%；FOM 投影幅值 2.68） |
-| 长视界 | 稳定 | 稳定 | **15000 步全程稳定**（对照：6.5b 闭包 225 步发散） |
-
-**成本**：GEMM 优化后的干净测量 **67–106 ms/步 = 1.5–2.3× vs 投影变体（154–175）**——动量侧已全部离线化，残差成本就是全量压力解本身（解算子支配），正是 **M2 约化压力解**的直接目标。
-
-驱动：`vortex_shedding_galerkin.py` 增 `--precomputed`（6.5b 二次算子 + 闭包变体，诊断用）/`--pressure-rank`（闭包/压力基 POD 秩 r_p，默认 16）与 `--pressure-basis`（6.5c M1 变体）；`--test` 有限性检查相应扩展（已启用变体的系数逐项有限）。测试：`TestPrecomputedRom` 4 用例 + `TestReducedPressureRom` 4 用例（frozen-BC 夹具；含 6000 步稳定性与 dt_p>0 校验），见 `docs/python.md` §测试分工。
-
-### M2 约化压力解（2026-11-18 完成）
-
-把逐 stage 的全量压力解替换为**压力方程自身的 Galerkin 投影**：`correctPressure` 增可选
-`PressureSystemExport*` 尾参（唯一触 `Pressure.cpp` 的改动；导出模式早退不解、默认路径逐位
-不变），绑定 `pressure_projection_from_fields(..., return_systems=True)` 返回
-`(ProjectionResult, PressureSystem{rows/cols/vals/n/b})`，numpy 侧
-`A_r = Ψ A_p Ψᵀ`（bincount O(nnz·r_p) + GEMM O(N·r_p²)）、`b_r = Ψ (b_p − A_p p̄)`
-（绝对压力方程，p̄ 分解必须进 RHS）、r_p×r_p 稠密解。`ReducedPressureRom(reduced_solve=True)`
-切换该模式；COO 模式跨 stage 固定 → idx/Ψᵀ 列/p̄ 列缓存（轨迹与未缓存逐位一致）。
-
-**两处关键设计**（相对 D7 预登记的细化，全记录在
-`.agents/plans/phase6-5c-m2-reduced-pressure-solve.md`）：
-
-- **导出恒为未消元 N×N 系统**：纯 Neumann 族（frozen-BC 夹具即此）的常数零空间留在
-  矩阵里，均值中心化 POD 模态 Ψ·1 = 0 使 ΨA_pΨᵀ 自行消去零空间，常数偏移对 c 不可见
-  （Ψᵀδ1 = 0）——一条公式统一 Neumann/Dirichlet 两族，adjustPhi 仍运行保证 RHS 相容；
-- **crossP 裁决 = 第一遍系统 + 单遍塌缩**：导出 RHS 的显式交叉项取传入压力状态，与
-  correctors=0（驱动/夹具口径）下 M1 首解装配的是同一方程；correctors>0 的塌缩差异
-  计入轨迹门槛。
-
-**实测证据**（涡街 coarse T=250，r=16、窗口 0.6，与 6.4/6.5a/6.5c M1 同口径）：
+**实测证据**（涡街 coarse T=250，r=16、窗口 0.6，与前批次同口径）：
 
 | 指标 | 零压 | 投影（6.4） | M1（r_p=16/24） | **M2（r_p=16/24）** |
 | --- | --- | --- | --- | --- |
@@ -192,30 +222,17 @@ $$M_r\,\dot{a} = \Phi\,(b - A u)^{\top}, \qquad M_r = \Phi\,\mathrm{diag}(\rho V
 | 长视界 | 稳定 | 稳定 | 15000 步稳定 | **15000 步稳定** |
 | 成本 ms/步 | 46.1 | — | 60.3 / 61.1 | **29.5 / 33.5** |
 
-**门槛裁定（如实记录，两项未达）**：
-
-- **轨迹门 ✗**（M2 vs M1 相对偏差 ≤1e-3）：实测 **7.3e-2**（r_p=16）→ **2.3e-2**
-  （r_p=24 上探，能量残差缩小 9× 偏差仅缩小 3.1×；T=20 满能量基仍有 9e-3——地板是
-  crossOut 状态依赖与 Galerkin-vs-L² 系数差的逐步累积，非截断单项）。走 D7 文档化
-  差异路径的依据：两条轨迹在**同一极限环**上（St 四位一致、std(a₁) 相对差 0.3%），
-  偏差是轨迹/相位级的而非质量级的；r_p=16 下 M2 的 err|FOM（0.0040）反而优于 M1
-  （0.0087）2.2×。
-- **成本门 ✗**（<10 ms/步）：实测 **29.5**（r_p=16）= M1 的 2.0×，超 10–16 上报带。
-  分解：每 stage 场重构 ~2.5 + C++ 导出 ~1.4 + numpy 投影 ~2.5（缓存后；未缓存 6–8）
-  ms ×4 stage——目标制定时未计 M1 场重构与导出装配的共享成本；压力解本身从 12.3
-  降到 ~2 ms/stage（6×），但 M1 机制的非压力底板使其无法兑现到步级 <10。
-
-CI 契约（`TestReducedPressureSolve` 4 用例）：rhs vs M1（快照态 1.1e-6 / 扰动态
-3.7e-4，门 1e-3）、20 步轨迹 1.9e-4（门 1e-3）、2000 步稳定性、空压力基构造拒绝。
-绑定契约 ×2：return_systems 导出与 M1 解满足同一方程（|A p_solved − b|/|b| ≤1e-8，
-Neumann/Dirichlet 双族）、导出后 pressure 原场不动 + COO 形状/对角覆盖。
-
-驱动：`--reduced-pressure`（依赖 `--pressure-basis`，复用其 fit/field_fit 资产），
-诊断表增 `pressure-reduced` 行与 M2-vs-M1 轨迹偏差行；`--test` 有限性检查扩展。
-
-M2 后的下一步候选（条件触发）：步级成本要再下探需动 M1 场重构/导出装配的共享底板
-（如 C++ 侧几何缓存或 d/uHat 装配融合），已超出"唯一触 Pressure.cpp"的 M2 边界，
-未立项。
+**门槛裁定（如实记录，两项未达）**：**轨迹门 ✗**（vs M1 ≤1e-3 → 实测 7.3e-2，r_p=24
+上探 2.3e-2——能量残差缩 9× 偏差仅缩 3.1×，T=20 满能量基仍有 9e-3，地板是 crossOut
+状态依赖与 Galerkin-vs-L² 系数差的逐步累积而非截断单项；依据：两轨迹在同一极限环上，
+St 四位一致、std 相对差 0.3%，且 r_p=16 下 M2 的 err|FOM 反而优于 M1 2.2×——偏差是
+轨迹/相位级而非质量级）；**成本门 ✗**（<10 ms/步 → 实测 29.5 = M1 的 2.0×——每 stage
+场重构 ~2.5 + C++ 导出 ~1.4 + numpy 投影 ~2.5 ms ×4，压力解本身 12.3→~2 ms/stage（6×）
+但 M1 机制的共享底板使其无法兑现到步级 <10）。CI 契约：`TestReducedPressureSolve` 4
+用例（rhs vs M1 快照态 1.1e-6/扰动态 3.7e-4、20 步轨迹 1.9e-4、2000 步稳定、空基拒绝）
++ 绑定契约 ×2（导出与 M1 解满足同一方程 ≤1e-8 双 BC 族、导出后 pressure 不动）。驱动
+`--reduced-pressure`（依赖 `--pressure-basis`）。后续候选（未立项）：步级成本再下探需动
+M1 场重构/导出装配的共享底板（C++ 侧几何缓存或装配融合），超出 M2 边界。
 
 ## 已验证结论
 
@@ -251,10 +268,10 @@ dmd(data.u[2000:], 0.05)         # 窗口 DMD → dominant_frequency() → St
 
 - ✅ **6.2 pyfvm 装配矩阵绑定（2026-11-13 完成）**——`fvm.assemble_momentum`（用法与契约见 `docs/python.md` §API 一览）。原未决问题全部落地：暴露**稳态单次装配**（`dt=0` 给 `A_sp`/`b_sp`，质量阵 `M = ρ·diag(V)` 无需装配）；finalize 语义 = 返回 finalized COO（压缩后无重复项）；装配状态无所有权耦合（每次调用按传入状态独立装配，干净但每次重算——降阶步粒度下开销可忽略）。分离恒等式 $A_{\mathrm{tr}} = \theta\,A_{\mathrm{sp}} + \mathrm{diag}(\rho V/\mathrm{dt})$、$b_{\mathrm{tr}} = b_{\mathrm{sp}} + (\rho V/\mathrm{dt})\,u^{n} - (1-\theta)\,(A_{\mathrm{sp}}\,u^{n})$ 由 `test_pyfvm.py::TestAssembleMomentum` 契约锁定；压力项语义：逐单元 $b_P = b^{\mathrm{np}}_P - (\nabla p)_P\,V_P$（`rhs_no_pressure` 即 $b^{\mathrm{np}}$），velocity-only ROM 传零压场 + Neumann-p 即剥离压力源。
 - ✅ **6.3 纯速度 POD-Galerkin ROM（2026-11-13 完成）**——`rom/galerkin.py`（`GalerkinRom`、稠密 SPD `M_r`、RK4、pressure 注入口）+ `taylor_green_galerkin.py`（双变体：零压 vs oracle）+ `vortex_shedding_galerkin.py`（诊断）+ `test_rom.py` 4 用例。证据一句话：TG 16² 上单步一致性 0.0067、oracle 变体稳定在 FOM 离散地板（0.0091 vs oracle|FOM=0.0065），零压变体线性漂移（T=0.3→0.182、T=1.0→43%，对 dt_rom/4 与 32² 不变）确认为结构性压力泄漏——机构正确，漂移全归因压力项（实测表见 Galerkin 节）。
-- ✅ **6.4 预测性压力投影（2026-11-14 完成）**——`pyfvm.pressure_projection` 绑定 + `GalerkinRom` 投影模式：逐 stage 稳态压力修正（PISO 单 corrector 压力半步），瞬态对角变体（`projection_dt`）覆盖 Pe≫2 场合。TG 16² 泄漏降 ~8×（零压 0.182 → 投影 0.0229，oracle 地板 0.0091），瞬态变体 0.0110 更优；涡街 `--projection` 全视界 T=250（2026-11-15）：**err|FOM 后 20% 均值 0.117 → 0.0021、std(a₁) 0.604 → 2.668（≈ FOM 投影幅值 2.68，幅值塌缩修复）、St 0.1600 vs FOM 0.1593（偏差 0.4%）**——零压变体频率偏低/幅值塌缩两个结构性偏差均被投影修复。**Re 参数化 ROM 仍为 6.4 未实施项**（无量化依据，Phase 6 后续候选）；设计、机制与证据见压力投影节，绑定面见 `docs/python.md` §API 一览；
-- ✅ **6.5a 装配去重（2026-11-15 完成）**——`pyfvm.pressure_projection` 融合出口 `return_systems=True`（一次稳态装配供投影与算子导出共享；导出系统与 `assemble_momentum(dt=0, relaxation=1)` 逐位一致、`b` 带投影压力源重算、调用方 flux 不动、`dt>0` 按 theta=1 恒等式派生仅 Euler）+ `GalerkinRom` 投影分支消费融合入口（删 `_scratch` 与投影后通量恢复重算，每 stage O(N) 全场操作 6→4），轨迹与去重前**逐位一致**（`test_projection_dedup_trajectory_identity` 锁定）；投影变体实测 −16~30%（TG 6.62×→4.81× FOM），dt_rom 放大 4× 无精度损失——机制、成本表与 dt_rom 曲线见装配去重与在线成本节。
-- **6.5b 离线预计算降阶算子（2026-11-16 部分交付，D7 验收熔断）**——交付：`python/rom/precomputed.py`——零压降阶右端 Central 下严格二次，离线最小二乘机器精度复原（分级扰动采样 0.1/0.2/0.3σ 解决低维吸引子上联合设计矩阵的欠定，留出 **1.4e-13**）+ `PrecomputedGalerkinRom` 纯 numpy 在线 **0.2 ms/步** + 逐模态压力源（b-差技巧，见压力入基节）+ **仿射压力闭包**（压力 POD + 线性系数映射 c(a) = Ka + c₀，监督于 FOM 快照对的数据拟合、非算子投影；流形残差 3.7e-4）。**熔断**：闭包在涡街极限环长视界失稳（T=250 于 t≈2.25 发散）——失败形态定量与机制二分：dt 减半失稳时刻不变（非显式积分稳定性问题）、闭包关闭即稳定（闭包项所致）、岭收缩/主子空间投影仅延后（223→822→~4400 步）；机制 = 常数雅可比闭包在流形外**任意外推**形成正反馈。用户裁决：基础设施保留（类 docstring 已声明 UNSTABLE、仅诊断/短视界用），回退路线立为 6.5c 压力入基。驱动 `--precomputed`/`--pressure-rank`；测试 `TestPrecomputedRom` 4 用例。完整失败记录与裁决：`.agents/plans/phase6-5b-offline-reduced-operators.md` 变更记录。
-- ✅ **6.5c M1 压力入基 ROM（2026-11-17 完成）**——`pyfvm.pressure_projection_from_fields` 绑定（外部 Rhie–Chow 场直调 `correctPressure`，数值内核零改动，同输入同方程契约 Neumann 3.6e-12 / Dirichlet-p 8.4e-14）+ `fit_rhie_chow_fields` 单元场系数精确重构（留出 1.1e-12）+ `ReducedPressureRom` 逐 stage 全量压力解、源项 g₀ + G·Ψᵀ(p−p̄)（rhs vs GalerkinRom 投影模式：快照态 2.8e-9、扰动态 4.2e-5）。两处 D3 修订（压力基取投影解快照、g₀ 必须作用——教训见压力入基节）。涡街 T=250：err|FOM 尾 20% 均值 **0.0087**（投影 0.0021、零压 0.1173）、St **0.1600**（FOM 0.1593，与投影完全一致）、std(a₁) **2.646**（投影 2.668）、**15000 步全程稳定**（6.5b 闭包 225 步发散的对照）；成本 GEMM 优化后 **67–106 ms/步 = 1.5–2.3× vs 投影（154–175）**，残差成本即全量压力解。机制、证据表与成本见压力入基节；执行记录：`.agents/plans/phase6-5c-pressure-basis-rom.md`。
-- **6.5c M2（已登记，未启动）约化压力解**——M1 的成本地板是逐 stage 全量压力解；M2 给 `correctPressure` 增可选导出 (A_p, b_p)（**唯一触 `Pressure.cpp` 的改动**），numpy 侧 Ψ 投影后做 r_p×r_p 稠密解（A_r = Ψ A_p Ψᵀ），目标 <10 ms/步；非正交 crossP 的约化处理（与跳过误差）为组内裁决点（门槛：与 M1 轨迹相对偏差 ≤1e-3 或文档化差异）。预登记设计：`.agents/plans/phase6-5c-pressure-basis-rom.md` D7。另 6.5b 计划登记的 TG 时变 BC 预计算（边界项按 D(t)=e^{−2νt} 标量外提）与涡街瞬态对角路径的 dt_rom 放大（装配去重节尾）仍未启动。
+- ✅ **6.4 预测性压力投影（2026-11-14 完成）**——逐 stage 冻结场压力修正修复结构性泄漏（TG ~8×；涡街 err|FOM 0.117→0.0021、幅值塌缩修复）；瞬态对角变体覆盖 Pe≫2。机制与证据见压力响应的演进节 §6.4，绑定面见 `docs/python.md` §API 一览。**Re 参数化 ROM 仍为未实施项**（Phase 6 后续候选）；
+- ✅ **6.5a 装配去重（2026-11-15 完成）**——融合出口一次装配共享投影与残差导出，轨迹逐位一致；投影变体 −16~30%/步，dt_rom 放大 4× 无损。见压力响应的演进节 §6.5a。
+- **6.5b 离线预计算（2026-11-16 部分交付，验收熔断）**——二次算子机器精度（留出 1.4e-13）+ `PrecomputedGalerkinRom` 0.2 ms/步交付；**仿射压力闭包在涡街长视界失稳**（t≈2.25，机制=常数雅可比离流形外推正反馈），保留为 UNSTABLE 基础设施。机制二分与教训见压力响应的演进节 §6.5b；完整记录：`.agents/plans/phase6-5b-offline-reduced-operators.md`。
+- ✅ **6.5c M1 压力入基 ROM（2026-11-17 完成）**——离线场重构驱动的逐 stage 全量压力解：涡街 err|FOM 0.0087、St 0.1600、15000 步稳定、67–106 ms/步。机制与 D3 教训见压力响应的演进节 §6.5c M1；执行记录：`.agents/plans/phase6-5c-pressure-basis-rom.md`。
+- ✅ **6.5c M2 约化压力解（2026-11-18 完成）**——压力方程 Galerkin 投影 r_p×r_p 稠密解：涡街 err|FOM 0.0040、St 0.1600、15000 步稳定、29.5 ms/步 = M1 的 2.0×；轨迹门与成本门如实未达并文档化（见压力响应的演进节 §6.5c M2）；执行记录：`.agents/plans/phase6-5c-m2-reduced-pressure-solve.md`。
 - 条件触发候选：ROM 分析 MCP（README §路线图 Phase 6 登记）；
-- 已知问题：collocated 模态非散度自由（见 POD 节）——其后果已从预测变为**已定量**：纯速度 Galerkin ROM 在 TG 上呈线性误差漂移（T=1.0 达 43%），oracle 压力注入把误差压回 FOM 离散地板（见 Galerkin 节实测表）；该泄漏已量化并可由 6.4 投影模式消除（TG 上 ~8× 泄漏削减，见压力投影节）。Galerkin ROM 继承 FOM 离散误差，TG 的 $\mathrm{dt}^2/h$ 混合项意味着粗 dt 下 FOM 轨迹有精度地板（`docs/numerical.md` Taylor–Green 节）。
+- 已知问题：collocated 模态非散度自由（见 POD 节）——其后果已从预测变为**已定量**：纯速度 Galerkin ROM 在 TG 上呈线性误差漂移（T=1.0 达 43%），oracle 压力注入把误差压回 FOM 离散地板（见 Galerkin 节实测表）；该泄漏已量化并可由 6.4 投影模式消除（TG 上 ~8× 泄漏削减，见压力响应的演进节）。Galerkin ROM 继承 FOM 离散误差，TG 的 $\mathrm{dt}^2/h$ 混合项意味着粗 dt 下 FOM 轨迹有精度地板（`docs/numerical.md` Taylor–Green 节）。

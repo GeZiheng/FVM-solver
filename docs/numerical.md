@@ -284,7 +284,7 @@ $$\hat{u}_P = \frac{b^{np}_P - \sum_{N \ne P} A_{PN} u^*_N}{a_P}, \qquad d_P = \
 
 `correctPressure` 执行一次压力修正（对应 OpenFOAM-14 的 `applications/modules/incompressibleFluid/correctPressure.C`，即旧版 `pEqn.H`）：写入**无压力**预测通量 `phiHbyA` → 装配并求解**绝对压力** $p$ → 就地重建面通量、单元中心速度与压力。返回 `CorrectorResult`。
 
-**可选系统导出**（Phase 6.5c M2，`PressureSystemExport*` 尾参，默认 `nullptr` 行为逐位不变）：非空时装配完压力方程后**早退不解**——把未消元的 $N\times N$ 算子与第一遍右端（显式 crossP 项取传入压力状态；闭域 adjustPhi 已运行）写入导出结构后返回，`pressure`/`velocity` 不被写入，`du/dv/dpMax` 保持 0，`maxImbalance` 为全空间残差 $\max|b-Ap_{\text{old}}|$。**导出恒为未消元系统**（纯 Neumann 族不执行参考单元消元）：均值中心化 POD 测试空间与常向量正交，投影 $\Psi A_p \Psi^{\top}$ 自行消去零空间，常数偏移对投影系数不可见——一条契约同时服务 Neumann/Dirichlet 两族（调用方为 pyfvm 的 `pressure_projection_from_fields(return_systems=True)`，约化求解公式与证据见 `docs/rom.md` §压力入基）。$n_{\text{NonOrthCorrectors}}>0$ 的校正环在导出模式下塌缩为第一遍（该口径与 correctors=0 的求解路径装配同一方程）。
+**可选系统导出**（Phase 6.5c M2，`PressureSystemExport*` 尾参，默认 `nullptr` 行为逐位不变）：非空时装配完压力方程后**早退不解**——把未消元的 $N\times N$ 算子与第一遍右端（显式 crossP 项取传入压力状态；闭域 adjustPhi 已运行）写入导出结构后返回，`pressure`/`velocity` 不被写入，`du/dv/dpMax` 保持 0，`maxImbalance` 为全空间残差 $\max|b-Ap_{\text{old}}|$。**导出恒为未消元系统**（纯 Neumann 族不执行参考单元消元）：均值中心化 POD 测试空间与常向量正交，投影 $\Psi A_p \Psi^{\top}$ 自行消去零空间，常数偏移对投影系数不可见——一条契约同时服务 Neumann/Dirichlet 两族（调用方为 pyfvm 的 `pressure_projection_from_fields(return_systems=True)`，约化求解公式与证据见 `docs/rom.md` §压力响应的演进）。$n_{\text{NonOrthCorrectors}}>0$ 的校正环在导出模式下塌缩为第一遍（该口径与 correctors=0 的求解路径装配同一方程）。
 
 ### Rhie–Chow 面通量与预测通量
 
