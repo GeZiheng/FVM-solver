@@ -43,12 +43,14 @@ Two online consumers (Phase 6.5b/6.5c):
   Jacobian extrapolates arbitrarily off the attractor and is documented
   UNSTABLE on the shedding limit cycle (diverges near t ~ 2.3; use for
   diagnostics/short horizons only).
-- :class:`ReducedPressureRom` (6.5c M1) replaces the closure with a
-  per-stage FULL pressure solve on exactly reconstructed Rhie-Chow
-  cell fields (affine diagonal + quadratic steady residual + transient
-  term), the solved pressure acting through ``g0 + G Psi^T (p - pbar)``
-  with ``Psi`` built from projection-solution pressures - state
-  dependent and stable.
+- :class:`ReducedPressureRom` (6.5c M1/M2) replaces the closure with a
+  per-stage pressure solve on exactly reconstructed Rhie-Chow cell fields
+  (affine diagonal + quadratic steady residual + transient term), the
+  solved pressure acting through ``g0 + G Psi^T (p - pbar)`` with ``Psi``
+  built from projection-solution pressures - state dependent and stable.
+  The default mode runs the FULL FOM solve; ``reduced_solve=True`` (M2)
+  exports the assembled pressure equation and solves its Galerkin
+  projection onto ``Psi`` instead (dense ``r_p x r_p``).
 """
 
 from __future__ import annotations
@@ -722,22 +724,31 @@ class PrecomputedGalerkinRom:
 
 
 class ReducedPressureRom(PrecomputedGalerkinRom):
-    """Precomputed ROM whose per-stage pressure comes from a full FOM
-    pressure solve on exactly reconstructed Rhie-Chow fields (Phase 6.5c
-    M1) - the 6.4 projection mechanism with the momentum assemblies
-    replaced by offline-fitted cell-field coefficients.
+    """Precomputed ROM whose per-stage pressure comes from a pressure
+    solve on exactly reconstructed Rhie-Chow fields (Phase 6.5c) - the
+    6.4 projection mechanism with the momentum assemblies replaced by
+    offline-fitted cell-field coefficients.
 
     Per stage: reconstruct ``diag(a) = a_P(a) + rho V/dt_p`` (affine
     steady diagonal + transient term) and ``uHat(a) = u(a) +
     r_np(a)/diag(a)`` (quadratic steady residual; the ddt terms cancel
-    algebraically in the Euler theta = 1 form), run
-    ``pyfvm.pressure_projection_from_fields`` and apply the solved
-    pressure through the precomputed per-mode sources
-    ``s_p = G Psi^T (p - pbar)``.  The pressure response is
+    algebraically in the Euler theta = 1 form), then solve the pressure
+    equation and apply it through the precomputed per-mode sources
+    ``s_p = g_0 + G Psi^T (p - pbar)``.  The pressure response is
     state-dependent and elliptic (no off-manifold extrapolation), unlike
     the affine closure of a pressure-fitted
     :class:`PrecomputedGalerkinRom`, which is documented unstable on the
     shedding limit cycle.
+
+    Two solve modes: the default (M1) runs a full FOM pressure solve via
+    ``pyfvm.pressure_projection_from_fields``; ``reduced_solve=True``
+    (M2) exports the assembled pressure equation and solves its Galerkin
+    projection onto the pressure basis instead,
+    ``A_r = Psi A_p Psi^T``, ``b_r = Psi (b_p - A_p pbar)``, a dense
+    ``r_p x r_p`` system.  The equation is still solved (the Jacobian
+    stays state-dependent through the per-stage operator); only the
+    solution space shrinks to ``pbar + span(Psi)``, so the deviation
+    from M1 is the projection-solution POD truncation.
 
     ``dt_p`` mirrors ``GalerkinRom(projection_dt=...)``: the transient
     diagonal ``a_P + rho V/dt_p`` is REQUIRED wherever the steady Central
@@ -745,13 +756,18 @@ class ReducedPressureRom(PrecomputedGalerkinRom):
     """
 
     def __init__(self, fit, field_fit, mesh, rho, bc_u, bc_v, bc_p,
-                 dt_p, solver_config=None, corrections=None):
+                 dt_p, solver_config=None, corrections=None,
+                 reduced_solve=False):
         import pyfvm as fvm  # lazy: the online path needs the binding
 
         super().__init__(fit)
         if dt_p is None or dt_p <= 0.0:
             raise ValueError(
                 f"dt_p must be positive (transient diagonal), got {dt_p}")
+        if reduced_solve and fit.pressure_modes.shape[0] == 0:
+            raise ValueError(
+                "reduced_solve requires a non-empty pressure basis "
+                "(fit.pressure_modes)")
         self._fvm = fvm
         self._mesh = mesh
         self._rho = float(rho)
@@ -771,10 +787,14 @@ class ReducedPressureRom(PrecomputedGalerkinRom):
         self._d_v = fvm.ScalarField(mesh, "rom_d_v")
         self._uhat_u = fvm.ScalarField(mesh, "rom_uhat_u")
         self._uhat_v = fvm.ScalarField(mesh, "rom_uhat_v")
+        self._reduced_solve = bool(reduced_solve)
+        self._projection_cache = None
         self.last_projection = None
 
     def rhs(self, a_u, a_v):
-        """Reduced right-hand side with a per-stage full pressure solve."""
+        """Reduced right-hand side with a per-stage pressure solve (full
+        FOM solve by default; reduced basis projection with
+        ``reduced_solve=True``)."""
         fvm = self._fvm
         fields = self._field_fit
         u = self.mean_u + a_u @ self.modes_u
@@ -790,17 +810,83 @@ class ReducedPressureRom(PrecomputedGalerkinRom):
         self._d_v.to_numpy()[:] = fields.volumes / diag_v
         self._uhat_u.to_numpy()[:] = u + r_u / diag_u
         self._uhat_v.to_numpy()[:] = v + r_v / diag_v
-        result = fvm.pressure_projection_from_fields(
-            self._mesh, self._rho, self._bc_u, self._bc_v, self._bc_p,
-            self._d_u, self._d_v, self._uhat_u, self._uhat_v,
-            self._pressure, solver_config=self._solver_cfg,
-            corrections=self._corrections)
-        self.last_projection = (result.max_imbalance, result.du_max,
-                                result.dv_max, result.dp_max)
-        c = self.fit.pressure_modes @ (self._pressure.to_numpy()
-                                       - self.fit.pressure_mean)
+        if self._reduced_solve:
+            c = self._reduced_pressure_solve()
+        else:
+            result = fvm.pressure_projection_from_fields(
+                self._mesh, self._rho, self._bc_u, self._bc_v, self._bc_p,
+                self._d_u, self._d_v, self._uhat_u, self._uhat_v,
+                self._pressure, solver_config=self._solver_cfg,
+                corrections=self._corrections)
+            self.last_projection = (result.max_imbalance, result.du_max,
+                                    result.dv_max, result.dp_max)
+            c = self.fit.pressure_modes @ (self._pressure.to_numpy()
+                                           - self.fit.pressure_mean)
         f_u = (self.fit.quad_u(a) + self.fit.mean_source_u
                + self.fit.source_modes_u @ c)
         f_v = (self.fit.quad_v(a) + self.fit.mean_source_v
                + self.fit.source_modes_v @ c)
         return f_u, f_v
+
+    def _reduced_pressure_solve(self):
+        """Galerkin projection of the assembled pressure equation onto the
+        pressure basis (Phase 6.5c M2).
+
+        ``pressure_projection_from_fields(..., return_systems=True)``
+        exports the *uneliminated* system, so a pure-Neumann domain works
+        unchanged: the mean-centred POD modes are orthogonal to the
+        constants and the projection removes the null space on its own,
+        while a constant offset stays invisible to ``c`` (``Psi 1 = 0``).
+        The exported RHS is the first pass (explicit cross term evaluated
+        on the incoming pressure) - the same equation the M1 full solve
+        assembles for ``nNonOrthogonalCorrectors = 0``, before its
+        reference-cell elimination.
+        """
+        fvm = self._fvm
+        psi = self.fit.pressure_modes
+        pbar = self.fit.pressure_mean
+        result, system = fvm.pressure_projection_from_fields(
+            self._mesh, self._rho, self._bc_u, self._bc_v, self._bc_p,
+            self._d_u, self._d_v, self._uhat_u, self._uhat_v,
+            self._pressure, solver_config=self._solver_cfg,
+            corrections=self._corrections, return_systems=True)
+        self.last_projection = (result.max_imbalance, 0.0, 0.0, 0.0)
+        n = int(system.n)
+        r_p = psi.shape[0]
+        rows = np.asarray(system.rows)
+        cols = np.asarray(system.cols)
+        vals = np.asarray(system.vals)
+        b = np.asarray(system.b)
+        # The COO pattern is fixed across stages for a given mesh and BC
+        # family (the export never eliminates and no coefficient hits an
+        # exact zero), so the flattened index map, the gathered Psi^T
+        # columns and the pbar gather are cached after the first stage;
+        # only the value-dependent multiply and the projections run per
+        # stage.  The pattern equality check guards BC or mesh changes.
+        cache = self._projection_cache
+        if (cache is None or cache[0] != n or cache[1] != rows.size
+                or not np.array_equal(cache[2], rows)
+                or not np.array_equal(cache[3], cols)):
+            psi_t_cols = np.ascontiguousarray(psi.T)[cols]
+            idx = (rows[:, None] * r_p + np.arange(r_p)).ravel()
+            pbar_cols = pbar[cols]
+            weights_buf = np.empty((rows.size, r_p))
+            cache = (n, rows.size, rows, cols, idx, psi_t_cols, pbar_cols,
+                     weights_buf)
+            self._projection_cache = cache
+        _, _, _, _, idx, psi_t_cols, pbar_cols, weights_buf = cache
+        # The assembled equation is for the ABSOLUTE pressure, so the mean
+        # decomposition p = pbar + Psi^T c reaches the RHS as -A_p pbar
+        # (one sparse matvec via bincount).
+        rhs = psi @ (b - np.bincount(rows, weights=vals * pbar_cols,
+                                     minlength=n))
+        # Y = A_p Psi^T through a flattened bincount (O(nnz r_p)), then
+        # A_r = Psi Y (O(N r_p^2)); the dense r_p x r_p solve replaces the
+        # full sparse CG solve of M1.
+        np.multiply(vals[:, None], psi_t_cols, out=weights_buf)
+        y = np.bincount(idx, weights=weights_buf.ravel(),
+                        minlength=n * r_p)
+        a_r = psi @ y.reshape(n, r_p)
+        c = np.linalg.solve(a_r, rhs)
+        self._pressure.to_numpy()[:] = pbar + c @ psi
+        return c

@@ -28,7 +28,7 @@ Run:  python python/examples/vortex_shedding_galerkin.py
       [--grid {coarse,medium,fine}] [--dt DT] [--end-time T] [--re RE]
       [--snap-every K] [--window-frac F] [--rank R] [--dt-rom DT]
       [--projection] [--precomputed] [--pressure-basis]
-      [--pressure-rank RP] [--timing]
+      [--pressure-rank RP] [--reduced-pressure] [--timing]
       [--test]
 """
 
@@ -178,6 +178,13 @@ def main():
                              "offline-fitted Rhie-Chow fields (pressure "
                              "applied through a projection-solution "
                              "basis)")
+    parser.add_argument("--reduced-pressure", action="store_true",
+                        help="also integrate the Phase 6.5c M2 twin of "
+                             "--pressure-basis: the per-stage pressure "
+                             "equation is exported and solved as its "
+                             "Galerkin projection onto the pressure basis "
+                             "(dense r_p x r_p, no sparse solve; requires "
+                             "--pressure-basis)")
     parser.add_argument("--timing", action="store_true",
                         help="print per-step wall-clock costs of the FOM "
                              "snapshot collection and of each ROM "
@@ -194,6 +201,9 @@ def main():
     args = parser.parse_args()
     if not 0.0 < args.window_frac <= 1.0:
         parser.error("--window-frac must be in (0, 1]")
+    if args.reduced_pressure and not args.pressure_basis:
+        parser.error("--reduced-pressure requires --pressure-basis "
+                     "(it reuses that variant's fitted operators)")
 
     end_time = 20.0 if args.test else args.end_time
     rank = 8 if args.test else args.rank
@@ -318,6 +328,18 @@ def main():
               f"Rhie-Chow field holdout "
               f"{field_fit.holdout_residual:.2e}")
 
+    # Optional reduced-solve twin (Phase 6.5c M2): the same pressure-basis
+    # fit, but the per-stage pressure equation is exported uneliminated and
+    # solved as its Galerkin projection onto the pressure basis
+    # (A_r = Psi A_p Psi^T, dense r_p x r_p) - the M1 mechanism with the
+    # sparse solve replaced by the reduced one.
+    rom_pressure_reduced = None
+    if args.reduced_pressure:
+        rom_pressure_reduced = ReducedPressureRom(
+            fit_pb, field_fit, mesh, 1.0, bc_u, bc_v, bc_p, dt_rom,
+            solver_config=p_cfg, reduced_solve=True)
+        rom_pressure_reduced.set_state_from_fields(initial)
+
     t0 = times[first]
     duration = times[-1] - t0
     n_steps = round(duration / dt_rom)
@@ -346,6 +368,10 @@ def main():
     if rom_pressure_basis is not None:
         _, a_pb_u_hist, a_pb_v_hist = timed_advance("pressure-basis",
                                                     rom_pressure_basis)
+    a_pr_u_hist = a_pr_v_hist = None
+    if rom_pressure_reduced is not None:
+        _, a_pr_u_hist, a_pr_v_hist = timed_advance("pressure-reduced",
+                                                    rom_pressure_reduced)
     print(f"ROM advanced {n_steps} RK4 steps of dt = {dt_rom} "
           f"(t in [{t0:.2f}, {rec_times[-1]:.2f}])")
 
@@ -376,6 +402,8 @@ def main():
         twins.append(("precomputed", a_pc_u_hist, a_pc_v_hist))
     if rom_pressure_basis is not None:
         twins.append(("pressure-basis", a_pb_u_hist, a_pb_v_hist))
+    if rom_pressure_reduced is not None:
+        twins.append(("pressure-reduced", a_pr_u_hist, a_pr_v_hist))
     if twins:
         # Variant comparison (diagnostics only; the std rows are the
         # persistent-amplitude metric behind the documented limit-cycle
@@ -416,6 +444,16 @@ def main():
         if rom_projective is not None:
             print(f"projective last-stage projection (imb, du, dv, dp): "
                   f"{rom_projective.last_projection}")
+    if rom_pressure_basis is not None and rom_pressure_reduced is not None:
+        # D9 gate: the reduced solve must track the M1 full solve's
+        # trajectory (relative history deviation; the gap is the pressure
+        # POD truncation of the projection solutions).
+        rel_u = (np.linalg.norm(a_pr_u_hist - a_pb_u_hist)
+                 / np.linalg.norm(a_pb_u_hist))
+        rel_v = (np.linalg.norm(a_pr_v_hist - a_pb_v_hist)
+                 / np.linalg.norm(a_pb_v_hist))
+        print(f"M2 vs M1 trajectory rel dev: u {rel_u:.3e}, v {rel_v:.3e} "
+              f"(gate 1e-3)")
 
     if args.frames > 0 and not args.test:
         # ROM reconstructions at recorded rows plus the matching FOM
@@ -475,6 +513,11 @@ def main():
             checks["pressure_basis_finite"] = bool(
                 np.isfinite(a_pb_u_hist).all()
                 and np.isfinite(a_pb_v_hist).all())
+        if rom_pressure_reduced is not None:
+            # machine-level only: same for the reduced-solve twin.
+            checks["pressure_reduced_finite"] = bool(
+                np.isfinite(a_pr_u_hist).all()
+                and np.isfinite(a_pr_v_hist).all())
         rom.write_state(initial)
         rom.set_state_from_fields(initial)
         np.testing.assert_allclose(rom.a_u, a_u_hist[-1], atol=1e-12)

@@ -24,7 +24,8 @@ CorrectorResult correctPressure(const Mesh& mesh,
     VectorField& velocity,
     ScalarField& pressure,
     FaceFluxField& flux,
-    const CorrectionOptions& corrections)
+    const CorrectionOptions& corrections,
+    PressureSystemExport* exportSystem)
 {
     if (relaxationP <= 0.0 || relaxationP > 1.0)
     {
@@ -38,8 +39,15 @@ CorrectorResult correctPressure(const Mesh& mesh,
     // Pure-Neumann p makes the equation singular (constants null space):
     // eliminate reference cell 0 and keep its value fixed (its continuity
     // equation is redundant). Any Dirichlet p patch makes the system definite
-    // -> keep all cells.
-    const bool pinReference = !hasDirichletPressure(bcP);
+    // -> keep all cells.  The export mode (Phase 6.5c M2) keeps the
+    // uneliminated singular system instead: a mean-centred POD test space is
+    // orthogonal to the constants, so the caller's projection removes the
+    // null space on its own and one export contract serves both BC families.
+    // The closed-domain adjustPhi rebalance below is keyed on pureNeumann,
+    // not on the elimination, so an exported pure-Neumann RHS stays
+    // consistent.
+    const bool pureNeumann = !hasDirichletPressure(bcP);
+    const bool pinReference = pureNeumann && exportSystem == nullptr;
     const Index nP = pinReference ? nCells - 1 : nCells;
     const auto rowOf = [pinReference](Index cell) -> Index
     {
@@ -275,8 +283,9 @@ CorrectorResult correctPressure(const Mesh& mesh,
     // the eliminated cell's continuity.  Spread the residual uniformly per
     // unit area over the faces whose normal velocity is not fixed; the same
     // adjustment must reach the right-hand side, which is why massImbalance
-    // is updated here too.
-    if (pinReference)
+    // is updated here too.  Runs for the export mode too (keyed on the BC
+    // family, not on the elimination) so the exported RHS is consistent.
+    if (pureNeumann)
     {
         Scalar net = 0.0;
         Scalar scale = 0.0;
@@ -358,6 +367,19 @@ CorrectorResult correctPressure(const Mesh& mesh,
         // the solved rows (the adjusted boundary fluxes balance).
         result.maxImbalance
             = std::max(result.maxImbalance, std::abs(residual.sum()));
+    }
+
+    // ---- Export mode (Phase 6.5c M2): hand the assembled system over and
+    // return without solving - the caller projects it onto a pressure basis
+    // and solves it reduced.  The export is the first-pass system (the
+    // explicit cross term is evaluated on the incoming pressure), so a
+    // non-zero nNonOrthogonalCorrectors loop is collapsed to this pass by
+    // construction; maxImbalance above is the full-space residual at p_old.
+    if (exportSystem != nullptr)
+    {
+        exportSystem->A = std::move(pSys.A);
+        exportSystem->b = std::move(b);
+        return result;
     }
 
     const int subSolves = corrections.nNonOrthogonalCorrectors + 1;

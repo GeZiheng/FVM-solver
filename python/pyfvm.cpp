@@ -327,6 +327,39 @@ MomentumSystem makeMomentumSystem(const std::vector<py::ssize_t>& rows,
     return result;
 }
 
+/// Assembled pressure system exported as COO triplets plus the RHS
+/// (Phase 6.5c M2): the uneliminated n x n operator of the
+/// absolute-pressure equation and its first-pass RHS (see
+/// numerical::PressureSystemExport).
+struct PressureSystem
+{
+    py::array_t<py::ssize_t> rows;
+    py::array_t<py::ssize_t> cols;
+    py::array_t<Scalar> vals;
+    py::ssize_t n = 0;
+    py::array_t<Scalar> b;
+};
+
+/// Build the Python-side PressureSystem from exported COO vectors and the
+/// first-pass RHS of the pressure_projection_from_fields export path.
+PressureSystem makePressureSystem(const std::vector<py::ssize_t>& rows,
+    const std::vector<py::ssize_t>& cols,
+    const std::vector<Scalar>& vals,
+    Index n,
+    const Vector& b)
+{
+    PressureSystem result;
+    result.rows = py::array_t<py::ssize_t>(
+        { static_cast<py::ssize_t>(rows.size()) }, rows.data());
+    result.cols = py::array_t<py::ssize_t>(
+        { static_cast<py::ssize_t>(cols.size()) }, cols.data());
+    result.vals = py::array_t<Scalar>(
+        { static_cast<py::ssize_t>(vals.size()) }, vals.data());
+    result.n = static_cast<py::ssize_t>(n);
+    result.b = vectorCopy(b);
+    return result;
+}
+
 /// Collect a finalized sparse matrix as COO triplets (shared by
 /// assembleMomentum and the fused projection entry; touches no Python
 /// objects, so it may run with the GIL released).
@@ -673,6 +706,14 @@ py::object runPressureProjection(const Mesh& mesh,
 /// internal scratch and discarded (ROM callers consume only p).  With the
 /// same (d, uHat) a pressure_projection call would derive internally, the
 /// solved pressure is identical to that entry.
+/// With return_systems = True (Phase 6.5c M2) nothing is solved: the entry
+/// exports the assembled pressure equation as (ProjectionResult,
+/// PressureSystem) - the uneliminated n x n operator as COO triplets plus
+/// the first-pass RHS - for the caller to project onto a pressure basis and
+/// solve reduced.  `pressure` is left untouched and the result's
+/// du/dv/dpMax stay 0; max_imbalance is the full-space residual
+/// max|b - A p_old|.  The solver is constructed for argument validation
+/// only and never runs.
 py::object runPressureProjectionFromFields(const Mesh& mesh,
     Scalar rho,
     const BoundaryField& bcU,
@@ -684,7 +725,8 @@ py::object runPressureProjectionFromFields(const Mesh& mesh,
     const ScalarField& uHatV,
     ScalarField& pressure,
     const SolverConfig& solverConfig,
-    const CorrectionOptions& corrections)
+    const CorrectionOptions& corrections,
+    bool returnSystems)
 {
     requireSameMesh(mesh, pressure, "pressure");
     requireSameMesh(mesh, bcU, "bc_u");
@@ -696,6 +738,10 @@ py::object runPressureProjectionFromFields(const Mesh& mesh,
     requireSameMesh(mesh, uHatV, "uhat_v");
 
     ProjectionResult out;
+    std::vector<py::ssize_t> rows;
+    std::vector<py::ssize_t> cols;
+    std::vector<Scalar> vals;
+    Vector bExport;
     {
         py::gil_scoped_release release;
 
@@ -712,11 +758,12 @@ py::object runPressureProjectionFromFields(const Mesh& mesh,
             Vector(uHatU.data()),
             Vector(uHatV.data()),
             Vector(dU.data()),
-            Vector(dV.data()) };
+            Vector(dV.data())};
 
         auto solver = fvm::math::makeLinearSolver(solverConfig);
         VectorField velocity(mesh, "scratch_velocity");
         FaceFluxField flux(mesh, "scratch_phi");
+        numerical::PressureSystemExport snapshot;
         const numerical::CorrectorResult r = numerical::correctPressure(
             mesh,
             rho,
@@ -729,12 +776,25 @@ py::object runPressureProjectionFromFields(const Mesh& mesh,
             velocity,
             pressure,
             flux,
-            corrections);
+            corrections,
+            returnSystems ? &snapshot : nullptr);
         out = ProjectionResult{ r.maxImbalance, r.duMax, r.dvMax,
                                 r.dpMax };
+        if (returnSystems)
+        {
+            collectCoo(snapshot.A, rows, cols, vals);
+            bExport = std::move(snapshot.b);
+        }
     }
-    return py::cast(std::move(out));
+    if (!returnSystems)
+    {
+        return py::cast(std::move(out));
+    }
+    return py::make_tuple(py::cast(std::move(out)),
+        py::cast(makePressureSystem(rows, cols, vals, mesh.cellCount(),
+            bExport)));
 }
+
 
 MomentumSystem assembleMomentum(const Mesh& mesh,
     const FaceFluxField& flux,
@@ -1261,6 +1321,16 @@ void bindNumerical(py::module_& m)
         .def_readonly("diag", &MomentumSystem::diag)
         .def_readonly("rhs_no_pressure", &MomentumSystem::rhsNoPressure);
 
+    py::class_<PressureSystem>(m, "PressureSystem",
+        "Assembled pressure system: the uneliminated n x n operator of the "
+        "absolute-pressure equation as COO triplets (rows/cols/vals, "
+        "n = cell count) plus the first-pass RHS b.")
+        .def_readonly("rows", &PressureSystem::rows)
+        .def_readonly("cols", &PressureSystem::cols)
+        .def_readonly("vals", &PressureSystem::vals)
+        .def_readonly("n", &PressureSystem::n)
+        .def_readonly("b", &PressureSystem::b);
+
     m.def("assemble_momentum", &assembleMomentum,
         py::arg("mesh"), py::arg("flux"), py::arg("velocity"),
         py::arg("mu"), py::arg("scheme"), py::arg("bc"),
@@ -1317,13 +1387,21 @@ void bindNumerical(py::module_& m)
         py::arg("pressure"),
         py::arg("solver_config") = SolverConfig{},
         py::arg("corrections") = CorrectionOptions{},
+        py::arg("return_systems") = false,
         "One pressure projection with externally supplied Rhie-Chow cell "
         "fields (Phase 6.5c M1): d_u/d_v are the mobilities V/a_P and "
         "uhat_u/uhat_v the pressure-free velocities. The solved absolute "
         "pressure is written into `pressure` in place; the corrected "
         "velocity/flux are internal scratch and discarded. Same equation "
         "as pressure_projection - feeding the (d, uHat) it would derive "
-        "internally reproduces its pressure.");
+        "internally reproduces its pressure. return_systems = True "
+        "(Phase 6.5c M2) solves nothing: returns (ProjectionResult, "
+        "PressureSystem) with the uneliminated n x n operator as COO "
+        "triplets and the first-pass RHS for reduced projection on the "
+        "caller side; `pressure` is left untouched (a pure-Neumann system "
+        "is exported singular - a mean-centred POD test space removes the "
+        "constants null space) and the solver_config is validated but "
+        "never consumed.");
 
     // -- Scalar transport (high level) ---------------------------------------
     m.def("solve_transport", &solveTransport,

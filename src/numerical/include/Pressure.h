@@ -7,6 +7,7 @@
 #include "LinearSolver.h"
 #include "Mesh.h"
 #include "Momentum.h"
+#include "SparseMatrix.h"
 #include "Types.h"
 
 namespace fvm::numerical
@@ -29,6 +30,25 @@ struct CorrectorResult
     Scalar duMax = 0.0;        ///< Max |u_new - u_old| after correction.
     Scalar dvMax = 0.0;        ///< Max |v_new - v_old| after correction.
     Scalar dpMax = 0.0;        ///< Max |relaxationP * (p_solved - p_old)|.
+};
+
+/// Assembled pressure system exported without solving (Phase 6.5c M2).
+/// `A` is the *uneliminated* N x N operator of the absolute-pressure
+/// equation: in the pure-Neumann case its constants null space is left in
+/// instead of reference-cell eliminating, because a mean-centred POD test
+/// space is orthogonal to the constants and removes the null space through
+/// the projection on its own.  `b` is the first-pass right-hand side (the
+/// explicit cross-pressure term is evaluated on the incoming pressure, and
+/// the closed-domain adjustPhi rebalance has run), so with
+/// nNonOrthogonalCorrectors = 0 it is the same equation the solving path
+/// assembles - before its reference-cell elimination, whose solution also
+/// satisfies this system up to the redundant-row residual.  The exporting
+/// call's maxImbalance is the full-space residual max|b - A p_old|;
+/// du/dv/dpMax stay 0 and `pressure` is left untouched.
+struct PressureSystemExport
+{
+    fvm::math::SparseMatrix A{0, 0}; ///< Finalized operator, nCells x nCells.
+    Vector b;                        ///< First-pass RHS, nCells.
 };
 
 /// Run one pressure-correction step (OpenFOAM pEqn): write the pressure-free
@@ -54,6 +74,11 @@ struct CorrectorResult
 ///  - the flux and the velocity use the *unrelaxed* solved pressure; only the
 ///    stored field is relaxed, so steady SIMPLE applies the full p' correction
 ///    to the velocity and relaxationP of it to the pressure.
+///
+/// With `exportSystem` set (Phase 6.5c M2) the corrector assembles the
+/// pressure equation, writes the uneliminated system into it and returns
+/// without solving or correcting anything (see PressureSystemExport); the
+/// null (default) keeps the solving behaviour bit-identical.
 CorrectorResult correctPressure(const Mesh& mesh,
     Scalar rho,
     const MomentumPrediction& pred,
@@ -65,6 +90,7 @@ CorrectorResult correctPressure(const Mesh& mesh,
     VectorField& velocity,
     ScalarField& pressure,
     FaceFluxField& flux,
-    const CorrectionOptions& corrections = {});
+    const CorrectionOptions& corrections = {},
+    PressureSystemExport* exportSystem = nullptr);
 
 } // namespace fvm::numerical

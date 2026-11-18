@@ -1104,5 +1104,118 @@ class TestReducedPressureRom(_FrozenBcRomFixture, unittest.TestCase):
                                    bc_v, pyfvm.BoundaryField(mesh), bad)
 
 
+@unittest.skipIf(not HAVE_PYFVM, "pyfvm extension not built")
+class TestReducedPressureSolve(_FrozenBcRomFixture, unittest.TestCase):
+    """Phase 6.5c M2 contract tests: the reduced basis solve of the
+    exported pressure equation tracks the M1 full-solve ROM - same
+    assembled equation, solution space shrunk to pbar + span(Psi), so
+    the gap is the pressure POD truncation - and stays stable on the
+    frozen-BC fixture."""
+
+    # The M2-vs-M1 rhs gap is the projection-solution POD truncation
+    # (the same truncation M1's own L2 c-projection sees) plus the
+    # Galerkin-vs-L2 coefficient difference: measured 1.1e-6 on snapshot
+    # states and 3.7e-4 mildly off-manifold, so the gate keeps the model
+    # tolerance with the same margins the M1 class uses.
+    RHS_TOLERANCE = 1e-3
+    TRAJECTORY_RTOL = 1e-3
+
+    PRESSURE_RANK = 12
+
+    # The M1 build (projection-solution pressure basis, D3 revision) is
+    # shared verbatim; only the ROM's solve mode differs.
+    _build_m1 = TestReducedPressureRom._build_m1
+
+    def _rom(self, case, field_fit, fit, reduced):
+        mesh, _, (bc_u, bc_v, _) = case
+        return ReducedPressureRom(fit, field_fit, mesh, self.RHO, bc_u,
+                                  bc_v, pyfvm.BoundaryField(mesh), self.DT,
+                                  reduced_solve=reduced)
+
+    def test_rhs_matches_full_solve(self):
+        # Snapshot and perturbed states: the Galerkin-projected solve
+        # must track the M1 full solve far below the model tolerance.
+        case = self._build_frozen_case()
+        pod_pair, fit, field_fit = self._build_m1(case,
+                                                  np.random.default_rng(2))
+        _, (snap_u, snap_v, _), _ = case
+        full = self._rom(case, field_fit, fit, reduced=False)
+        reduced = self._rom(case, field_fit, fit, reduced=True)
+        a_u_snap = pod_pair[0].project(snap_u)
+        a_v_snap = pod_pair[1].project(snap_v)
+
+        rng = np.random.default_rng(3)
+        states = [(a_u_snap[i], a_v_snap[i])
+                  for i in (5, 15, self.STEPS)]
+        states.append((a_u_snap[10]
+                       + 0.3 * a_u_snap.std(axis=0)
+                       * rng.standard_normal(a_u_snap.shape[1]),
+                       a_v_snap[10]
+                       + 0.3 * a_v_snap.std(axis=0)
+                       * rng.standard_normal(a_v_snap.shape[1])))
+        for a_u, a_v in states:
+            f_u, f_v = full.rhs(a_u, a_v)
+            g_u, g_v = reduced.rhs(a_u, a_v)
+            rel = max(np.linalg.norm(g_u - f_u) / np.linalg.norm(f_u),
+                      np.linalg.norm(g_v - f_v) / np.linalg.norm(f_v))
+            self.assertLess(rel, self.RHS_TOLERANCE)
+        self.assertIsNotNone(reduced.last_projection)
+
+    def test_tracks_full_solve_trajectory(self):
+        # Same rhs (to fit tolerance) + same RK4 => the M2 ROM tracks the
+        # M1 full-solve ROM over a short horizon: the D9 trajectory gate
+        # at CI scale (relative history deviation).
+        case = self._build_frozen_case()
+        _, fit, field_fit = self._build_m1(case, np.random.default_rng(4))
+        mesh, (snap_u, snap_v, _), _ = case
+        full = self._rom(case, field_fit, fit, reduced=False)
+        reduced = self._rom(case, field_fit, fit, reduced=True)
+
+        initial = pyfvm.VectorField(mesh, "initial")
+        initial.u.to_numpy()[:] = snap_u[0]
+        initial.v.to_numpy()[:] = snap_v[0]
+        full.set_state_from_fields(initial)
+        reduced.set_state_from_fields(initial)
+        ref = full.advance(0.0, self.DT, 20, record_every=1)
+        got = reduced.advance(0.0, self.DT, 20, record_every=1)
+        rel_u = (np.linalg.norm(got[1] - ref[1])
+                 / np.linalg.norm(ref[1]))
+        rel_v = (np.linalg.norm(got[2] - ref[2])
+                 / np.linalg.norm(ref[2]))
+        self.assertLess(max(rel_u, rel_v), self.TRAJECTORY_RTOL)
+
+    def test_long_horizon_stability(self):
+        # Contract-level stability smoke of the reduced solve (the full
+        # 15000-step horizon is the shedding evidence run); 2000 steps
+        # keep the CI cost bounded.
+        case = self._build_frozen_case()
+        _, fit, field_fit = self._build_m1(case, np.random.default_rng(5))
+        mesh, (snap_u, snap_v, _), _ = case
+        rom = self._rom(case, field_fit, fit, reduced=True)
+        initial = pyfvm.VectorField(mesh, "initial")
+        initial.u.to_numpy()[:] = snap_u[0]
+        initial.v.to_numpy()[:] = snap_v[0]
+        rom.set_state_from_fields(initial)
+        rom.advance(0.0, self.DT, 2000)
+        self.assertTrue(np.isfinite(rom.a_u).all())
+        self.assertTrue(np.isfinite(rom.a_v).all())
+
+    def test_reduced_solve_rejects_empty_pressure_basis(self):
+        # A reduced solve without a pressure basis has nothing to project
+        # onto; the constructor must reject it (mirrors the dt_p guard of
+        # the M1 class).
+        import dataclasses
+
+        case = self._build_frozen_case()
+        _, fit, field_fit = self._build_m1(case, np.random.default_rng(6))
+        mesh, _, (bc_u, bc_v, _) = case
+        empty = dataclasses.replace(
+            fit, pressure_modes=np.zeros((0, mesh.cell_count())))
+        with self.assertRaises(ValueError):
+            ReducedPressureRom(empty, field_fit, mesh, self.RHO, bc_u,
+                               bc_v, pyfvm.BoundaryField(mesh), self.DT,
+                               reduced_solve=True)
+
+
 if __name__ == "__main__":
     unittest.main()

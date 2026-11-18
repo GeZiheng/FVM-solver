@@ -800,6 +800,90 @@ class TestPressureProjectionFromFields(unittest.TestCase):
                 self.assertTrue(np.isfinite(result.max_imbalance))
                 self.assertGreaterEqual(result.dp_max, 0.0)
 
+    def test_return_systems_is_the_solved_equation(self):
+        # return_systems = True must export the equation the solving path
+        # solves: with correctors = 0 the exported first-pass RHS is exactly
+        # the solved one, so the M1-solved pressure satisfies A p = b to
+        # the linear-solver tolerance. The pure-Neumann export keeps the
+        # redundant reference row; its residual is the negated row sum of
+        # the solved rows, so the same bound covers both BC families.
+        cfg = fvm.SolverConfig()
+        cfg.tolerance = 1e-12
+        cfg.max_iterations = 20000
+        for p_mode in ("neumann", "dirichlet"):
+            with self.subTest(p_mode=p_mode):
+                case = TestPressureProjection._source_field_case(self)
+                mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = case
+                if p_mode == "dirichlet":
+                    zeros = np.zeros(len(mesh.patch_faces(
+                        fvm.BoundaryField.East)))
+                    bc_p.set_values(fvm.BoundaryField.East,
+                                    fvm.BCType.Dirichlet, zeros)
+                fields = self._rhie_chow_fields(case)
+                d_u, uhat_u, d_v, uhat_v = fields
+                fvm.pressure_projection_from_fields(
+                    mesh, self.RHO, bc_u, bc_v, bc_p, d_u, d_v,
+                    uhat_u, uhat_v, pressure, solver_config=cfg)
+                p_solved = pressure.to_numpy().copy()
+
+                case2 = TestPressureProjection._source_field_case(self)
+                mesh2, _, pressure2, _, bc_u2, bc_v2, bc_p2 = case2
+                if p_mode == "dirichlet":
+                    zeros = np.zeros(len(mesh2.patch_faces(
+                        fvm.BoundaryField.East)))
+                    bc_p2.set_values(fvm.BoundaryField.East,
+                                     fvm.BCType.Dirichlet, zeros)
+                fields2 = self._rhie_chow_fields(case2)
+                d_u2, uhat_u2, d_v2, uhat_v2 = fields2
+                result, system = fvm.pressure_projection_from_fields(
+                    mesh2, self.RHO, bc_u2, bc_v2, bc_p2, d_u2, d_v2,
+                    uhat_u2, uhat_v2, pressure2, solver_config=cfg,
+                    return_systems=True)
+
+                n = mesh2.cell_count()
+                self.assertEqual(system.n, n)
+                ap = np.bincount(np.asarray(system.rows),
+                                 weights=(np.asarray(system.vals)
+                                          * p_solved[np.asarray(system.cols)]),
+                                 minlength=n)
+                residual = ap - np.asarray(system.b)
+                scale = max(np.linalg.norm(np.asarray(system.b)), 1e-300)
+                self.assertLess(np.linalg.norm(residual) / scale, 1e-8)
+                self.assertTrue(np.isfinite(result.max_imbalance))
+
+    def test_return_systems_leaves_pressure_untouched(self):
+        # The export path solves and corrects nothing: `pressure` keeps its
+        # incoming values, the COO export covers every diagonal, and the
+        # result carries only the full-space residual diagnostic.
+        case = TestPressureProjection._source_field_case(self)
+        mesh, velocity, pressure, flux, bc_u, bc_v, bc_p = case
+        rng = np.random.default_rng(7)
+        initial = rng.standard_normal(mesh.cell_count())
+        pressure.to_numpy()[:] = initial
+        fields = self._rhie_chow_fields(case)
+        d_u, uhat_u, d_v, uhat_v = fields
+        result, system = fvm.pressure_projection_from_fields(
+            mesh, self.RHO, bc_u, bc_v, bc_p, d_u, d_v, uhat_u, uhat_v,
+            pressure, return_systems=True)
+
+        self.assertTrue(np.array_equal(pressure.to_numpy(), initial))
+        n = mesh.cell_count()
+        rows = np.asarray(system.rows)
+        cols = np.asarray(system.cols)
+        vals = np.asarray(system.vals)
+        b = np.asarray(system.b)
+        self.assertEqual(system.n, n)
+        self.assertEqual(b.shape, (n,))
+        self.assertEqual(rows.shape, cols.shape)
+        self.assertEqual(rows.shape, vals.shape)
+        self.assertTrue(np.all(np.isfinite(b)))
+        self.assertTrue(np.all(np.isfinite(vals)))
+        self.assertEqual(np.unique(rows[rows == cols]).size, n)
+        self.assertEqual(result.du_max, 0.0)
+        self.assertEqual(result.dv_max, 0.0)
+        self.assertEqual(result.dp_max, 0.0)
+        self.assertTrue(np.isfinite(result.max_imbalance))
+
     def test_rejects_foreign_fields(self):
         case = TestPressureProjection._source_field_case(self)
         mesh, velocity, pressure, _, bc_u, bc_v, bc_p = case

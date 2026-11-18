@@ -162,6 +162,61 @@ $$M_r\,\dot{a} = \Phi\,(b - A u)^{\top}, \qquad M_r = \Phi\,\mathrm{diag}(\rho V
 
 驱动：`vortex_shedding_galerkin.py` 增 `--precomputed`（6.5b 二次算子 + 闭包变体，诊断用）/`--pressure-rank`（闭包/压力基 POD 秩 r_p，默认 16）与 `--pressure-basis`（6.5c M1 变体）；`--test` 有限性检查相应扩展（已启用变体的系数逐项有限）。测试：`TestPrecomputedRom` 4 用例 + `TestReducedPressureRom` 4 用例（frozen-BC 夹具；含 6000 步稳定性与 dt_p>0 校验），见 `docs/python.md` §测试分工。
 
+### M2 约化压力解（2026-11-18 完成）
+
+把逐 stage 的全量压力解替换为**压力方程自身的 Galerkin 投影**：`correctPressure` 增可选
+`PressureSystemExport*` 尾参（唯一触 `Pressure.cpp` 的改动；导出模式早退不解、默认路径逐位
+不变），绑定 `pressure_projection_from_fields(..., return_systems=True)` 返回
+`(ProjectionResult, PressureSystem{rows/cols/vals/n/b})`，numpy 侧
+`A_r = Ψ A_p Ψᵀ`（bincount O(nnz·r_p) + GEMM O(N·r_p²)）、`b_r = Ψ (b_p − A_p p̄)`
+（绝对压力方程，p̄ 分解必须进 RHS）、r_p×r_p 稠密解。`ReducedPressureRom(reduced_solve=True)`
+切换该模式；COO 模式跨 stage 固定 → idx/Ψᵀ 列/p̄ 列缓存（轨迹与未缓存逐位一致）。
+
+**两处关键设计**（相对 D7 预登记的细化，全记录在
+`.agents/plans/phase6-5c-m2-reduced-pressure-solve.md`）：
+
+- **导出恒为未消元 N×N 系统**：纯 Neumann 族（frozen-BC 夹具即此）的常数零空间留在
+  矩阵里，均值中心化 POD 模态 Ψ·1 = 0 使 ΨA_pΨᵀ 自行消去零空间，常数偏移对 c 不可见
+  （Ψᵀδ1 = 0）——一条公式统一 Neumann/Dirichlet 两族，adjustPhi 仍运行保证 RHS 相容；
+- **crossP 裁决 = 第一遍系统 + 单遍塌缩**：导出 RHS 的显式交叉项取传入压力状态，与
+  correctors=0（驱动/夹具口径）下 M1 首解装配的是同一方程；correctors>0 的塌缩差异
+  计入轨迹门槛。
+
+**实测证据**（涡街 coarse T=250，r=16、窗口 0.6，与 6.4/6.5a/6.5c M1 同口径）：
+
+| 指标 | 零压 | 投影（6.4） | M1（r_p=16/24） | **M2（r_p=16/24）** |
+| --- | --- | --- | --- | --- |
+| err\|FOM 尾 20% 均值 | 0.1173 | 0.0021 | 0.0087 / 0.0019 | **0.0040 / 0.0036** |
+| St(a₁) | — | 0.1600 | 0.1600 / 0.1600 | **0.1600 / 0.1600**（FOM 0.1593，0.44%） |
+| std(a₁) | 0.604 | 2.668 | 2.646 / 2.660 | **2.654 / 2.656** |
+| 长视界 | 稳定 | 稳定 | 15000 步稳定 | **15000 步稳定** |
+| 成本 ms/步 | 46.1 | — | 60.3 / 61.1 | **29.5 / 33.5** |
+
+**门槛裁定（如实记录，两项未达）**：
+
+- **轨迹门 ✗**（M2 vs M1 相对偏差 ≤1e-3）：实测 **7.3e-2**（r_p=16）→ **2.3e-2**
+  （r_p=24 上探，能量残差缩小 9× 偏差仅缩小 3.1×；T=20 满能量基仍有 9e-3——地板是
+  crossOut 状态依赖与 Galerkin-vs-L² 系数差的逐步累积，非截断单项）。走 D7 文档化
+  差异路径的依据：两条轨迹在**同一极限环**上（St 四位一致、std(a₁) 相对差 0.3%），
+  偏差是轨迹/相位级的而非质量级的；r_p=16 下 M2 的 err|FOM（0.0040）反而优于 M1
+  （0.0087）2.2×。
+- **成本门 ✗**（<10 ms/步）：实测 **29.5**（r_p=16）= M1 的 2.0×，超 10–16 上报带。
+  分解：每 stage 场重构 ~2.5 + C++ 导出 ~1.4 + numpy 投影 ~2.5（缓存后；未缓存 6–8）
+  ms ×4 stage——目标制定时未计 M1 场重构与导出装配的共享成本；压力解本身从 12.3
+  降到 ~2 ms/stage（6×），但 M1 机制的非压力底板使其无法兑现到步级 <10。
+
+CI 契约（`TestReducedPressureSolve` 4 用例）：rhs vs M1（快照态 1.1e-6 / 扰动态
+3.7e-4，门 1e-3）、20 步轨迹 1.9e-4（门 1e-3）、2000 步稳定性、空压力基构造拒绝。
+绑定契约 ×2：return_systems 导出与 M1 解满足同一方程（|A p_solved − b|/|b| ≤1e-8，
+Neumann/Dirichlet 双族）、导出后 pressure 原场不动 + COO 形状/对角覆盖。
+
+驱动：`--reduced-pressure`（依赖 `--pressure-basis`，复用其 fit/field_fit 资产），
+诊断表增 `pressure-reduced` 行与 M2-vs-M1 轨迹偏差行；`--test` 有限性检查扩展。
+
+M2 后的下一步候选（条件触发）：步级成本要再下探需动 M1 场重构/导出装配的共享底板
+（如 C++ 侧几何缓存或 d/uHat 装配融合），已超出"唯一触 Pressure.cpp"的 M2 边界，
+未立项。
+
 ## 已验证结论
 
 **Taylor–Green**（64²、dt=0.0025、T=2.0、201 帧，2026-11-13）：单模衰减解 → 第 1 阶 POD 模态占 99.99997% 能量，err(1)=5.0e-4、err(8)=9.2e-7——管线正确性的机器级验证（多余模态即时间离散误差的痕迹）。
@@ -190,7 +245,7 @@ pod_decompose(data.u)            # 能量谱 / err(r)
 dmd(data.u[2000:], 0.05)         # 窗口 DMD → dominant_frequency() → St
 ```
 
-测试：`python/tests/test_rom.py` 24 用例（POD 代数 ×2、DMD 双正弦合成信号 ×1、npz 契约往返+错误路径 ×3、TG 32² 端到端冒烟 ×1、Galerkin TG ×4、Galerkin 投影 ×5（含 6.5a 去重轨迹恒等）、离线预计算 ×4（`TestPrecomputedRom`，6.5b）、压力入基 ×4（`TestReducedPressureRom`，6.5c，含 6000 步稳定性与 dt_p>0 校验）），随 `pyfvm_tests` 自动收编（pyfvm_tests 61→71）；`rom` 包核心不 import pyfvm（`rom.galerkin`/`rom.precomputed` 惰性 import），代数/契约用例无需扩展构建（pyfvm 缺失时 TG 冒烟与 Galerkin/投影/预计算/压力入基用例 skip）。
+测试：`python/tests/test_rom.py` 28 用例（POD 代数 ×2、DMD 双正弦合成信号 ×1、npz 契约往返+错误路径 ×3、TG 32² 端到端冒烟 ×1、Galerkin TG ×4、Galerkin 投影 ×5（含 6.5a 去重轨迹恒等）、离线预计算 ×4（`TestPrecomputedRom`，6.5b）、压力入基 ×4（`TestReducedPressureRom`，6.5c，含 6000 步稳定性与 dt_p>0 校验）、约化压力解 ×4（`TestReducedPressureSolve`，6.5c M2，含 rhs/轨迹/2000 步稳定性/空基校验）），随 `pyfvm_tests` 自动收编（pyfvm_tests 71→77 = test_pyfvm 49 + test_rom 28，新增为 return_systems 契约 ×2 与 TestReducedPressureSolve ×4）；`rom` 包核心不 import pyfvm（`rom.galerkin`/`rom.precomputed` 惰性 import），代数/契约用例无需扩展构建（pyfvm 缺失时 TG 冒烟与 Galerkin/投影/预计算/压力入基用例 skip）。
 
 ## 后续批次与已知问题
 
