@@ -234,6 +234,49 @@ St 四位一致、std 相对差 0.3%，且 r_p=16 下 M2 的 err|FOM 反而优�
 `--reduced-pressure`（依赖 `--pressure-basis`）。后续候选（未立项）：步级成本再下探需动
 M1 场重构/导出装配的共享底板（C++ 侧几何缓存或装配融合），超出 M2 边界。
 
+## 验证算例扩容（Stokes 振荡板 + 后向台阶，2026-11-20）
+
+Phase 6 的 ROM 验证原本只有 TG（封闭域、纯 Neumann、线性、衰减瞬态）与涡街（开域、
+Dirichlet-p、强非线性、极限环）两个极端；本批补中间形态，并顺势落地 6.5b 计划登记的
+**D1 边界参数机制**（`.agents/plans/phase6-rom-validation-cases.md`）：
+
+| 算例 | 驱动 | 填补的缺口 | 核心证据（2026-11-19/20） |
+| --- | --- | --- | --- |
+| Stokes 振荡板 | `stokes_galerkin.py` | 纯 Neumann 的**真实物理算例**（此前 M1/M2 只有 CI 夹具）、时变 BC、近满降阶（线性问题 POD 秩 2） | err\|FOM 尾段 零压 0.0298 / 投影 0.0334 / M1 0.0290 / **M2 0.0310**（同档）；相位 0 剖面 L∞ **M2 2.38e-3 全场最佳**（FOM 自身 2.82e-3）；10 额外周期全稳定；成本 M2 **3.8 ms/步**（M1 10.7 = 2.8×） |
+| 后向台阶启动瞬态 | `bfs_galerkin.py` | **定态吸引子**（第三种吸引子类型）、分离流 / L 形 SU2 几何、Dirichlet-p 出口 | err\|FOM 零压 **1.91 完全失锁**（启动段压力动力学强烈）/ 投影 0.0242 / M1 0.0248 / M2 0.0241；x_r/h 偏差 ≤0.44%（FOM 6.685）；M2 **24.4 ms/步**全场最低（低于逐装配的零压变体） |
+
+两算例合起来给出机制排序的完整谱：**压力供给的收益随压力动力学强度单调**——Stokes
+（连续 ∇p=0，只剩离散残差散度泄漏）四变体同档，BFS（强压力动力学）零压崩溃、供压
+三变体全部恢复。这也是 6.3"结构性泄漏"结论在两种新吸引子上的外推验证。
+
+**D1 边界参数机制（γ 参数化）**：Stokes 北壁 u = cos(ωt) 是时变 Dirichlet，与离线算子
+的固定 BC 假设冲突。解法 = 把 γ(t) 作为**已知额外坐标**并入二次拟合：
+离线 `make_fit_samples(parameter=...)` 产出增广样本（分级扰动覆盖 γ 列）、
+`fit_reduced_operators`/`fit_rhie_chow_fields`/`projected_pressure_snapshots` 经
+`parameter_samples`+`parameter_bc` 逐样本刷新活 BC 后装配（参数必须贯穿**采样侧**，
+仅改系数列不充分）；在线 `PrecomputedGalerkinRom(parameter_fn=t→γ(t))` 逐 RK4 stage
+求值增广进 rhs，`advance(bc_refresh=...)` 同步活 BC 供 M1/M2 压力解读取。默认路径
+（parameter_fn=None）逐位不变。这是 Re 参数化 ROM 登记项的最小实例（参数不进状态、
+时钟已知）；a–γ 双线性交叉项由联合二次拟合自动覆盖。契约 `TestParameterizedRom` ×2
+（参数化 rhs vs 投影 twin：快照态 1.5e-7 / 扰动态 3.3e-4@r_p=12——γ 族使压力流形
+变肥，r_p=8 残留 3e-2，12 秩饱和）。
+
+**执行期发现**（细节与失败形态入计划变更记录）：
+
+- **投影变体的 RK4 显式稳定边界**（Stokes）：逐 stage 压力投影使降阶 rhs 变刚，
+  边界在 2.5–5× FOM dt 之间（0.025 爆、0.0125 稳）——两驱动的 dt_rom 默认 FOM dt
+  （TG 惯例，4× 余量），快照节拍不再是安全的 ROM 步长；
+- **holdout 度量细化**：逐行/逐单元相对度量在消失分量上地板化（Stokes 的 v 是
+  噪声场，|f_v|~1e-9 ⇒ 假性失配）——改为逐输出/逐分量参考尺度（留出集峰值），
+  健康算例仍机器精度；(a_u, γ) 设计手工验证 1e-14 机器精确；v 分量的拟合地板
+  （rhs ~1e-3、场 ~1e-2，Stokes 驱动按算例校准容差 1e-2/1e-1）机制未解析，入档
+  open；
+- u/v 等宽假设放宽为行对齐 + 各自宽度（Stokes 2+1 不等秩）。
+
+两驱动均带 `--frames N`（各变体重构帧 + 同时刻 FOM 快照；Stokes 写 `.vti`、BFS 写
+`.vtu`，镜像 TG/涡街驱动惯例）与 `--test` 机检；证据口径同涡街（驱动证据运行 +
+本节记录，不进 application 层）。
+
 ## 已验证结论
 
 **Taylor–Green**（64²、dt=0.0025、T=2.0、201 帧，2026-11-13）：单模衰减解 → 第 1 阶 POD 模态占 99.99997% 能量，err(1)=5.0e-4、err(8)=9.2e-7——管线正确性的机器级验证（多余模态即时间离散误差的痕迹）。
@@ -262,7 +305,7 @@ pod_decompose(data.u)            # 能量谱 / err(r)
 dmd(data.u[2000:], 0.05)         # 窗口 DMD → dominant_frequency() → St
 ```
 
-测试：`python/tests/test_rom.py` 28 用例（POD 代数 ×2、DMD 双正弦合成信号 ×1、npz 契约往返+错误路径 ×3、TG 32² 端到端冒烟 ×1、Galerkin TG ×4、Galerkin 投影 ×5（含 6.5a 去重轨迹恒等）、离线预计算 ×4（`TestPrecomputedRom`，6.5b）、压力入基 ×4（`TestReducedPressureRom`，6.5c，含 6000 步稳定性与 dt_p>0 校验）、约化压力解 ×4（`TestReducedPressureSolve`，6.5c M2，含 rhs/轨迹/2000 步稳定性/空基校验）），随 `pyfvm_tests` 自动收编（pyfvm_tests 71→77 = test_pyfvm 49 + test_rom 28，新增为 return_systems 契约 ×2 与 TestReducedPressureSolve ×4）；`rom` 包核心不 import pyfvm（`rom.galerkin`/`rom.precomputed` 惰性 import），代数/契约用例无需扩展构建（pyfvm 缺失时 TG 冒烟与 Galerkin/投影/预计算/压力入基用例 skip）。
+测试：`python/tests/test_rom.py` 30 用例（POD 代数 ×2、DMD 双正弦合成信号 ×1、npz 契约往返+错误路径 ×3、TG 32² 端到端冒烟 ×1、Galerkin TG ×4、Galerkin 投影 ×5（含 6.5a 去重轨迹恒等）、离线预计算 ×4（`TestPrecomputedRom`，6.5b）、压力入基 ×4（`TestReducedPressureRom`，6.5c，含 6000 步稳定性与 dt_p>0 校验）、约化压力解 ×4（`TestReducedPressureSolve`，6.5c M2，含 rhs/轨迹/2000 步稳定性/空基校验）、边界参数化 ×2（`TestParameterizedRom`，Phase 6 验证算例，含参数化 rhs 对照与轨迹）），随 `pyfvm_tests` 自动收编（pyfvm_tests 79 = test_pyfvm 49 + test_rom 30）；`rom` 包核心不 import pyfvm（`rom.galerkin`/`rom.precomputed` 惰性 import），代数/契约用例无需扩展构建（pyfvm 缺失时 TG 冒烟与 Galerkin/投影/预计算/压力入基用例 skip）。
 
 ## 后续批次与已知问题
 

@@ -942,14 +942,20 @@ class TestPrecomputedRom(_FrozenBcRomFixture, unittest.TestCase):
                 self.assertLess(rel, self.CLOSURE_TOLERANCE)
 
     def test_precomputed_input_validation(self):
-        # Fixed-BC scope, sample-count floor and the paired-snapshot
-        # requirement are enforced.
+        # Sample-count floor and the paired-snapshot requirement are
+        # enforced; the Phase 6 validation-case expansion legalised
+        # bc_refresh (the live BC fields feed the M1/M2 pressure
+        # solves), and a parameter_fn on a fit built without the
+        # parameter column is a dimension-contract violation.
         case = self._build_frozen_case()
         pod_pair, fit = self._build_fit(case, with_closure=False,
                                         rng=np.random.default_rng(6))
         fast = PrecomputedGalerkinRom(fit)
+        fast.advance(0.0, self.DT, 1, bc_refresh=lambda t: None)
+        mismatched = PrecomputedGalerkinRom(fit,
+                                            parameter_fn=lambda t: 1.0)
         with self.assertRaises(ValueError):
-            fast.advance(0.0, self.DT, 1, bc_refresh=lambda t: None)
+            mismatched.advance(0.0, self.DT, 1)
 
         mesh, (snap_u, snap_v, snap_p), (bc_u, bc_v, _) = case
         pod_u, pod_v = pod_pair
@@ -1215,6 +1221,111 @@ class TestReducedPressureSolve(_FrozenBcRomFixture, unittest.TestCase):
             ReducedPressureRom(empty, field_fit, mesh, self.RHO, bc_u,
                                bc_v, pyfvm.BoundaryField(mesh), self.DT,
                                reduced_solve=True)
+
+
+@unittest.skipIf(not HAVE_PYFVM, "pyfvm extension not built")
+class TestParameterizedRom(_FrozenBcRomFixture, unittest.TestCase):
+    """Phase 6 validation-case machinery: a known boundary parameter
+    joins the offline quadratic design (``parameter_bc`` varies the
+    live BC per sampled assembly) and the online rhs consumes
+    ``parameter_fn(t)`` - a parameterized ReducedPressureRom must then
+    track the GalerkinRom projection twin whose BC is refreshed to the
+    same value (the wall parameter stands in for Stokes' cos(omega t)).
+    """
+
+    RHS_TOLERANCE = 1e-3
+
+    def _parameterized_m1(self, case, rng):
+        """(pod pair, fit, field fit, M1 ROM, pbc hook)."""
+        mesh, (snap_u, snap_v, _), (bc_u, bc_v, _) = case
+        pod_u = pod_decompose(snap_u).truncated(self.RANK)
+        pod_v = pod_decompose(snap_v).truncated(self.RANK)
+        a_u_snap = pod_u.project(snap_u)
+        a_v_snap = pod_v.project(snap_v)
+        gammas = np.linspace(-1.0, 1.0, a_u_snap.shape[0])
+
+        def pbc(value):
+            bc_u.set(pyfvm.BoundaryField.North, pyfvm.BCType.Dirichlet,
+                     float(value))
+
+        au, av, ap = make_fit_samples(a_u_snap, a_v_snap,
+                                      parameter=gammas, rng=rng)
+        p_proj = projected_pressure_snapshots(
+            mesh, self.NU, self.RHO, pod_u, pod_v, bc_u, bc_v,
+            pyfvm.BoundaryField(mesh), pyfvm.ConvectionScheme.Central,
+            a_u_snap, a_v_snap, self.DT,
+            parameter_samples=gammas, parameter_bc=pbc)
+        pod_pp = pod_decompose(p_proj)
+        # The parameter family fattens the pressure manifold: rank 8
+        # leaves a ~3e-2 off-manifold rhs gap, rank 12 saturates it at
+        # ~3e-4 (measured 2026-11-19).
+        fit = fit_reduced_operators(
+            mesh, self.NU, self.RHO, pod_u, pod_v, bc_u, bc_v,
+            pyfvm.ConvectionScheme.Central, au, av,
+            pressure_basis=(pod_pp.modes[:12], pod_pp.mean),
+            parameter_samples=ap, parameter_bc=pbc, rng=rng)
+        field_fit = fit_rhie_chow_fields(
+            mesh, self.NU, self.RHO, pod_u, pod_v, bc_u, bc_v,
+            pyfvm.ConvectionScheme.Central, au, av,
+            parameter_samples=ap, parameter_bc=pbc, rng=rng)
+        rom = ReducedPressureRom(fit, field_fit, mesh, self.RHO, bc_u,
+                                 bc_v, pyfvm.BoundaryField(mesh),
+                                 self.DT, parameter_fn=lambda t: 0.5)
+        return (pod_u, pod_v), fit, field_fit, rom, pbc
+
+    def test_rhs_matches_projection_with_parameter(self):
+        # Snapshot and perturbed states at several parameter values: the
+        # parameterized fitted operators + per-stage pressure solve must
+        # track the projection twin whose live BC carries the same
+        # parameter value (the a-gamma quadratic exactness is asserted
+        # by the fit holdouts, both machine precision).
+        case = self._build_frozen_case()
+        pod_pair, fit, field_fit, rom, pbc = self._parameterized_m1(
+            case, np.random.default_rng(2))
+        mesh, (snap_u, snap_v, _), (bc_u, bc_v, _) = case
+        ref = GalerkinRom(mesh, self.NU, self.RHO, pod_pair[0],
+                          pod_pair[1], bc_u, bc_v,
+                          pyfvm.ConvectionScheme.Central,
+                          pressure_projection=True, projection_dt=self.DT)
+        self.assertLessEqual(fit.holdout_residual, 1e-10)
+        self.assertLessEqual(field_fit.holdout_residual, 1e-10)
+
+        a_u_snap = pod_pair[0].project(snap_u)
+        a_v_snap = pod_pair[1].project(snap_v)
+        rng = np.random.default_rng(3)
+        states = [(a_u_snap[i], a_v_snap[i], gamma)
+                  for i, gamma in ((5, -0.6), (15, 0.3), (24, 0.9))]
+        states.append((a_u_snap[10]
+                       + 0.3 * a_u_snap.std(axis=0)
+                       * rng.standard_normal(a_u_snap.shape[1]),
+                       a_v_snap[10]
+                       + 0.3 * a_v_snap.std(axis=0)
+                       * rng.standard_normal(a_v_snap.shape[1]),
+                       0.15))
+        for a_u, a_v, gamma in states:
+            pbc(gamma)
+            f_u, f_v = rom.rhs(a_u, a_v, gamma)
+            r_u, r_v = ref.rhs(0.0, a_u, a_v)
+            rel = max(np.linalg.norm(f_u - r_u) / np.linalg.norm(r_u),
+                      np.linalg.norm(f_v - r_v) / np.linalg.norm(r_v))
+            self.assertLess(rel, self.RHS_TOLERANCE)
+
+    def test_parameterized_trajectory_finite(self):
+        # End-to-end advance with parameter_fn + bc_refresh tracking a
+        # synthetic oscillating parameter stays finite (the machinery
+        # integration smoke; accuracy lives in the rhs contract).
+        case = self._build_frozen_case()
+        pod_pair, fit, field_fit, rom, pbc = self._parameterized_m1(
+            case, np.random.default_rng(4))
+        mesh, (snap_u, snap_v, _), _ = case
+        initial = pyfvm.VectorField(mesh, "initial")
+        initial.u.to_numpy()[:] = snap_u[0]
+        initial.v.to_numpy()[:] = snap_v[0]
+        rom.set_state_from_fields(initial)
+        rom.advance(0.0, self.DT, 200, bc_refresh=lambda t: pbc(
+            0.8 * np.cos(2.0 * np.pi * t / 0.2)))
+        self.assertTrue(np.isfinite(rom.a_u).all())
+        self.assertTrue(np.isfinite(rom.a_v).all())
 
 
 if __name__ == "__main__":

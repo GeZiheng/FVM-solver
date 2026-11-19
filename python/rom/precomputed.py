@@ -31,10 +31,13 @@ with the joint coefficient state ``a = [a_u, a_v]``:
 
 Everything is sampled in f-space (the rhs values already carry the
 ``M_r^-1`` factor), so the online model needs no mass matrix and no
-pyfvm import.  Scope: fixed boundary conditions only (time-dependent
-BCs would need the boundary term factored out - registered follow-up);
-non-Central convection makes ``f_np`` only piecewise quadratic (a
-warning is emitted).
+pyfvm import.  Scope: fixed boundary conditions, plus a KNOWN boundary
+parameter joined to the quadratic design (``parameter_samples``/
+``parameter_bc`` offline, ``parameter_fn`` online - Phase 6 validation
+cases, the D1 mechanism) and a live ``bc_refresh`` for the pressure
+solves; arbitrary time-dependent BCs still need the boundary term
+factored out (registered follow-up).  Non-Central convection makes
+``f_np`` only piecewise quadratic (a warning is emitted).
 
 Two online consumers (Phase 6.5b/6.5c):
 
@@ -168,8 +171,8 @@ def _fit_quadratic(samples: np.ndarray, values: np.ndarray) -> QuadraticFit:
     return QuadraticFit(q=q, L=L, Q=Q)
 
 
-def make_fit_samples(a_u_snapshots, a_v_snapshots, n_samples=None,
-                     rng=None):
+def make_fit_samples(a_u_snapshots, a_v_snapshots, parameter=None,
+                     n_samples=None, rng=None):
     """Coefficient samples for the quadratic fit: snapshot rows plus
     GRADED small perturbations (0.1/0.2/0.3 per-coordinate sigma).
 
@@ -186,6 +189,12 @@ def make_fit_samples(a_u_snapshots, a_v_snapshots, n_samples=None,
     Args:
         a_u_snapshots, a_v_snapshots: (S, r) coefficient matrices of the
             POD window (the attractor region the ROM will explore).
+        parameter: optional (S,) known-parameter values aligned with the
+            snapshot rows (Phase 6 validation cases: a time-dependent
+            boundary value such as cos(omega t)).  The parameter is
+            perturbed with the same graded scheme and returned as a
+            third array; pass ``parameter_samples``/``parameter_bc`` to
+            the fit functions to include it in the joint design.
         n_samples: total number of samples; default ``2 * n_features``
             of the joint quadratic design (>= that count is required by
             :func:`fit_reduced_operators`).
@@ -193,20 +202,30 @@ def make_fit_samples(a_u_snapshots, a_v_snapshots, n_samples=None,
     """
     a_u = np.asarray(a_u_snapshots, dtype=np.float64)
     a_v = np.asarray(a_v_snapshots, dtype=np.float64)
-    if a_u.ndim != 2 or a_v.shape != a_u.shape:
+    if a_u.ndim != 2 or a_v.ndim != 2 \
+            or a_v.shape[0] != a_u.shape[0]:
         raise ValueError(
-            f"a_u/a_v snapshots must share shape (S, r), got "
+            f"a_u/a_v snapshots must share the row count, got "
             f"{a_u.shape} vs {a_v.shape}")
     rng = rng if rng is not None else np.random.default_rng()
-    r = a_u.shape[1]
-    n_a = 2 * r
+    r_u, r_v = a_u.shape[1], a_v.shape[1]
+    n_a = r_u + r_v + (0 if parameter is None else 1)
     if n_samples is None:
         n_samples = 2 * (1 + n_a + n_a * (n_a + 1) // 2)
     n_base = min(a_u.shape[0], max(1, n_samples // 2))
     pick = rng.choice(a_u.shape[0], size=n_base, replace=False)
     parts_u, parts_v = [a_u[pick]], [a_v[pick]]
+    parts_p = [np.asarray(parameter, dtype=np.float64)[pick]] \
+        if parameter is not None else []
     noise_u = np.maximum(a_u.std(axis=0), 1e-3)
     noise_v = np.maximum(a_v.std(axis=0), 1e-3)
+    if parameter is not None:
+        param = np.asarray(parameter, dtype=np.float64)
+        if param.shape != (a_u.shape[0],):
+            raise ValueError(
+                f"parameter must have shape ({a_u.shape[0]},), got "
+                f"{param.shape}")
+        noise_p = max(float(param.std()), 1e-3)
     scales = (0.1, 0.2, 0.3)
     remaining = n_samples - n_base
     batch = 0
@@ -215,20 +234,27 @@ def make_fit_samples(a_u_snapshots, a_v_snapshots, n_samples=None,
         more = rng.choice(a_u.shape[0], size=take, replace=False)
         scale = scales[min(batch, len(scales) - 1)]
         parts_u.append(a_u[more] + scale * noise_u
-                       * rng.standard_normal((take, r)))
+                       * rng.standard_normal((take, r_u)))
         parts_v.append(a_v[more] + scale * noise_v
-                       * rng.standard_normal((take, r)))
+                       * rng.standard_normal((take, r_v)))
+        if parameter is not None:
+            parts_p.append(param[more] + scale * noise_p
+                           * rng.standard_normal(take))
         remaining -= take
         batch += 1
     out_u = np.vstack(parts_u)[:n_samples]
     out_v = np.vstack(parts_v)[:n_samples]
-    return out_u, out_v
+    if parameter is None:
+        return out_u, out_v
+    out_p = np.concatenate(parts_p)[:n_samples]
+    return out_u, out_v, out_p
 
 
 def projected_pressure_snapshots(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
                                  bc_p, convection, a_u_snapshots,
                                  a_v_snapshots, dt_p, corrections=None,
-                                 solver_config=None):
+                                 solver_config=None, parameter_samples=None,
+                                 parameter_bc=None):
     """Per-state projection-solution pressures at snapshot coefficients
     (Phase 6.5c D3): the pressure basis must span the solutions the
     online ROM actually computes, and FOM (converged) pressure snapshots
@@ -240,15 +266,33 @@ def projected_pressure_snapshots(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
     solved absolute pressure.  Feed the result through
     :func:`rom.pod.pod_decompose` and pass ``(modes, mean)`` as
     ``pressure_basis`` to :func:`fit_reduced_operators`.
+
+    ``parameter_samples``/``parameter_bc`` (Phase 6 validation cases):
+    with a known boundary parameter (e.g. a time-dependent wall value),
+    ``parameter_bc(value)`` is called before each row's projection so
+    the sampled pressures see the same boundary state the online ROM
+    will; the basis then spans the projection solutions across the
+    parameter range.
     """
     import pyfvm as fvm  # lazy
 
     a_u_snapshots = np.asarray(a_u_snapshots, dtype=np.float64)
     a_v_snapshots = np.asarray(a_v_snapshots, dtype=np.float64)
-    if a_u_snapshots.ndim != 2 or a_v_snapshots.shape != a_u_snapshots.shape:
+    if a_u_snapshots.ndim != 2 or a_v_snapshots.ndim != 2 \
+            or a_v_snapshots.shape[0] != a_u_snapshots.shape[0]:
         raise ValueError(
-            f"a_u/a_v snapshots must share shape (S, r), got "
+            f"a_u/a_v snapshots must share the row count, got "
             f"{a_u_snapshots.shape} vs {a_v_snapshots.shape}")
+    if (parameter_samples is None) != (parameter_bc is None):
+        raise ValueError("parameter_samples and parameter_bc must be "
+                         "given together")
+    if parameter_samples is not None:
+        parameter_samples = np.asarray(parameter_samples, dtype=np.float64)
+        if parameter_samples.shape != (a_u_snapshots.shape[0],):
+            raise ValueError(
+                f"parameter_samples must have shape "
+                f"({a_u_snapshots.shape[0]},), got "
+                f"{parameter_samples.shape}")
     modes_u = np.asarray(pod_u.modes, dtype=np.float64)
     n_cells = modes_u.shape[1]
     velocity = fvm.VectorField(mesh, "snap_velocity")
@@ -258,6 +302,8 @@ def projected_pressure_snapshots(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
     cfg = solver_config if solver_config is not None else fvm.SolverConfig()
     opts = corrections if corrections is not None else fvm.CorrectionOptions()
     for i, (a_u, a_v) in enumerate(zip(a_u_snapshots, a_v_snapshots)):
+        if parameter_bc is not None:
+            parameter_bc(parameter_samples[i])
         velocity.u.to_numpy()[:] = pod_u.mean + a_u @ modes_u
         velocity.v.to_numpy()[:] = pod_v.mean + a_v @ np.asarray(
             pod_v.modes, dtype=np.float64)
@@ -277,7 +323,8 @@ def fit_reduced_operators(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
                           pressure_rank=None, pressure_energy=0.9999,
                           pressure_basis=None, corrections=None,
                           holdout_samples=24, holdout_tolerance=1e-10,
-                          rng=None):
+                          rng=None, parameter_samples=None,
+                          parameter_bc=None):
     """Fit the precomputed reduced operators on a fixed-BC case.
 
     Args:
@@ -330,12 +377,30 @@ def fit_reduced_operators(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
     a_u_samples = np.asarray(a_u_samples, dtype=np.float64)
     a_v_samples = np.asarray(a_v_samples, dtype=np.float64)
     if a_u_samples.ndim != 2 or a_u_samples.shape[1] != r_u \
-            or a_v_samples.shape != a_u_samples.shape:
+            or a_v_samples.ndim != 2 \
+            or a_v_samples.shape[0] != a_u_samples.shape[0] \
+            or a_v_samples.shape[1] != r_v:
         raise ValueError(
-            f"a_u/a_v samples must share shape (S, {r_u}), got "
-            f"{a_u_samples.shape} vs {a_v_samples.shape}")
+            f"a_u/a_v samples must be row-aligned with widths "
+            f"({r_u}, {r_v}), got {a_u_samples.shape} vs "
+            f"{a_v_samples.shape}")
+    if (parameter_samples is None) != (parameter_bc is None):
+        raise ValueError("parameter_samples and parameter_bc must be "
+                         "given together")
+    if parameter_samples is not None:
+        parameter_samples = np.asarray(parameter_samples,
+                                       dtype=np.float64)
+        if parameter_samples.shape != (a_u_samples.shape[0],):
+            raise ValueError(
+                f"parameter_samples must have shape "
+                f"({a_u_samples.shape[0]},), got "
+                f"{parameter_samples.shape}")
+        if pressure_basis is None:
+            raise ValueError(
+                "the boundary parameter needs an external pressure_basis "
+                "(the internal affine closure is fixed-BC only)")
 
-    n_a = r_u + r_v
+    n_a = r_u + r_v + (0 if parameter_samples is None else 1)
     n_features = 1 + n_a + n_a * (n_a + 1) // 2
     if a_u_samples.shape[0] < n_features:
         raise ValueError(
@@ -343,23 +408,32 @@ def fit_reduced_operators(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
             "(the joint quadratic design needs at least that many)")
 
     # Sampler: zero-pressure GalerkinRom with an injectable pressure
-    # field (the caller-owned pattern of the oracle hook).
+    # field (the caller-owned pattern of the oracle hook).  With a
+    # boundary parameter, parameter_bc(value) sets the live BC fields
+    # before each assembly - the sampled operator then varies with the
+    # parameter exactly as the online ROM's C++ solves will.
     pressure_field = fvm.ScalarField(mesh, "fit_pressure")
     sampler = GalerkinRom(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
                           convection, corrections=corrections,
                           pressure=pressure_field)
 
-    def sample_all(u_samples, v_samples):
+    def sample_all(u_samples, v_samples, params=None):
         f_u = np.empty((u_samples.shape[0], r_u))
         f_v = np.empty((v_samples.shape[0], r_v))
         pressure_field.to_numpy()[:] = 0.0
         for i, (a_u, a_v) in enumerate(zip(u_samples, v_samples)):
+            if parameter_bc is not None:
+                parameter_bc(params[i])
             f_u[i], f_v[i] = sampler.rhs(0.0, a_u, a_v)
         return f_u, f_v
 
     # -- quadratic (zero-pressure) part ----------------------------------
-    joint_samples = np.hstack((a_u_samples, a_v_samples))
-    f_u, f_v = sample_all(a_u_samples, a_v_samples)
+    if parameter_samples is None:
+        joint_samples = np.hstack((a_u_samples, a_v_samples))
+    else:
+        joint_samples = np.hstack((a_u_samples, a_v_samples,
+                                   parameter_samples[:, None]))
+    f_u, f_v = sample_all(a_u_samples, a_v_samples, parameter_samples)
     quad_u = _fit_quadratic(joint_samples, f_u)
     quad_v = _fit_quadratic(joint_samples, f_v)
 
@@ -370,15 +444,30 @@ def fit_reduced_operators(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
     noise_v = np.maximum(a_v_samples.std(axis=0), 1e-3) * 0.25
     hold_u = a_u_samples[pick] + noise_u * rng.standard_normal((h_base, r_u))
     hold_v = a_v_samples[pick] + noise_v * rng.standard_normal((h_base, r_v))
-    h_ref_u, h_ref_v = sample_all(hold_u, hold_v)
+    if parameter_samples is None:
+        hold_p = None
+    else:
+        noise_p = max(float(parameter_samples.std()), 1e-3) * 0.25
+        hold_p = parameter_samples[pick] + noise_p * rng.standard_normal(
+            h_base)
+    h_ref_u, h_ref_v = sample_all(hold_u, hold_v, hold_p)
+    # Per-output reference scale over the holdout rows: a per-row norm
+    # makes a vanishing component (e.g. the noise-level v of the Stokes
+    # case) an arbitrarily small denominator and floors the check at its
+    # roundoff; the max-over-rows scale keeps the machine-precision
+    # non-quadraticity detector without that artifact.
+    scale_u = max(float(np.linalg.norm(h_ref_u, axis=1).max()), 1e-30)
+    scale_v = max(float(np.linalg.norm(h_ref_v, axis=1).max()), 1e-30)
     holdout_residual = 0.0
     for i in range(h_base):
         a = np.concatenate((hold_u[i], hold_v[i]))
-        for quad, ref in ((quad_u, h_ref_u[i]), (quad_v, h_ref_v[i])):
-            denom = max(float(np.linalg.norm(ref)), 1e-30)
+        if hold_p is not None:
+            a = np.append(a, hold_p[i])
+        for quad, ref, scale in ((quad_u, h_ref_u[i], scale_u),
+                                 (quad_v, h_ref_v[i], scale_v)):
             holdout_residual = max(
                 holdout_residual,
-                float(np.linalg.norm(quad(a) - ref)) / denom)
+                float(np.linalg.norm(quad(a) - ref)) / scale)
     if holdout_residual > holdout_tolerance:
         raise RuntimeError(
             "quadratic fit failed the held-out exactness check "
@@ -456,9 +545,14 @@ def fit_reduced_operators(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
     if rank_p > 0:
         # Per-mode reduced sources via the b-difference trick, evaluated
         # at the mean-field state a_ref = 0 (any state gives the same
-        # difference up to rounding: b^np is pressure-independent).
+        # difference up to rounding: b^np is pressure-independent).  With
+        # a boundary parameter the difference is parameter-independent
+        # too (b^np's parameter dependence cancels), so one fixed
+        # parameter value pins the BC state for the whole block.
         a_ref_u = np.zeros(r_u)
         a_ref_v = np.zeros(r_v)
+        if parameter_bc is not None:
+            parameter_bc(parameter_samples[0])
         pressure_field.to_numpy()[:] = 0.0
         ref_u, ref_v = sampler.rhs(0.0, a_ref_u, a_ref_v)
         for k in range(rank_p):
@@ -538,13 +632,14 @@ class RhieChowFieldFit:
     diag_v: QuadraticFit
     residual_u: QuadraticFit        # r_np of the u equation
     residual_v: QuadraticFit
-    holdout_residual: float = np.inf  # max per-cell relative field error
+    holdout_residual: float = np.inf  # max per-component-scaled field error
 
 
 def fit_rhie_chow_fields(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
                          convection, a_u_samples, a_v_samples,
                          corrections=None, holdout_samples=8,
-                         holdout_tolerance=1e-10, rng=None):
+                         holdout_tolerance=1e-10, rng=None,
+                         parameter_samples=None, parameter_bc=None):
     """Fit the Rhie-Chow cell-field coefficients on a fixed-BC case.
 
     Samples the public assembly chain (``compute_mass_flux`` +
@@ -552,9 +647,15 @@ def fit_rhie_chow_fields(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
     same graded coefficient samples the reduced fit uses; the per-cell
     diagonal is affine and the per-cell steady residual quadratic, both
     recovered by least squares and verified on perturbed held-out states
-    (max per-cell relative error below ``holdout_tolerance`` or
-    RuntimeError).  ``r_np`` needs the full joint quadratic sample count,
+    (per-component-scaled relative error below ``holdout_tolerance``
+    or RuntimeError; the scale is each component's peak over the
+    holdout set).  ``r_np`` needs the full joint quadratic sample count,
     which :func:`make_fit_samples` produces by default.
+
+    ``parameter_samples``/``parameter_bc``: with a known boundary
+    parameter, ``parameter_bc(value)`` is called before each sampled
+    assembly and the parameter joins the quadratic design (the diagonal
+    stays affine, the residual stays quadratic in the augmented vector).
     """
     import pyfvm as fvm  # lazy, like every sampler path in this module
 
@@ -564,7 +665,19 @@ def fit_rhie_chow_fields(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
     n_cells = modes_u.shape[1]
     a_u_samples = np.asarray(a_u_samples, dtype=np.float64)
     a_v_samples = np.asarray(a_v_samples, dtype=np.float64)
-    n_a = a_u_samples.shape[1] + modes_v.shape[0]
+    if (parameter_samples is None) != (parameter_bc is None):
+        raise ValueError("parameter_samples and parameter_bc must be "
+                         "given together")
+    if parameter_samples is not None:
+        parameter_samples = np.asarray(parameter_samples,
+                                       dtype=np.float64)
+        if parameter_samples.shape != (a_u_samples.shape[0],):
+            raise ValueError(
+                f"parameter_samples must have shape "
+                f"({a_u_samples.shape[0]},), got "
+                f"{parameter_samples.shape}")
+    n_a = a_u_samples.shape[1] + modes_v.shape[0] \
+        + (0 if parameter_samples is None else 1)
     n_features = 1 + n_a + n_a * (n_a + 1) // 2
     if a_u_samples.shape[0] < n_features:
         raise ValueError(
@@ -575,11 +688,13 @@ def fit_rhie_chow_fields(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
     flux = fvm.FaceFluxField(mesh, "phi")
     zero_pressure = fvm.ScalarField(mesh, "fit_zero_pressure")
 
-    def sample_fields(u_samples, v_samples):
+    def sample_fields(u_samples, v_samples, params=None):
         n = u_samples.shape[0]
         diag = [np.empty((n, n_cells)), np.empty((n, n_cells))]
         residual = [np.empty((n, n_cells)), np.empty((n, n_cells))]
         for i, (a_u, a_v) in enumerate(zip(u_samples, v_samples)):
+            if parameter_bc is not None:
+                parameter_bc(params[i])
             u = pod_u.mean + a_u @ modes_u
             v = pod_v.mean + a_v @ modes_v
             velocity.u.to_numpy()[:] = u
@@ -596,8 +711,13 @@ def fit_rhie_chow_fields(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
                 residual[component][i] = s.rhs_no_pressure - au
         return diag, residual
 
-    joint = np.hstack((a_u_samples, a_v_samples))
-    diag_vals, res_vals = sample_fields(a_u_samples, a_v_samples)
+    if parameter_samples is None:
+        joint = np.hstack((a_u_samples, a_v_samples))
+    else:
+        joint = np.hstack((a_u_samples, a_v_samples,
+                           parameter_samples[:, None]))
+    diag_vals, res_vals = sample_fields(a_u_samples, a_v_samples,
+                                        parameter_samples)
     diag_fits = [_fit_quadratic(joint, diag_vals[c]) for c in (0, 1)]
     res_fits = [_fit_quadratic(joint, res_vals[c]) for c in (0, 1)]
 
@@ -611,18 +731,33 @@ def fit_rhie_chow_fields(mesh, mu, rho, pod_u, pod_v, bc_u, bc_v,
                                                                 r_u_s))
     hold_v = a_v_samples[pick] + noise_v * rng.standard_normal((h_base,
                                                                 r_v_s))
-    d_ref, r_ref = sample_fields(hold_u, hold_v)
+    if parameter_samples is None:
+        hold_p = None
+    else:
+        noise_p = max(float(parameter_samples.std()), 1e-3) * 0.25
+        hold_p = parameter_samples[pick] + noise_p * rng.standard_normal(
+            h_base)
+    d_ref, r_ref = sample_fields(hold_u, hold_v, hold_p)
+    # Per-component reference scale (max over cells AND holdout rows):
+    # a per-cell denominator lets a noise component with no physical
+    # dynamics (e.g. the Stokes v) floor the machine-precision detector
+    # at arbitrary relative error; the per-component scale keeps exact
+    # fits at machine precision (their local errors already are) while
+    # a vanishing component divides by its own peak.
+    d_scale = [max(float(np.abs(d_ref[c]).max()), 1e-30) for c in (0, 1)]
+    r_scale = [max(float(np.abs(r_ref[c]).max()), 1e-30) for c in (0, 1)]
     holdout_residual = 0.0
     for i in range(h_base):
         a = np.concatenate((hold_u[i], hold_v[i]))
-        for fit, ref in ((diag_fits[0], d_ref[0][i]),
-                         (diag_fits[1], d_ref[1][i]),
-                         (res_fits[0], r_ref[0][i]),
-                         (res_fits[1], r_ref[1][i])):
-            denom = max(float(np.abs(ref).max()), 1e-30)
+        if hold_p is not None:
+            a = np.append(a, hold_p[i])
+        for fitter, ref, scale in ((diag_fits[0], d_ref[0][i], d_scale[0]),
+                                   (diag_fits[1], d_ref[1][i], d_scale[1]),
+                                   (res_fits[0], r_ref[0][i], r_scale[0]),
+                                   (res_fits[1], r_ref[1][i], r_scale[1])):
             holdout_residual = max(
                 holdout_residual,
-                float(np.abs(fit(a) - ref).max()) / denom)
+                float(np.abs(fitter(a) - ref).max()) / scale)
     if holdout_residual > holdout_tolerance:
         raise RuntimeError(
             "Rhie-Chow field fit failed the held-out exactness check "
@@ -645,10 +780,17 @@ class PrecomputedGalerkinRom:
     The state and POD machinery mirror :class:`rom.galerkin.GalerkinRom`;
     the right-hand side is the fitted quadratic + affine pressure
     closure, so one RK4 stage costs O(r^2)/O(r^3) numpy work with no
-    FOM calls.  Fixed-BC cases only (``advance`` rejects ``bc_refresh``).
+    FOM calls.  Fixed-BC operators unless ``parameter_fn`` is given: a
+    known boundary parameter (a time-dependent wall value) is evaluated
+    at every RK4 stage time and appended to the coefficient vector the
+    fitted operators consume (Phase 6 validation cases; the fits must
+    have been built with ``parameter_samples``/``parameter_bc``).
+    ``advance`` also accepts ``bc_refresh`` so the live BC fields track
+    the parameter - :class:`ReducedPressureRom` pressure solves read
+    them.
     """
 
-    def __init__(self, fit: ReducedOperatorFit):
+    def __init__(self, fit: ReducedOperatorFit, parameter_fn=None):
         self.fit = fit
         self.modes_u = fit.modes_u
         self.modes_v = fit.modes_v
@@ -656,6 +798,7 @@ class PrecomputedGalerkinRom:
         self.mean_v = fit.mean_v
         self.a_u = np.zeros(fit.modes_u.shape[0])
         self.a_v = np.zeros(fit.modes_v.shape[0])
+        self._parameter_fn = parameter_fn
 
     # -- state ----------------------------------------------------------------
 
@@ -674,41 +817,65 @@ class PrecomputedGalerkinRom:
 
     # -- time integration -----------------------------------------------------
 
-    def rhs(self, a_u, a_v):
-        """Fitted reduced right-hand side (no time dependence)."""
+    def _augmented_state(self, a_u, a_v, parameter):
+        """Coefficient vector the fitted operators consume: the joint
+        state plus the stage-time boundary parameter when the ROM was
+        built with ``parameter_fn`` (dimension-checked against the
+        fit)."""
         a = np.concatenate((a_u, a_v))
+        if parameter is None:
+            return a
+        a = np.append(a, parameter)
+        n_a = self.fit.quad_u.L.shape[1]
+        if a.size != n_a:
+            raise ValueError(
+                f"the fit consumes {n_a} coefficients but got {a.size} "
+                "(parameter_fn given for a fit built without a "
+                "parameter column?)")
+        return a
+
+    def rhs(self, a_u, a_v, parameter=None):
+        """Fitted reduced right-hand side (stage-time parameter aware)."""
+        a = self._augmented_state(a_u, a_v, parameter)
         f_u = self.fit.quad_u(a) + self.fit.h0_u + self.fit.H_u @ a
         f_v = self.fit.quad_v(a) + self.fit.h0_v + self.fit.H_v @ a
         return f_u, f_v
 
-    def _rk4_step(self, dt):
+    def _rk4_step(self, dt, t=None, bc_refresh=None):
+        def stage(fraction):
+            t_stage = t if t is None else t + fraction * dt
+            if bc_refresh is not None:
+                bc_refresh(t_stage)
+            if self._parameter_fn is None:
+                return None
+            return self._parameter_fn(t_stage)
+
         a_u, a_v = self.a_u, self.a_v
-        k1u, k1v = self.rhs(a_u, a_v)
-        k2u, k2v = self.rhs(a_u + 0.5 * dt * k1u, a_v + 0.5 * dt * k1v)
-        k3u, k3v = self.rhs(a_u + 0.5 * dt * k2u, a_v + 0.5 * dt * k2v)
-        k4u, k4v = self.rhs(a_u + dt * k3u, a_v + dt * k3v)
+        k1u, k1v = self.rhs(a_u, a_v, stage(0.0))
+        k2u, k2v = self.rhs(a_u + 0.5 * dt * k1u, a_v + 0.5 * dt * k1v,
+                            stage(0.5))
+        k3u, k3v = self.rhs(a_u + 0.5 * dt * k2u, a_v + 0.5 * dt * k2v,
+                            stage(0.5))
+        k4u, k4v = self.rhs(a_u + dt * k3u, a_v + dt * k3v, stage(1.0))
         self.a_u = a_u + dt / 6.0 * (k1u + 2.0 * k2u + 2.0 * k3u + k4u)
         self.a_v = a_v + dt / 6.0 * (k1v + 2.0 * k2v + 2.0 * k3v + k4v)
 
     def advance(self, t0, dt, n_steps, bc_refresh=None, record_every=0):
         """Advance ``n_steps`` explicit RK4 steps (GalerkinRom semantics).
 
-        ``t0`` only labels the recorded times - the fitted operators
-        carry no time dependence, so ``bc_refresh`` must be None (fixed
-        boundary conditions are the scope of Phase 6.5b).
+        ``bc_refresh(t)`` runs at every RK4 stage time so the live BC
+        fields track the boundary parameter; with ``parameter_fn`` set
+        the fitted operators additionally consume the parameter value
+        (the fits must have been built for it).  Without either hook
+        the operators are the fixed-BC Phase 6.5b scope.
         """
-        if bc_refresh is not None:
-            raise ValueError(
-                "PrecomputedGalerkinRom supports fixed boundary "
-                "conditions only (the fitted operators carry no time "
-                "dependence); pass bc_refresh=None")
         if dt <= 0.0:
             raise ValueError(f"dt must be positive, got {dt}")
         if n_steps < 1:
             raise ValueError(f"n_steps must be >= 1, got {n_steps}")
         times, hist_u, hist_v = [], [], []
         for step in range(n_steps):
-            self._rk4_step(dt)
+            self._rk4_step(dt, t0 + step * dt, bc_refresh)
             if record_every > 0 and (step + 1) % record_every == 0:
                 times.append(t0 + (step + 1) * dt)
                 hist_u.append(self.a_u.copy())
@@ -757,10 +924,10 @@ class ReducedPressureRom(PrecomputedGalerkinRom):
 
     def __init__(self, fit, field_fit, mesh, rho, bc_u, bc_v, bc_p,
                  dt_p, solver_config=None, corrections=None,
-                 reduced_solve=False):
+                 reduced_solve=False, parameter_fn=None):
         import pyfvm as fvm  # lazy: the online path needs the binding
 
-        super().__init__(fit)
+        super().__init__(fit, parameter_fn=parameter_fn)
         if dt_p is None or dt_p <= 0.0:
             raise ValueError(
                 f"dt_p must be positive (transient diagonal), got {dt_p}")
@@ -791,15 +958,17 @@ class ReducedPressureRom(PrecomputedGalerkinRom):
         self._projection_cache = None
         self.last_projection = None
 
-    def rhs(self, a_u, a_v):
+    def rhs(self, a_u, a_v, parameter=None):
         """Reduced right-hand side with a per-stage pressure solve (full
         FOM solve by default; reduced basis projection with
-        ``reduced_solve=True``)."""
+        ``reduced_solve=True``); the optional stage-time boundary
+        parameter is appended to the coefficient vector the fitted
+        operators consume."""
         fvm = self._fvm
         fields = self._field_fit
         u = self.mean_u + a_u @ self.modes_u
         v = self.mean_v + a_v @ self.modes_v
-        a = np.concatenate((a_u, a_v))
+        a = self._augmented_state(a_u, a_v, parameter)
         diag_u = fields.diag_u(a) + self._transient
         diag_v = fields.diag_v(a) + self._transient
         r_u = fields.residual_u(a)
